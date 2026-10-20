@@ -3,24 +3,10 @@ module Main (main) where
 import Control.Monad (unless)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, missionSelectionConflict, optionsParserInfo)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
-import Kanban.Mission
-  ( MissionId (..),
-    emitMissionPassReport,
-    missionChildResultOf,
-    missionRunReportLines,
-    missionRunSucceeded,
-    missionStartRefusalMessage,
-    runMissionMode,
-    runMissionStepMode,
-    missionStepReportLines,
-    missionStepSucceeded,
-    runMissionSchedulerCommand,
-    writeMissionChildResult,
-  )
 import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
 import Kanban.Ping (PingMode (..), pingBrandRefusal, pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
@@ -30,7 +16,7 @@ import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Kanban.Worker (runWorker)
 import Options.Applicative (execParser)
-import System.Exit (ExitCode (..), exitFailure, exitWith)
+import System.Exit (exitFailure, exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout)
 
 main :: IO ()
@@ -48,16 +34,6 @@ main = do
         hPutStrLn stderr ("kanban: " <> Text.unpack message)
         exitFailure
       Right brand -> pure (Just brand)
-  -- Beside the malformed --ping refusal and for the same reason: an invocation
-  -- naming one mission and also asking for whichever missions are runnable has
-  -- said two incompatible things, and resolving it by selection order would
-  -- start work the operator did not ask for. Reported as the conflict it is,
-  -- whatever else the invocation names.
-  case missionSelectionConflict parsedOptions of
-    Just message -> do
-      hPutStrLn stderr ("kanban: " <> Text.unpack message)
-      exitFailure
-    Nothing -> pure ()
   -- Selected by 'launchMode' rather than by a cascade of guards here, so that
   -- the one decision about which invocations become a board -- and therefore
   -- which of them take the repository's lease -- lives where the test suite
@@ -179,81 +155,6 @@ main = do
     -- mode ran. It is written out rather than folded into the dashboard case
     -- so that a ping can never fall through and open a board.
     PingQueryMode -> pure ()
-    -- Configuration and a repository, and no board. The mission runner
-    -- resolves the same identity the dashboard does -- a mission store is
-    -- repository-qualified, and a mission belonging to another repository is
-    -- refused rather than adopted -- but it takes no board lease, because it
-    -- draws no board and writes no durable `gh` record to serialise against
-    -- (§15). It advances exactly the mission it was named until that mission
-    -- is terminal, paused, or blocked, and then exits.
-    MissionMode mission -> do
-      absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
-      let options = parsedOptions {optionConfig = absoluteConfigPath}
-      configResult <- loadRawConfig options.optionConfig
-      case configResult of
-        Left message -> do
-          hPutStrLn stderr ("kanban: " <> Text.unpack message)
-          exitFailure
-        Right (rawConfig, warnings) -> do
-          mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
-          repositoryResult <- resolveRepository rawConfig.rawRemoteName options.optionPath options.optionRepo
-          case repositoryResult of
-            Left message -> do
-              hPutStrLn stderr ("kanban: " <> Text.unpack message)
-              exitFailure
-            Right repository -> do
-              let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
-                  resolvedConfig = resolveConfig ownerName rawConfig
-              case options.optionMissionResult of
-                -- A scheduler's child: one step, and a typed account of it.
-                -- Written before this process decides how to exit, because a
-                -- scheduler needs the refusal the exit status below flattens
-                -- away, and a pass advances each mission by at most one
-                -- transition rather than waiting on any of them.
-                Just resultPath -> do
-                  outcome <- runMissionStepMode options resolvedConfig repository (Text.pack mission)
-                  written <-
-                    writeMissionChildResult
-                      resultPath
-                      ( missionChildResultOf
-                          (maybe "" Text.pack options.optionMissionInvocation)
-                          ownerName
-                          (MissionId (Text.strip (Text.pack mission)))
-                          outcome
-                      )
-                  case written of
-                    Left detail -> hPutStrLn stderr ("kanban: could not write the mission result document: " <> Text.unpack detail)
-                    Right () -> pure ()
-                  case outcome of
-                    Left refusal -> do
-                      hPutStrLn stderr ("kanban: " <> Text.unpack (missionStartRefusalMessage refusal))
-                      exitFailure
-                    Right report -> do
-                      mapM_ TextIO.putStrLn (missionStepReportLines report)
-                      unless (missionStepSucceeded report) exitFailure
-                -- An operator's own run, exactly the run it always was.
-                Nothing -> do
-                  outcome <- runMissionMode options resolvedConfig repository (Text.pack mission)
-                  case outcome of
-                    Left refusal -> do
-                      hPutStrLn stderr ("kanban: " <> Text.unpack (missionStartRefusalMessage refusal))
-                      exitFailure
-                    Right report -> do
-                      mapM_ TextIO.putStrLn (missionRunReportLines report)
-                      unless (missionRunSucceeded report) exitFailure
-    -- The repository scheduler: one bounded pass over this repository's
-    -- runnable missions. Exactly one JSON document goes to stdout and every
-    -- word of narration goes to stderr, because the supervisor above this
-    -- process parses the first and shows the second.
-    -- Setup included, which is why there is nothing here to read: a
-    -- configuration that will not load and a store that will not open leave
-    -- this mode through the same document every other pass leaves through,
-    -- and 'runMissionSchedulerCommand' is where the suite can see that
-    -- happen. This module is not built by @test-suite kanban-test@.
-    MissionSchedulerMode -> do
-      (report, status) <- runMissionSchedulerCommand parsedOptions
-      emitMissionPassReport report
-      exitWith (if status == 0 then ExitSuccess else ExitFailure status)
     DashboardMode -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

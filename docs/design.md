@@ -268,8 +268,8 @@ order would silently start work that was not asked for.
 `--mission-scheduler` advances this repository's runnable missions for one
 bounded pass and then exits. It is not a daemon: repeating passes and deciding
 how long to wait between them belong to the supervisor above it
-(`tools/mission_runner_service.py`), which runs either as a job installed per
-repository by `tools/install_mission_runner.py` or in the foreground, and which
+(the mission runner service script, which this release no longer ships), which ran either as a job installed per
+repository by its installer or in the foreground, and which
 excludes the two from each other through one per-identity run lock. Kanban
 discovers that job, decodes the status document and incidents it publishes,
 starts and stops it, and replays a mission's own durable events from a cursor
@@ -3931,9 +3931,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   way and discovered on the same terms, and read on them too — but with none of
   the dashboard *lifecycle* above: no optimistic transition state, no busy
   flag, and no poll of its own, for the reason the bullets after this one give.
-  `tools/install_mission_runner.py` loads one stopped job per
+  the mission runner installer script loaded one stopped job per
   canonical GitHub repository in a `mission-runner` namespace of its own,
-  through `tools/mission_runner_service.py`'s own install, start, stop, and
+  through the service script's own install, start, stop, and
   uninstall operations rather than by spawning the copy it installs, and it
   never starts the service. A start of one of those jobs writes a fresh token
   into the definition it kicks and is confirmed only by a live status document
@@ -4206,7 +4206,7 @@ Defaults:
   because every name inside the store is a mission's, and its owner and name
   are folded to lower case, so every spelling of one repository shares it.
 - The mission runner's runtime documents are the unattended supervisor's, not
-  Kanban's: `tools/mission_runner_service.py` writes one status document and
+  Kanban's: the mission runner service script wrote one status document and
   one incident directory per canonical repository, under the account's own
   service root — `~/Library/Application Support/kanban/mission-runner` on
   macOS, `$XDG_DATA_HOME/kanban/mission-runner` when that names an absolute
@@ -5004,10 +5004,10 @@ every runnable mission by one transition per bounded pass, skipping any whose
 advancement lease is held, observes whatever attention is outstanding anywhere in the
 repository, notifies about each waiting episode at most once through a command
 the operator configured, and writes one machine-readable pass report;
-`tools/mission_runner_service.py` repeats those passes for one repository,
+the mission runner service script repeats those passes for one repository,
 publishes a versioned status document and opens an incident on a failed pass,
 and refuses a second wrapper for the same repository. That wrapper is now a
-managed job as well: `tools/install_mission_runner.py` installs one stopped job
+managed job as well: its installer script installs one stopped job
 per canonical GitHub repository in a `mission-runner` namespace of its own,
 writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
 `Kanban.MissionRunnerService` discovers that job, decodes its status document

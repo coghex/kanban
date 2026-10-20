@@ -45,8 +45,7 @@
 -- the fact that it fetches an item rather than a page changes nothing about
 -- what a hung one costs. Both callers run it synchronously on a thread that
 -- does other work between reads, so an unbounded one does not merely delay
--- this answer: it stops the mission runner draining its console commands and
--- holds a worker's turn open indefinitely.
+-- this answer: it holds a worker's turn open indefinitely.
 --
 -- Interrupting it unwinds through 'Kanban.GitHub.Run.runGh'\'s own verified
 -- cleanup, exactly as an interrupted page does, so the abandoned group is

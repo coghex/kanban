@@ -112,12 +112,12 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 #
 # Issue #444 moved the drainer's and the issue-review backend's discovery
 # record locations out of Drainer.hs and Review/Canonical.hs into
-# Kanban.ManagedPaths, and issue #667 added the mission runner's beside them,
-# so that module is the only one under src/ that spells any of the three now.
+# Kanban.ManagedPaths, so that module is the only one under src/ that spells
+# either of the two now.
 # It is listed for
 # the home-relative reconciliation below rather than for an executable it
 # invokes -- it invokes none -- and a rewrite that took it back off this
-# list would leave the six `personal-path` tokens of MANAGED_RECORD_TOKENS
+# list would leave the four `personal-path` tokens of MANAGED_RECORD_TOKENS
 # scanned in no file at all,
 # which is what test_managed_record_locations_reach_the_home_path_scan
 # refuses.
@@ -127,15 +127,6 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # discovery record's location, and it resolves `launchctl` and `systemctl` for
 # its host-backend detection. What it contributes to each is pinned by
 # test_approval_service_dashboard_reaches_the_haskell_scans.
-#
-# Issue #668 added Kanban.MissionRunnerService, §2.12's in-app consumer, for
-# the executable half of that reconciliation alone: it resolves the same two
-# service managers and reads a launchd job through `/usr/bin/plutil`, and it
-# spells no managed location at all — its record's is Kanban.ManagedPaths'
-# answer. Both halves of that are pinned by
-# test_mission_runner_dashboard_reaches_the_haskell_scans, because a module
-# that had quietly started building a location of its own would otherwise
-# join the home-relative scan without anybody deciding to.
 SURFACE_FILES = [
     "src/Kanban/ProviderAdapter.hs",
     "src/Kanban/Preflight/Environment.hs",
@@ -149,7 +140,6 @@ SURFACE_FILES = [
     "src/Kanban/Drainer.hs",
     "src/Kanban/ManagedPaths.hs",
     "src/Kanban/ApprovalService.hs",
-    "src/Kanban/MissionRunnerService.hs",
     "src/Kanban/Process.hs",
 ]
 
@@ -170,23 +160,6 @@ APPROVAL_SERVICE_DASHBOARD_SEGMENTS = {
 }
 APPROVAL_SERVICE_DASHBOARD_EXECUTABLES = {"launchctl", "systemctl"}
 APPROVAL_SERVICE_DASHBOARD_RECORD_ROW = "issue-approval-discovery-record"
-
-# The in-app mission runner dashboard (docs/agent-workflow-contract.md §2.12)
-# and what the two Haskell extractors recover from it. Stated for the reason
-# the block above is, with one difference that is itself the assertion: this
-# module resolves its record through Kanban.ManagedPaths and spells no managed
-# location, so the home-relative extractor must recover *nothing* from it.
-# Requirement 2 of issue #668 is exactly that, and an empty expectation is only
-# worth asserting beside the non-empty executable set below, which is what
-# proves the file is being read at all.
-MISSION_RUNNER_DASHBOARD_FILE = "src/Kanban/MissionRunnerService.hs"
-MISSION_RUNNER_DASHBOARD_SEGMENTS = set()
-MISSION_RUNNER_DASHBOARD_EXECUTABLES = {"launchctl", "systemctl"}
-# The rows this module grounds a token of. `plutil-cli` joins the two service
-# managers because a launchd definition is read through `/usr/bin/plutil`
-# exactly as the other two dashboards read theirs; there is no record row,
-# because there is no record location here to ground one in.
-MISSION_RUNNER_DASHBOARD_ROWS = ("plutil-cli", "launchctl-cli", "systemctl-cli")
 
 # The modules under src/ that call one of the functions the surface comment
 # above enumerates and are deliberately not scanned. Pinned so the comment's
@@ -286,10 +259,8 @@ MANAGED_RECORD_SURFACE_FILE = "src/Kanban/ManagedPaths.hs"
 MANAGED_RECORD_TOKENS = {
     "/Library/Application Support/kanban/issue-review/config.json",
     "/Library/Application Support/kanban/pr-drainer/config.json",
-    "/Library/Application Support/kanban/mission-runner/config.json",
     "/.local/share/kanban/issue-review/config.json",
     "/.local/share/kanban/pr-drainer/config.json",
-    "/.local/share/kanban/mission-runner/config.json",
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
@@ -315,9 +286,8 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
 )
 
 # The Python services' own owning sources — the issue approval service's
-# (docs/agent-workflow-contract.md §2.8) and the mission runner's (§2.12) —
-# scanned for the home-relative paths they build rather than for the external
-# commands they spawn; those are already covered by the discovered tools/
+# (docs/agent-workflow-contract.md §2.8) — scanned for the home-relative paths
+# they build rather than for the external commands they spawn; those are already covered by the discovered tools/
 # surface below. They need an extractor of their own because they are Python:
 # none of them spells a managed location as one literal the way the Haskell
 # surface does, and none of them is markdown, so neither existing extractor
@@ -332,18 +302,16 @@ PYTHON_SERVICE_SURFACE_FILES = [
     "tools/approve_issues_service.py",
     "tools/install_issue_approval.py",
     "tools/service_manager.py",
-    "tools/mission_runner_service.py",
-    "tools/install_mission_runner.py",
 ]
 
-# What the Python extractor actually recovers from each of the five, pinned the
+# What the Python extractor actually recovers from each of the three, pinned the
 # way the plugin surfaces' command sets are: the completeness loop below
 # reports no undeclared segment for a module the extractor recovers nothing
-# from, for the same reason it reports none for a module it never opened. Each
-# installer's empty set is a pin rather than an omission — both expand whatever
-# `--install-dir` or `--config` they are given and build no managed location of
-# their own — so a future edit that made one construct one would have to
-# declare it here as well as in the manifest.
+# from, for the same reason it reports none for a module it never opened. The
+# installer's empty set is a pin rather than an omission — it expands whatever
+# `--install-dir` or `--config` it is given and builds no managed location of
+# its own — so a future edit that made it construct one would have to declare it
+# here as well as in the manifest.
 PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     "tools/approve_issues_service.py": {
         # The service root, and each tree the controller composes from it
@@ -372,29 +340,6 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
         "/.config",
         "/.config/systemd/user",
     },
-    # The mission runner's service root and log root in both platform
-    # spellings, the two trees it composes from that root through a nullary
-    # helper each, the one home-relative entry of the fixed PATH an installed
-    # job runs with, and the conventional XDG config base its job definition
-    # pins so the child reads the configuration this installation resolved its
-    # identity through. Only one of a helper's returns is followed —
-    # the extractor takes the first that resolves -- so the `~/Library` runtime
-    # and lock spellings are not recovered here and are grounded in the
-    # module's docstrings instead, as docs/agent-workflow-contract.md §4
-    # records; the record path is composed from the install directory and a
-    # named constant, so it carries no literal for the extractor either and is
-    # grounded the same way.
-    "tools/mission_runner_service.py": {
-        "/Library/Application Support/kanban/mission-runner",
-        "/.local/share/kanban/mission-runner",
-        "/.local/share/kanban/mission-runner/runtime",
-        "/.local/share/kanban/mission-runner/locks",
-        "/Library/Logs/kanban/mission-runner",
-        "/.local/state/kanban/mission-runner",
-        "/.local/bin",
-        "/.config",
-    },
-    "tools/install_mission_runner.py": set(),
 }
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
@@ -2456,66 +2401,6 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
         )
 
-    def test_mission_runner_dashboard_reaches_the_haskell_scans(self):
-        # Requirement 12 of issue #668, and the same reasoning
-        # test_approval_service_dashboard_reaches_the_haskell_scans records:
-        # being listed is what puts the module inside the completeness loops,
-        # and what it contributes to each loop is pinned here, because a loop
-        # over a module the extractors recover nothing from reports no
-        # undeclared segment and no undocumented command for the same reason a
-        # loop over nothing does.
-        self.assertIn(
-            MISSION_RUNNER_DASHBOARD_FILE,
-            SURFACE_FILES,
-            f"{MISSION_RUNNER_DASHBOARD_FILE} resolves both service managers "
-            "and reads a launchd job, so it must be scanned",
-        )
-        content = (REPO_ROOT / MISSION_RUNNER_DASHBOARD_FILE).read_text(
-            encoding="utf-8"
-        )
-        self.assertEqual(
-            discovered_executables(content),
-            MISSION_RUNNER_DASHBOARD_EXECUTABLES,
-            "the executable extractor no longer recovers exactly the two "
-            f"service managers from {MISSION_RUNNER_DASHBOARD_FILE}",
-        )
-        # Requirement 2: this module obtains its record's location from
-        # Kanban.ManagedPaths rather than spelling one, which is what keeps it
-        # out of the home-relative reconciliation entirely. A location built
-        # here would need a personal-path row of its own -- and a second
-        # spelling of a location that already has one.
-        self.assertEqual(
-            home_relative_segments(content),
-            MISSION_RUNNER_DASHBOARD_SEGMENTS,
-            f"{MISSION_RUNNER_DASHBOARD_FILE} now builds a home-relative path "
-            "of its own; it is supposed to ask Kanban.ManagedPaths instead",
-        )
-        personal_tokens = [
-            row["token"] for row in self.manifest if row["kind"] == "personal-path"
-        ]
-        self.assertEqual(
-            [],
-            undeclared_home_segments(
-                MISSION_RUNNER_DASHBOARD_FILE, content, personal_tokens
-            ),
-        )
-
-    def test_the_mission_runner_dashboard_is_declared_by_every_row_it_grounds(self):
-        # The other direction, exactly as the approval dashboard's own pin
-        # below: the manifest naming this module as a file its token is
-        # grounded in, which
-        # test_manifest_entries_are_grounded_in_their_declared_files then holds
-        # the module to.
-        rows = {row["id"]: row for row in self.manifest}
-        for row_id in MISSION_RUNNER_DASHBOARD_ROWS:
-            with self.subTest(row=row_id):
-                self.assertIn(
-                    MISSION_RUNNER_DASHBOARD_FILE,
-                    rows[row_id]["files"],
-                    f"{row_id} is grounded in {MISSION_RUNNER_DASHBOARD_FILE} "
-                    "and must declare it",
-                )
-
     def test_the_dashboard_is_declared_by_every_row_it_grounds(self):
         # Requirements 3 and 5. Being scanned documents what the module uses;
         # these rows are the other direction — the manifest naming the module
@@ -3447,18 +3332,14 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
         # already have rows: the whole eligible surface spawns exactly these
-        # eight, and only launchctl was missing before issue #149 — systemctl
-        # joined it with the systemd backend in issue #329, `ps` with the
-        # mission runner in issue #666, where the controller reads a recorded
-        # runner's start time to tell it from whatever later inherits its
-        # process identifier, and `/bin/sh` in issue #744, as the gate every
-        # scheduler pass waits at until the controller has recorded it.
+        # six, and only launchctl was missing before issue #149 — systemctl
+        # joined it with the systemd backend in issue #329.
         found = set()
         for path in tool_surface_files():
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
         self.assertEqual(
             found,
-            {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps", "/bin/sh"},
+            {"gh", "git", "codex", "claude", "launchctl", "systemctl"},
         )
 
     def test_each_service_manager_cli_is_declared_and_load_bearing(self):
@@ -3469,22 +3350,19 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 entry = by_id[row_id]
                 self.assertEqual(entry["kind"], "executable")
                 self.assertEqual(entry["token"], token)
-                # Three files since issue #668, and pinned as the exact list so
-                # a fourth cannot be added without saying so here: the backend
-                # is the only tracked component that manages a job with either
-                # command, and the §2.8 and §2.12 dashboards each resolve both
-                # with `findExecutable` to detect the host's manager (spawning
-                # only `systemctl`, for a version read — and the §2.12 one
-                # spawns it through the §2.8 module's own probe rather than a
-                # second copy). Both spellings are recovered from each by the
-                # Haskell extractor, so both rows owe each a files entry the
-                # way `plutil-cli` already does.
+                # Two files, and pinned as the exact list so a third cannot be
+                # added without saying so here: the backend is the only tracked
+                # component that manages a job with either command, and the
+                # §2.8 dashboard resolves both with `findExecutable` to detect
+                # the host's manager (spawning only `systemctl`, for a version
+                # read). Both spellings are recovered from it by the Haskell
+                # extractor, so both rows owe it a files entry the way
+                # `plutil-cli` already does.
                 self.assertEqual(
                     entry["files"],
                     [
                         SERVICE_MANAGER_BACKEND_PATH,
                         APPROVAL_SERVICE_DASHBOARD_FILE,
-                        MISSION_RUNNER_DASHBOARD_FILE,
                     ],
                 )
                 # mandatory: no, matching §2.6 — the drainer is an optional
@@ -3504,16 +3382,14 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     tool_surface_findings(without),
                     [(SERVICE_MANAGER_BACKEND_PATH, token)],
                 )
-                for dashboard_file in (
+                dashboard = (REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE).read_text(
+                    encoding="utf-8"
+                )
+                self.assertEqual(
+                    sorted(discovered_executables(dashboard) - without),
+                    [token],
                     APPROVAL_SERVICE_DASHBOARD_FILE,
-                    MISSION_RUNNER_DASHBOARD_FILE,
-                ):
-                    dashboard = (REPO_ROOT / dashboard_file).read_text(encoding="utf-8")
-                    self.assertEqual(
-                        sorted(discovered_executables(dashboard) - without),
-                        [token],
-                        dashboard_file,
-                    )
+                )
 
     def test_service_manager_artifacts_are_confined_to_the_backend(self):
         # Grounded against the tracked tree rather than a fixture, and in both
@@ -4632,277 +4508,6 @@ class WorkerDeadlineBoundaryTests(unittest.TestCase):
         )
 
 
-# The mission modules that start a process, and are therefore excused from the
-# "reaches the outside only through its driver" scan above. Both arrived with
-# issue #666's repository scheduler, and neither is a widening of what a
-# mission may do:
-#
-# * `Scheduler.hs` advances each admitted mission by re-executing *this*
-#   binary as `kanban --mission <id>`, so the work still happens inside a
-#   mission controller that dispatches through the action registry. What it
-#   starts is that controller, not an action.
-# * `Notify.hs` runs the command an operator configured to be told that a
-#   mission is waiting on them, through the same bounded capture seam
-#   `Kanban.UsageCommand` uses. It performs no workflow effect at all.
-#
-# An entry here buys nothing on its own: three assertions below pin what each
-# of the two may start, and a fourth refuses an entry naming a module that no
-# longer spawns.
-MISSION_SCHEDULER_MODULE = "src/Kanban/Mission/Scheduler.hs"
-MISSION_NOTIFIER_MODULE = "src/Kanban/Mission/Notify.hs"
-MISSION_SPAWNING_MODULES = (MISSION_SCHEDULER_MODULE, MISSION_NOTIFIER_MODULE)
-
-
-class MissionRunnerAuthorityTests(unittest.TestCase):
-    """Issue #595 requirement 18: the runner broadens nothing.
-
-    A mission controller dispatches through the workflow action registry and
-    holds no authority of its own. The registry already refuses to merge, to
-    apply a verdict label, and to promote an indeterminate result, and the
-    point of these assertions is that the mission layer cannot quietly acquire
-    any of those by reaching past it -- which would look like an ordinary new
-    helper right up until a mission merged something.
-    """
-
-    def test_the_mission_layer_names_no_merge_or_label_authority(self):
-        forbidden = {
-            "mergePullRequest": "merging is the PR drainer's, and only the drainer's",
-            "drain_prs.py": "invoking the drainer is a deliberate manual step",
-            "--add-label": "a verdict label is the canonical review's to apply",
-            "--remove-label": "a verdict label is the canonical review's to remove",
-            "approve_issues.py": "the canonical issue gate is reached through the registry",
-        }
-        modules = sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs"))
-        # The negative control: a glob that matched nothing would pass every
-        # assertion below by iterating an empty list.
-        self.assertTrue(modules, "no mission modules were found to scan")
-        for path in modules:
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            content = path.read_text(encoding="utf-8")
-            for needle, reason in sorted(forbidden.items()):
-                with self.subTest(module=relative, needle=needle):
-                    self.assertNotIn(
-                        needle,
-                        content,
-                        f"{relative} names {needle!r}; {reason} (issue #595 "
-                        "requirement 18)",
-                    )
-
-    def test_the_controller_reaches_the_outside_only_through_its_driver(self):
-        # Every process this codebase starts goes through System.Process. A
-        # mission module importing it would be a spawn the action registry's
-        # launch boundary never saw -- with the two exceptions below, each of
-        # which is pinned by an assertion of its own rather than excused.
-        scanned = 0
-        for path in sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs")):
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            if relative in MISSION_SPAWNING_MODULES:
-                continue
-            scanned += 1
-            content = path.read_text(encoding="utf-8")
-            with self.subTest(module=relative):
-                self.assertEqual(
-                    haskell_import_names(content, "System.Process"),
-                    set(),
-                    f"{relative} imports System.Process; a mission's work is "
-                    "started through the workflow action registry, which is "
-                    "where the spawn boundary and its readiness gate live",
-                )
-        # A carve-out that grew to cover the whole directory would leave the
-        # loop above asserting nothing.
-        self.assertGreater(scanned, len(MISSION_SPAWNING_MODULES))
-
-    def test_every_carved_out_mission_module_is_still_there(self):
-        # The other half of the carve-out. A module that stopped spawning, or
-        # that was renamed, has to leave this tuple rather than sit in it
-        # excusing a file that no longer exists.
-        for relative in MISSION_SPAWNING_MODULES:
-            with self.subTest(module=relative):
-                path = REPO_ROOT / relative
-                self.assertTrue(path.is_file(), f"{relative} is not in the tree")
-                self.assertNotEqual(
-                    haskell_import_names(path.read_text(encoding="utf-8"), "System.Process"),
-                    set(),
-                    f"{relative} no longer starts a process; take it out of "
-                    "MISSION_SPAWNING_MODULES rather than leaving an excuse "
-                    "nothing needs",
-                )
-
-    def test_the_two_spawning_mission_modules_name_no_executable(self):
-        # What makes the carve-out safe rather than a hole. Issue #666's
-        # scheduler starts one child per admitted mission and its notifier
-        # starts whatever the operator configured, and neither may name a
-        # program: the scheduler re-executes *this* process's own binary, which
-        # `System.Environment.getExecutablePath` answers, and the notifier runs
-        # an argv that came out of the configuration file. A literal executable
-        # name appearing in either is a mission module that acquired the
-        # ability to run something the action registry never saw.
-        for relative in MISSION_SPAWNING_MODULES:
-            with self.subTest(module=relative):
-                content = (REPO_ROOT / relative).read_text(encoding="utf-8")
-                self.assertEqual(
-                    discovered_executables(content),
-                    set(),
-                    f"{relative} names an executable; a mission module may "
-                    "re-execute Kanban itself or run the operator's own "
-                    "configured command, and nothing else",
-                )
-
-    def test_the_scheduler_re_executes_kanban_rather_than_naming_it(self):
-        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
-        self.assertIn(
-            "getExecutablePath",
-            content,
-            f"{MISSION_SCHEDULER_MODULE} must resolve the binary it re-executes "
-            "from this process rather than from a name",
-        )
-        self.assertIn(
-            '"--mission"',
-            content,
-            f"{MISSION_SCHEDULER_MODULE} must advance a mission through the "
-            "foreground mission runner it re-executes",
-        )
-
-    def test_the_scheduler_reads_no_standard_input(self):
-        # Issue #666 requirement 5: a scheduler invoked directly from a
-        # terminal must not prompt. `kanban --mission` decides whether it has
-        # an operator by asking about *its own* standard input, so the way a
-        # pass keeps that promise is by never having a console at all —
-        # neither reading the descriptor nor building the seam that would.
-        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
-        for forbidden in ("stdin", "MissionConsole", "terminalMissionConsole"):
-            with self.subTest(needle=forbidden):
-                self.assertNotIn(
-                    forbidden,
-                    content,
-                    f"{MISSION_SCHEDULER_MODULE} names {forbidden!r}; a pass has "
-                    "no operator console and must not acquire one",
-                )
-        # And the children it starts are handed a descriptor that is readable
-        # and is not a terminal, rather than a closed one: a closed descriptor
-        # makes `hIsTerminalDevice` raise instead of answering.
-        self.assertIn('openFile "/dev/null" ReadMode', content)
-
-    def test_the_notifier_runs_its_command_through_the_bounded_seam(self):
-        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
-        self.assertIn(
-            "Kanban.CommandCapture",
-            content,
-            f"{MISSION_NOTIFIER_MODULE} must run the operator's command through "
-            "the bounded command-capture seam (issue #666 requirement 14)",
-        )
-
-    def notifier_command_body(self):
-        """The whole of `runMissionNotificationCommand`, `where` clause and all."""
-        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
-        start = content.find("runMissionNotificationCommand :: ")
-        self.assertNotEqual(
-            start,
-            -1,
-            f"{MISSION_NOTIFIER_MODULE} no longer declares runMissionNotificationCommand",
-        )
-        # To the next top-level declaration, or the end of the module. Searched
-        # from the line after the signature, so this declaration's own name
-        # does not end the span it opens. The `where` bindings are part of this
-        # function and every assertion below is about one of them, so the span
-        # has to include them.
-        opened = content.index("\n", start) + 1
-        following = re.search(r"^[a-z][A-Za-z0-9_']* ::", content[opened:], re.MULTILINE)
-        end = len(content) if following is None else opened + following.start()
-        return content[start:end]
-
-    def test_the_notifier_guards_its_command_for_the_whole_of_its_life(self):
-        # A notification command is the one thing the scheduler starts in a
-        # process group of its own, which is exactly what the supervisor's
-        # signal to the scheduler's group cannot reach. So the scheduler has to
-        # end it itself, on every way out of that call, and *which* ways are
-        # covered is the whole of the guarantee. An examination of the
-        # structure rather than of behaviour, because the alternative is a test
-        # per exit that has to win a race: a stop landing during setup, a
-        # failure while the output is read, a caller's bound expiring — none of
-        # those gaps is reliably reproducible from outside.
-        body = self.notifier_command_body()
-        # The signal handler is installed outside everything, because a stop
-        # arriving during setup or teardown is still a stop.
-        self.assertIn(
-            "withStopSweep (sweepRecorded live) $",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must install its stop handler around the "
-            "whole of the command's life",
-        )
-        # And the sweep is a bracket's release rather than a line on the happy
-        # path, which is what makes a synchronous or asynchronous exception
-        # end the group too.
-        self.assertIn(
-            "bracket (spawn live directory) (const (retire live))",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must acquire the command and release it "
-            "through bracket, so every exit sweeps",
-        )
-        retire = re.search(r"^    retire live = do\n((?:      .*\n)+)", body, re.MULTILINE)
-        self.assertIsNotNone(
-            retire, f"{MISSION_NOTIFIER_MODULE} no longer declares the bracket's release"
-        )
-        self.assertIn(
-            "sweepRecorded live",
-            retire.group(1),
-            f"{MISSION_NOTIFIER_MODULE}'s bracket release must sweep the command's group",
-        )
-        # The acquisition starts the command; `register` records what a stop
-        # has to end. Bracket runs no release for an acquisition that threw,
-        # so that span is covered twice: masked, so there is no delivery point
-        # in it, and guarded, so a delivery point an unrelated edit introduces
-        # still ends the process rather than stranding it.
-        #
-        # `mask_` rather than `mask`: a restore across the spawn would reopen
-        # exactly this window, and it buys nothing — the POSIX signal mask a
-        # child inherits across exec is a different thing from Haskell's
-        # asynchronous-exception mask, so holding the latter cannot make the
-        # notifier immune to the signal used to stop it.
-        spawn = re.search(
-            r"^    spawn live directory = mask_ \$ do\n((?:      .*\n)+)",
-            body,
-            re.MULTILINE,
-        )
-        self.assertIsNotNone(
-            spawn,
-            f"{MISSION_NOTIFIER_MODULE} must acquire under mask_, or a cancellation "
-            "between the spawn and the registration leaks the command",
-        )
-        self.assertIn("createProcess (spec directory)", spawn.group(1))
-        self.assertNotIn(
-            "restore",
-            spawn.group(1),
-            f"{MISSION_NOTIFIER_MODULE} must not restore across the spawn; that is "
-            "the window an unrecorded notifier escapes through",
-        )
-        self.assertIn(
-            "`onException` sweepUnrecorded processHandle",
-            spawn.group(1),
-            f"{MISSION_NOTIFIER_MODULE} must end a command it created but has not "
-            "yet recorded, since bracket's release will not run for it",
-        )
-        register = re.search(
-            r"^    register live outputHandle errorHandle processHandle = do\n((?:      .*\n)+)",
-            body,
-            re.MULTILINE,
-        )
-        self.assertIsNotNone(
-            register,
-            f"{MISSION_NOTIFIER_MODULE} no longer declares the acquisition's registration",
-        )
-        self.assertIn("writeIORef live (NotifierLive", register.group(1))
-        # Nothing sweeps inline. `sweepCommandGroup` belongs to `sweepRecorded`
-        # alone, so there is one sweep on one path and no second spelling to
-        # drift from it.
-        self.assertNotIn(
-            "sweepCommandGroup",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must sweep only through its bracket release; "
-            "an inline sweep is skipped by every exception",
-        )
-
-
 # --- The dashboard's recurring local status checks (issue #668) -------------
 #
 # `docs/design.md` §15 states the dashboard's whole recurring-timer inventory:
@@ -4938,12 +4543,11 @@ MONITOR_FOLLOWER_SPELLINGS = ("Control.Concurrent", "forever", "forkIO", "thread
 
 
 class RecurringTimerInventoryTests(unittest.TestCase):
-    """Issue #668 requirement 11: the mission runner's reader is a reader.
+    """The dashboard's recurring timers are the two issue #668 pinned.
 
-    It is driven by its caller and owns no cadence, so the dashboard's
-    recurring timers are the two they already were. What a persistent follower
-    would cost is not hypothetical: each of those two is a ten-second poll that
-    spawns a controller, and §15 records the idle cost of the pair.
+    What a persistent follower would cost is not hypothetical: each of those
+    two is a ten-second poll that spawns a controller, and §15 records the idle
+    cost of the pair.
     """
 
     def test_the_dashboard_launches_exactly_the_monitors_it_already_did(self):
@@ -4955,20 +4559,6 @@ class RecurringTimerInventoryTests(unittest.TestCase):
             "monitors docs/design.md §15 names; a third one is a reviewed edit "
             "here and there, not a site-local decision",
         )
-
-    def test_the_mission_runner_reader_starts_no_thread_and_installs_no_timer(self):
-        content = (REPO_ROOT / MISSION_RUNNER_DASHBOARD_FILE).read_text(
-            encoding="utf-8"
-        )
-        for spelling in FOLLOWER_SPELLINGS:
-            with self.subTest(spelling=spelling):
-                self.assertNotIn(
-                    spelling,
-                    content,
-                    f"{MISSION_RUNNER_DASHBOARD_FILE} names {spelling!r}; this "
-                    "slice starts no thread, installs no timer, and performs no "
-                    "periodic poll (issue #668 requirement 11)",
-                )
 
     def test_the_follower_spellings_are_ones_a_follower_really_uses(self):
         # The negative control over the assertion above: these are recovered

@@ -111,8 +111,7 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
   `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
 - `Action` with `Action.*` — the workflow action registry: the one plain-IO
-  boundary the dashboard's launches and a headless mission runner both call
-  through. `Action.Types` is the closed vocabulary of kinds, refusals, handles
+  boundary the dashboard's launches call through. `Action.Types` is the closed vocabulary of kinds, refusals, handles
   and results (and the decode boundary an unregistered kind is refused at),
   `Action.Target` resolution and the compatibility rules, `Action.Capability`
   routing and readiness, `Action.Dispatch` the dispatch/observation split and
@@ -122,7 +121,7 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   `UI.AutoSolve.decideAutoSolve`'s.
 - `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
   `PullRequestFlow`, `ProviderAdapter`, `Codex`, `Claude`, `Process`, `Transcript`,
-  `Preflight` with `Preflight.*`, `Provider`, `ProviderLimit`, `StreamReader`,
+  `Preflight` with `Preflight.*`, `Provider`, `StreamReader`,
   `CommandCapture` — the agent execution layer. `ProviderAdapter` is the one place a provider's
   agent-session processes are built: `Solve`, `PullRequestFlow`, `Review`, and
   `Review.Tools` read the executable, the process spec, the embedded-review
@@ -131,9 +130,6 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   `tools/test_agent_workflow_contract.py`'s `ProviderAdapterBoundaryTests` holds
   that boundary against the whole of `src/`. `Ping`, `Codex`, `Claude`, and
   `Preflight.Environment` stay outside it: none is an agent session.
-  `ProviderLimit` reads a failed session's recorded stream, and the Codex
-  account snapshot, for the structured evidence of a provider limit a mission
-  step waits out instead of failing.
   `Review` itself is the Codex app-server client and the
   compatibility facade every consumer imports; its seams live beside it —
   `Review.Connection` (one provider connection, the pool of them a client holds,

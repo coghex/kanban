@@ -85,8 +85,8 @@ data OwnedProcessGroup = OwnedProcessGroup
     -- handed to a group check that would find its empty membership
     -- vacuously absent and call the survivor reclaimed.
     ownedProcessGroupCensused :: Bool,
-    -- | The process that spawned this entry's @gh@ — a dashboard, a mission
-    -- runner, or a worker's precondition read — resolved afresh for that one
+    -- | The process that spawned this entry's @gh@ — a dashboard or a
+    -- worker's precondition read — resolved afresh for that one
     -- spawn while the child was still parked behind its launch barrier.
     --
     -- It decides one thing: how a reader /classifies/ the entry. An entry

@@ -16,10 +16,9 @@
 --
 -- So each reader is the test binary run again, taking the branch in @main@
 -- that leads to 'runReaderProbe' instead of to hspec. It reads through the
--- production entry points -- a refresh coordinator's open job, the mission
--- runner's board read and target observation, and a worker's precondition
--- reread, each through the guard-taking form its lock-taking entry point runs
--- -- under one record lock minted at the
+-- production entry points -- a refresh coordinator's open job and a worker's
+-- precondition reread, each through the guard-taking form its lock-taking
+-- entry point runs -- under one record lock minted at the
 -- top of the probe, exactly where the production process mints its own. The
 -- shape is "Spec.Support.RecordWriters"': a marker in the child's environment,
 -- a plan and answers carried through files, every wait bounded, and every
@@ -51,7 +50,6 @@ import Control.Monad (forM, unless)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict', encode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Either (isRight)
 import Data.List (isPrefixOf)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
@@ -64,7 +62,6 @@ import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), defaultTimeoutsConfig)
 import Kanban.Domain (ItemId (..), Repository, TargetPrecondition (..))
 import Kanban.GitHub (GhCleanupFailure (..), GhRecordLock, RefreshJob (..), ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, newHistoryTraversal, newRefreshCoordinator, requestRefreshJob, shutdownRefreshCoordinator)
-import Kanban.Mission (MissionTarget (..), MissionTargetKind (..), missionBoardReadUnder, missionTargetObservationUnder)
 import Kanban.UI.Refresh (boardRefreshRunner)
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Kanban.Worker (WorkerId (..), WorkerSpec (..), preconditionStillHoldsUnder)
@@ -94,9 +91,8 @@ data ReaderRole
   = -- | A dashboard's open refresh: one job of a refresh coordinator that owns
     -- the process's record lock.
     DashboardReader
-  | -- | A mission runner's board read.
-    RunnerBoardReader
-  | -- | A persistent worker's precondition reread.
+  | -- | A persistent worker's precondition reread, which an issue-review
+    -- host takes the same way for each child it adopts.
     WorkerReader
   | -- | One process that takes a first read under a store that can neither
     -- record its @gh@ nor confirm it gone, then the given reads with every
@@ -108,11 +104,7 @@ data ReaderRole
 
 -- | One of the reads a non-dashboard reader process takes.
 data ReadKind
-  = -- | 'missionBoardRead'.
-    ReadBoard
-  | -- | 'missionTargetObservation'.
-    ReadTarget
-  | -- | 'preconditionStillHolds', as the issue-review host takes it for each
+  = -- | 'preconditionStillHolds', as the issue-review host takes it for each
     -- child it adopts.
     ReadPrecondition
   deriving stock (Eq, Show, Generic)
@@ -340,7 +332,6 @@ runReaderProbe planPath = do
       recordLock <- newGhRecordLock
       steps <- case plan.readerPlanRole of
         DashboardReader -> pure <$> dashboardRead plan recordLock
-        RunnerBoardReader -> pure <$> takeRead plan recordLock "runner board read" ReadBoard
         WorkerReader -> pure <$> takeRead plan recordLock "worker precondition reread" ReadPrecondition
         LatchSequence source consumers -> latchSequence plan recordLock source consumers
       recordLoad <- loadGhGroupRecord plan.readerPlanRepository
@@ -388,12 +379,6 @@ takeRead plan recordLock label kind = do
   -- is its existing routing and not what these examples are about, so it is
   -- reported here as the failed read it is.
   attempted <- try @SomeException $ case kind of
-    ReadBoard -> do
-      read' <- missionBoardReadUnder config plan.readerPlanRepository guard
-      pure (isRight read', either (Text.pack . show) (const "") read')
-    ReadTarget -> do
-      read' <- missionTargetObservationUnder config plan.readerPlanRepository target guard
-      pure (isRight read', either id (const "") read')
     ReadPrecondition -> do
       refusal <- preconditionStillHoldsUnder guard launched
       pure (isNothing refusal, maybe "" id refusal)
@@ -402,7 +387,6 @@ takeRead plan recordLock label kind = do
   verdict <- ghFetchCleanupFailure guard
   pure (ReaderStep (label <> " (" <> Text.pack (show kind) <> ")") succeeded detail (after - before) (Text.pack . show . ghCleanupGuard <$> verdict))
   where
-    target = MissionTarget MissionTargetIssue readerIssueNumber Nothing
     launched =
       (workerFixtureSpec plan.readerPlanRepository (WorkerId "solve-742-0001") readerIssueNumber)
         { workerExpectedTarget = Just readerExpectedTarget
