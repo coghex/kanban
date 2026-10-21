@@ -132,8 +132,10 @@ the claude origin and Codex reviews it.
 
 This repository is developed by agents, and the board reads their state off GitHub.
 The labels and markers below are the conventions of the owner's skills and scripts,
-which are tracked here; the application does not apply, require or interpret them
-beyond drawing the labels GitHub reports.
+which are tracked here. The scripts own every label mutation and all origin-marker
+routing; the board only reads the configured labels (`Kanban.Workflow`) to derive
+columns, readiness status, ordering and styling, and it never applies, requires or
+interprets an origin marker.
 
 - Workflow labels: `reviewed:approve` for approved work, `reviewed:changes` for changes
   requested, `reviewed:revised` for a revision handed back for rereview.
