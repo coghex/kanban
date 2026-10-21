@@ -1,8 +1,11 @@
 # CLAUDE.md
 
-Instructions for Claude Code sessions started at this repository's root.
-`docs/design.md` is the authoritative contract; this file is an entry point, not a
-replacement for it.
+Instructions for Claude Code sessions started at this repository's root. Kanban is
+two things: a Haskell terminal board for a GitHub repository with the Codex and
+Claude usage panel beside it, and the owner's tracked workflow skills and scripts.
+The application drives none of the second; they are installed by their own scripts.
+`docs/design.md` is the authoritative contract for the application; this file is an
+entry point, not a replacement for it.
 
 ## Build and test
 
@@ -19,12 +22,18 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 
 ## The contract
 
-- `docs/design.md` is the complete behavior contract. A behavior change must stay
-  consistent with it or update it in the same PR.
-- Section 19's `Implementation state` paragraph and the milestones beneath it record
-  what is already implemented. Read them before concluding something is missing.
+- `docs/design.md` is the complete behavior contract for the application: the board,
+  the usage panel, the configuration, and the command line. A behavior change must
+  stay consistent with it or update it in the same PR.
+- Section 19's `Implementation state` paragraph, its `Retired` paragraph and the
+  milestones beneath them record what is already implemented and what was removed.
+  Read them before concluding something is missing: the application's agent control
+  was removed on purpose.
 - `docs/agent-workflow-contract.md` is authoritative for the external executables,
-  authority, and durable state the solve, review, and drainer actions depend on.
+  authority, and durable state the owner's skills and scripts — the drainer, the
+  approval and review scripts, the plugin bundles — depend on. The application does
+  not consume it.
+- `docs/vision.md` is the owner's document; change it only as the owner has settled.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and
   `docs/workflow-setup.md` cover the optional local components.
 - Documentation lands with `docs-push`; Markdown that is code goes through a pull
@@ -64,9 +73,10 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   `kanban.cabal`'s `common warnings`, so a new warning fails the build.
 - Behavior changes come with tests. Reuse the suite's established patterns instead of
   inventing a harness (`docs/design.md` section 18): pure and fixture tests that need no
-  terminal, network, or GitHub account; golden Brick frames for layout; temporary Git
-  repositories; and fake `gh`, `codex`, and `claude` executables placed on a temporary
-  `PATH`.
+  terminal, network, or GitHub account; golden Brick frames for layout, regenerated only
+  with `KANBAN_UPDATE_GOLDENS=1` and read before committing; temporary Git repositories;
+  and fake `gh`, `codex`, and `claude` executables placed on a temporary `PATH`, which
+  stand in for the GitHub fetch and the two usage providers.
 - Never open or push to a pull request over a failing gate you selected.
 - A workflow command or skill Markdown file is the program an agent executes, so an
   edit under `claude-plugin/`, `codex-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`,
@@ -87,76 +97,45 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 
 - `Domain`, `Workflow`, `Card`, `Tracker`, `Filter` — board state, column
   classification, tracker hierarchy, and the composable card filter criteria.
-- `Repository`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Settings`, `Paths`,
-  `ManagedPaths`, `CLI` — repository
-  resolution, GitHub data, the last-good snapshot, configuration, the private
-  directories under the XDG roots, and — the one Haskell resolution point for
-  them, against `tools/kanban_config.py`'s one Python resolution point — where
-  the PR drainer's and the issue-review backend's discovery records are on this
-  platform.
-- `Usage` with `Usage.Render`, `UsageCommand`, `Ping` — provider quota windows, the
-  wording the sidebar and `--usage` share, the configured external usage commands,
-  and the deliberate window-starting ping.
+- `Repository` with `Repository.*`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Paths`,
+  `CLI` — repository resolution and the board lease, GitHub data and its refresh
+  coordinator, the last-good snapshot and the durable `gh` record, configuration (it
+  accepts and ignores the keys the scripts own), the private directories under the XDG
+  cache root, and the command line.
+- `Usage` with `Usage.Render`, `UsageCommand`, `Codex`, `Claude`, `Provider` — provider
+  quota windows, the wording the sidebar and `--usage` share, the configured external
+  usage commands, and the two built-in readers: `Codex` and `Claude` read account
+  status only and submit no model prompt.
 - `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest`, `Browser` — terminal presentation,
   responsive layout, external-text sanitization, and the one place a URL is handed
   to the platform's page opener. `UI` itself is only the composition root;
   the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
   `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
   `UI.Keys` (the one declaration site for a board key binding, held against
-  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`,
-  `UI.Settings`
-  (column search, filter panel, selection, and the settings overlay's roster
-  rows and pure input transitions), `UI.Session` with `UI.SessionCore`
-  and `UI.SessionEvents`, `UI.Solve`, `UI.Review`, `UI.PullRequest`, `UI.Worker`
-  (lifecycles), `UI.Transcript`, `UI.Refresh` and `UI.Reconcile` (refresh),
-  `UI.AutoSolve`, the autosolve loop as pure functions, and `UI.Util`.
-- `Action` with `Action.*` — the workflow action registry: the one plain-IO
-  boundary the dashboard's launches call through. `Action.Types` is the closed vocabulary of kinds, refusals, handles
-  and results (and the decode boundary an unregistered kind is refused at),
-  `Action.Target` resolution and the compatibility rules, `Action.Capability`
-  routing and readiness, `Action.Dispatch` the dispatch/observation split and
-  its terminal validation, and `Action.AutoSolve` the complete loop.
-  It adds no authority: routing is `PullRequestFlow`'s, readiness is
-  `Preflight`'s, the spawn is `Worker`'s, and the loop's progression is
-  `UI.AutoSolve.decideAutoSolve`'s.
-- `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
-  `PullRequestFlow`, `ProviderAdapter`, `Codex`, `Claude`, `Process`, `Transcript`,
-  `Preflight` with `Preflight.*`, `Provider`, `StreamReader`,
-  `CommandCapture` — the agent execution layer. `ProviderAdapter` is the one place a provider's
-  agent-session processes are built: `Solve`, `PullRequestFlow`, `Review`, and
-  `Review.Tools` read the executable, the process spec, the embedded-review
-  backend, and the registered review tools off one compiled record per provider
-  instead of constructing their own, and
-  `tools/test_agent_workflow_contract.py`'s `ProviderAdapterBoundaryTests` holds
-  that boundary against the whole of `src/`. `Ping`, `Codex`, `Claude`, and
-  `Preflight.Environment` stay outside it: none is an agent session.
-  `Review` itself is the Codex app-server client and the
-  compatibility facade every consumer imports; its seams live beside it —
-  `Review.Connection` (one provider connection, the pool of them a client holds,
-  and the thread identity that pairs a provider's own thread id with the
-  connection serving it), `Review.Types` (wire and result payloads),
-  `Review.Client` (the `ReviewClient`
-  record and its tool registry), `Review.Tools` (the `gh` and `claude` tool runners),
-  `Review.Canonical` (the `approve_issues.py` gate), `Review.Prompts` (instructions
-  and JSON schemas), and `Review.Diagnostics` (shared failure vocabulary).
-  A backend declares in `ProviderAdapter` whether its review threads share one
-  process or take one each, and that is the only thing deciding whether starting
-  a review reuses the client's connection or spawns another.
-- `Drainer` with `tools/` — the service-managed PR drainer and its Python tests.
-  One backend boundary in `tools/service_manager.py` drives launchd on macOS and
-  systemd user units on Linux.
+  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`
+  (column search, filter panel, and selection), `UI.Notice` (the notice line and its
+  expiry), `UI.Refresh` and `UI.Reconcile` (refresh), and `UI.Util`.
+- `Process`, `CommandCapture` — the bounded child-process helpers the GitHub fetch and
+  the usage readers run through.
 
 Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests,
 `Fixture` the invented board the golden frames and the tracked screenshot are drawn
-from, `codex-plugin/` and `claude-plugin/` the tracked workflow bundles Kanban's
-AI actions invoke by name, and `grok-plugin/`, `kimi-plugin/`, and `google-plugin/` the external-origin
-solve/autosolve bundles whose pull requests route to Codex. `claude-copilot-plugin/` is the
-same pair for a Copilot CLI session running a Claude model: the brand is the model, not the
-host, so it stamps the claude origin and Codex reviews it.
+from. `claude-plugin/`, `codex-plugin/` and the external-origin bundles
+(`grok-plugin/`, `kimi-plugin/`, `google-plugin/`, `claude-copilot-plugin/`) are the
+owner's tracked skills; `tools/` holds the scripts that install them and the services
+they use (`setup_workflows.py`, the PR drainer, the issue approval service). The
+application invokes none of them. `claude-copilot-plugin/` is the same pair for a Copilot
+CLI session running a Claude model: the brand is the model, not the host, so it stamps
+the claude origin and Codex reviews it.
 
 ## Pipeline conventions
 
 This repository is developed by agents, and the board reads their state off GitHub.
+The labels and markers below are the conventions of the owner's skills and scripts,
+which are tracked here. The scripts own every label mutation and all origin-marker
+routing; the board only reads the configured labels (`Kanban.Workflow`) to derive
+columns, readiness status, ordering and styling, and it never applies, requires or
+interprets an origin marker.
 
 - Workflow labels: `reviewed:approve` for approved work, `reviewed:changes` for changes
   requested, `reviewed:revised` for a revision handed back for rereview.
@@ -164,7 +143,7 @@ This repository is developed by agents, and the board reads their state off GitH
   carries `<!-- issue-origin:codex -->`, `<!-- issue-origin:claude -->`,
   `<!-- issue-origin:kimi -->`, or `<!-- issue-origin:google -->` — a kimi-origin or
   google-origin issue's canonical reviewer is Codex, since neither is a spawned
-  provider. Board issue revision is refused for those origins; the authoring
+  provider. Issue revision is refused for those origins; the authoring
   session authors its own amendment. An issue
   filed through GitHub's web UI carries neither by design — the templates under
   `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
@@ -172,10 +151,11 @@ This repository is developed by agents, and the board reads their state off GitH
   `--legacy-policy dual` rather than to one. A pull request body
   carries exactly one of `<!-- pr-origin:codex -->`, `<!-- pr-origin:claude -->`,
   `<!-- pr-origin:grok -->`, `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` as its
-  final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
-  duplicated, mixed, or trailing-text marker. A grok-origin, kimi-origin, or
+  final non-whitespace content — the review coordinator's `origin_from_body`
+  (`review_pr.py` in the plugin bundles) rejects a duplicated, mixed, or
+  trailing-text marker. A grok-origin, kimi-origin, or
   google-origin pull request is a known origin Codex reviews; none of them is a
-  spawned Kanban provider, so board revision and repair of those origins are refused.
+  spawned provider, so revision and repair of those origins are refused.
 - Never merge a pull request on your own initiative. Solve, review, and
   autonomous agents stop at the open PR; `tools/drain_prs.py` owns merging
   eligible PRs out of the Done column. The single exception is the packaged

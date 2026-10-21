@@ -12,14 +12,14 @@ portable to any project that installs a Kanban plugin.
 
 Scope boundaries:
 
-- These workflows are **user-invoked and never spawned by Kanban's CLI**.
-  Kanban's Haskell code spawns exactly five workflows per brand (`solve`,
-  `pr-review`, `pr-rereview`, `pr-revise`, and `repair`), so every asset
-  declared in §2 is deliberately excluded from the Haskell invocation-parity
-  pinning in `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py`,
-  exactly as the drafting assets are. See
-  [agent-workflow-contract.md](agent-workflow-contract.md) for the workflows
-  Kanban does invoke by name.
+- These workflows are **user-invoked and never spawned by Kanban's CLI**,
+  which spawns no workflow at all. The five a dashboard once spawned by name per
+  brand (`solve`, `pr-review`, `pr-rereview`, `pr-revise`, and `repair`) remain
+  a named partition, so every asset declared in §2 is deliberately excluded from
+  the Haskell invocation-parity pinning in `tools/test_claude_plugin.py` and
+  `tools/test_codex_plugin.py`, exactly as the drafting assets are. See
+  [agent-workflow-contract.md](agent-workflow-contract.md) for those
+  workflows.
 - This document covers the design-document and findings-report lifecycle only.
   The issue-drafting and canonical issue-review workflows keep their own matrix
   in [drafting-workflow-contract.md](drafting-workflow-contract.md); nothing

@@ -233,12 +233,12 @@ of:
 
 - the executable, installed from the candidate archive and reporting the
   candidate's version;
-- the optional workflow assets, re-registered from the new archive;
+- the optional workflow assets, re-registered from the new archive and confirmed
+  by `tools/setup_workflows.py` without `--apply` reporting each component
+  `unchanged`;
 - the managed components — the PR drainer and the issue approval service —
   stopped, re-pointed at the new archive, and restarted only where they were
   running before;
-- `kanban --doctor`, reporting AI-action readiness; that is the whole of what it
-  reports, so it does not stand in for either service check below;
 - the PR drainer's controller `status`, for every repository the drainer's own
   record named;
 - the issue approval service's controller `status`, for every repository its own

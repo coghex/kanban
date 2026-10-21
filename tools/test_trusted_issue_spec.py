@@ -2304,13 +2304,16 @@ class SolveRepositoryScopeTests(unittest.TestCase):
             )
         )
         self.assertIn("**Repository scope:**", contract)
-        self.assertIn("Kanban's resolved repository identity", contract)
+        self.assertIn("a supplied `--repo` identity", contract)
         self.assertIn("scopes pull-request *metadata* only", contract)
         self.assertIn(
             "${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/issue-<n>-<slug>",
             contract,
         )
-        self.assertIn("`resumeSolvePrompt` restates it", contract)
+        # The Haskell prompts that once restated the identity for a resumed
+        # session (`initialSolvePrompt` and `resumeSolvePrompt`) were removed
+        # with the application's solve flow; the contract no longer names them.
+        self.assertNotIn("`resumeSolvePrompt`", contract)
 
 
 class ReviewerGateDivergenceTests(unittest.TestCase):
