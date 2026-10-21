@@ -390,7 +390,7 @@ declarations =
       ),
     Declaration
       3
-      "Direct board editing and drag/drop mutation. Review and solve workflows may perform their explicitly documented GitHub mutations."
+      "Direct board editing and drag/drop mutation. The board makes no GitHub change; the skills and scripts outside the application make their own documented ones."
       ( Witnessed
           WitnessedFact
             { factStatement =
