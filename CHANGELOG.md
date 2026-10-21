@@ -15,6 +15,15 @@ created above it.
 
 ### Unreleased
 
+- Removed the solve and pull-request flows and the deliberate ping (epic #794,
+  child 4, #814; part 1 of #798's split). `kanban --ping` no longer exists: the
+  parser refuses it as an unknown option, alone, repeated and beside `--usage`,
+  and `--help` does not list it; nothing prompts a model. `--usage`,
+  `--review-tools`, `--glyph-test` and the dashboard behave as before.
+  `Kanban.Solve` with its `Parse` and `Unknown` submodules, `Kanban.PullRequestFlow`,
+  `Kanban.StreamReader` and `Kanban.Ping` are deleted, with the tests and Python
+  assertions that pinned them. `timeouts.ping_codex_seconds` and
+  `ping_claude_seconds` still parse, unused.
 - Removed the persistent worker backend and the readiness probe (epic #794,
   child 3, #797 and #811). `kanban --worker-spec` and `kanban --doctor` no longer
   exist: the parser refuses each as an unknown option, alone and beside `--usage`,
