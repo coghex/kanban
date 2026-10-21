@@ -39,7 +39,7 @@ when something goes wrong.
 | What it acts on | Open **issues**, in ascending number order | Open approved **pull requests** |
 | What it does | Runs the canonical issue review and publishes its verdict | Merges eligible pull requests and updates branches |
 | Who decides | The canonical backend `tools/approve_issues.py`, which the controller only repeats | `tools/drain_prs.py`, which the controller only supervises |
-| Board key | `a` | `d` |
+| Started and stopped with | Its controller's `start` and `stop` | Its controller's `start` and `stop` |
 | Job label | `com.coghex.issue-approval.<slug>` | `com.coghex.drain-prs.<slug>` |
 | Installer | `python3 tools/install_issue_approval.py` | `python3 tools/install_drainer.py` |
 | Controller | `approve_issues_service.py` | `drain_prs_service.py` |
@@ -602,7 +602,7 @@ Read `status` first. Every state below is reported there, and the `reason`,
 | `state: unknown`, `barrier_unreadable` set | `barrier.json` is present but cannot be read as a barrier record, so the queue must not be treated as unbarriered. | Read the named file. Repair or remove it deliberately — removing it lets the queue cross that issue, so confirm the issue's real state first. |
 | `state: child_failure` | A backend pass exited non-zero, produced no result document, or produced one this controller may not act on. | Read the `approval-error` incident's `detail` — it carries the pass's own standard error — and the backend's dated log beside `service.log`. Fix the cause, then start again. |
 | `state: controller_failure` | The controller itself failed around a pass. | The incident's `detail` carries the traceback. Start again once the cause is fixed. |
-| `state: barrier` | Working as designed: the queue is stopped at a changes-requested issue. | Repair that issue with `r`; the barrier clears itself. |
+| `state: barrier` | Working as designed: the queue is stopped at a changes-requested issue. | Repair that issue with the issue-rereview workflow; the barrier clears itself. |
 | `start` reports the controller exited during startup | A run began and immediately recorded an incident — most often an unresolvable canonical backend, or the legacy daemon below. | The reported summary is the incident's. Fix it and start again. |
 | `Timed out waiting for the issue approval controller to start` | The manager was asked to start the job, but no live state was recorded within fifteen seconds. | Read `service.err` in the log directory: a job whose definition names a controller that is not there fails at launch with nothing else to show. Re-run the installer. |
 | `Timed out waiting for the issue approval controller to stop` | Thirty seconds passed without both the status document leaving a live state *and* the manager reporting the job gone. | Read `service.log`. The controller kills its own backend group after ten seconds, so a timeout here is the controller or the manager rather than the pass; ask the manager directly. |
@@ -645,8 +645,8 @@ Re-running the installer is convergent, and a `start` performs the same refresh
 on its own. Re-run it:
 
 - after moving the repository checkout;
-- when Kanban reports the service as not installed for this repository, or its
-  install record as unreadable;
+- when the controller's `status` reports the service as not installed for this
+  repository, or its install record as unreadable;
 - whenever the asset root moves ahead of the installation: after unpacking a
   newer release archive, or after pulling a Kanban revision that changes any of
   the three linked modules or adds one the controller imports. The installed
@@ -716,8 +716,8 @@ No supported service manager found: a Kanban managed service needs either macOS
 launchd or a systemd user session reachable through `systemctl --user`.
 ```
 
-Kanban reports such a host as its own condition — unsupported, offering no
-control — rather than as a missing installation or a stopped service.
+The controller reports such a host as its own condition — unsupported, offering
+no control — rather than as a missing installation or a stopped service.
 
 A host that is not POSIX cannot run the controller at all, whatever its service
 manager:
