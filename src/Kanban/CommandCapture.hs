@@ -4,7 +4,7 @@
 -- exit from being reported as a timeout when a descendant that inherited
 -- the pipe still holds its write end open (issue #15).
 --
--- This machinery started inside "Kanban.Review", where only two of its
+-- This machinery started inside the review client, where only two of its
 -- three command runners were converted to it and the third kept a private
 -- @hGetContents@-plus-@takeMVar@ capture that had exactly the bug the
 -- conversion existed to remove (issue #154). It lives here so the shared
@@ -61,8 +61,8 @@ import System.Timeout (timeout)
 -- deadlines.
 --
 -- Long-lived processes are deliberately outside this vocabulary: a backend
--- that is supposed to outlive any single call — the Codex app-server behind
--- 'Kanban.Review.startReviewClient' — has no exit deadline to bound.
+-- that is supposed to outlive any single call, such as a provider's
+-- app-server, has no exit deadline to bound.
 data CommandBounds = CommandBounds
   { commandDeadlineMicros :: Int,
     commandCaptureGraceMicros :: Int

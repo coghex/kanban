@@ -69,9 +69,7 @@ import System.IO (hPutStrLn, stderr)
 --
 -- 'Kanban.Models.ProviderName' names the table a roster cell is read from and
 -- 'Kanban.Domain.UsageProvider' names the account whose windows are probed
--- and displayed. The one mapping between them, as
--- 'Kanban.ProviderAdapter.providerForBrand' is the one mapping to the
--- executable vocabulary.
+-- and displayed. This is the one mapping between them.
 usageProviderFor :: ProviderName -> UsageProvider
 usageProviderFor CodexProvider = Codex
 usageProviderFor ClaudeProvider = Claude

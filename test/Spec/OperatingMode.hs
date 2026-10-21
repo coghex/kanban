@@ -192,7 +192,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the one mode that reaches a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, True, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, True, False]
 
   -- The mission modes are gone, not merely unselected: the parser turns each
   -- spelling away as an option it does not know, so no invocation can reach a
@@ -271,6 +271,19 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
         message `shouldNotSatisfy` isInfixOf "--ping"
       _ -> expectationFailure "--help did not render help"
 
+  -- The re-entered review tool server was removed with the review sessions
+  -- that spawned it.
+  it "refuses --review-tools as an unknown option, naming it" $
+    sequence_
+      [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
+        | arguments <- [["--review-tools", "/tmp/endpoint"], ["--usage", "--review-tools", "/tmp/endpoint"]],
+          let refusal = case execParserPure defaultPrefs optionsParserInfo arguments of
+                Failure failure ->
+                  let (message, code) = renderFailure failure "kanban"
+                   in Just (code, "Invalid option `--review-tools'" `isInfixOf` message)
+                _ -> Nothing
+      ]
+
   -- The readiness mode removed with the probe behind it, refused the same way
   -- in either argument order and named in the diagnostic.
   it "refuses --doctor as an unknown option, naming it" $
@@ -336,8 +349,7 @@ everyMode :: [LaunchMode]
 everyMode =
   map
     launchMode
-    [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
-      testOptions {optionGlyphTest = True},
+    [ testOptions {optionGlyphTest = True},
       testOptions {optionUsage = True},
       testOptions
     ]

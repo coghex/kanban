@@ -8,12 +8,11 @@ import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
 import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
-import Kanban.ReviewToolServer (serveReviewTools)
 import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Options.Applicative (execParser)
-import System.Exit (exitFailure, exitWith)
-import System.IO (hPutStrLn, stderr, stdin, stdout)
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 
 main :: IO ()
 main = do
@@ -47,12 +46,6 @@ main = do
   -- roster that loads no provider.
   let operatingMode = maybe NoAgentMode loadedOperatingMode loadedRoster
   case selectedMode of
-    -- The re-entered review tool server (D-15): speaks MCP on this
-    -- process's own stdio to the provider that spawned it and proxies over
-    -- the endpoint it was handed. Everything else — configuration, roster,
-    -- repository — belongs to the Kanban on the other end.
-    ReviewToolServerMode endpointDirectory ->
-      exitWith =<< serveReviewTools stdin stdout endpointDirectory
     GlyphTestMode -> runGlyphTest
     -- Configuration but no repository: usage is global (§14), so this answers
     -- from a directory that is not a checkout at all, while still honoring an

@@ -16,17 +16,9 @@
 -- module states is checked by the suite it composes.
 module Main (main) where
 
-import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.ApprovalService as ApprovalService
-import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
-import qualified Spec.Agent.ClaudeReview as ClaudeReview
-import qualified Spec.Agent.Protocol as Protocol
-import qualified Spec.Agent.Roster as AgentRoster
-import qualified Spec.Agent.Supervision as Supervision
-import qualified Spec.Agent.ToolReentry as ToolReentry
-import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
 import qualified Spec.Agent.UsageMode as UsageMode
 import qualified Spec.Board.Tracker as Tracker
@@ -34,7 +26,6 @@ import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
 import qualified Spec.Config.Loading as ConfigLoading
 import qualified Spec.Config.Models as Models
-import qualified Spec.Config.Settings as Settings
 import qualified Spec.Design.Witnesses as DesignWitnesses
 import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
@@ -81,10 +72,7 @@ import qualified Spec.UI.OpenData as OpenData
 import qualified Spec.UI.Search as Search
 import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
-import Kanban.ReviewToolServer (serveReviewTools)
-import System.Environment (getArgs, lookupEnv)
-import System.Exit (exitWith)
-import System.IO (stdin, stdout)
+import System.Environment (lookupEnv)
 
 -- | Ordinarily the suite. Five markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
@@ -110,67 +98,40 @@ import System.IO (stdin, stdout)
 -- time. No marker reaches a child of a probe, so this cannot recurse.
 main :: IO ()
 main = do
-  arguments <- getArgs
-  case arguments of
-    -- The re-entered review tool server, exactly as @kanban --review-tools@
-    -- serves it. The one diversion that is argv rather than environment,
-    -- because that is how the mechanism under test hands it over: "Spec.Agent.ToolReentry"'s fake @claude@ spawns whatever
-    -- executable its recorded @--mcp-config@ names, that executable is this
-    -- suite's own binary ('System.Environment.getExecutablePath', the same
-    -- re-entry a real install performs), and so the served process runs the
-    -- real 'serveReviewTools' rather than a fixture restating it. Checked
-    -- ahead of the probe markers: the spawned server inherits whatever
-    -- environment the suite's own machinery is carrying.
-    ["--review-tools", endpointDirectory] -> exitWith =<< serveReviewTools stdin stdout endpointDirectory
-    _ -> do
-      localeProbe <- lookupEnv localeProbeVariable
-      usageWriter <- lookupEnv usageWriterVariable
-      leaseProbe <- lookupEnv leaseProbeVariable
-      recordWriter <- lookupEnv recordWriterVariable
-      readerProbe <- lookupEnv readerProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, recordWriter, readerProbe) of
-        (Just probeRoot, _, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath, _) -> runRecordWriter planPath
-        (Nothing, Nothing, Nothing, Nothing, Just planPath) -> runReaderProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+  localeProbe <- lookupEnv localeProbeVariable
+  usageWriter <- lookupEnv usageWriterVariable
+  leaseProbe <- lookupEnv leaseProbeVariable
+  recordWriter <- lookupEnv recordWriterVariable
+  readerProbe <- lookupEnv readerProbeVariable
+  case (localeProbe, usageWriter, leaseProbe, recordWriter, readerProbe) of
+    (Just probeRoot, _, _, _, _) -> runLocaleProbe probeRoot
+    (Nothing, Just planPath, _, _, _) -> runUsageWriter planPath
+    (Nothing, Nothing, Just planPath, _, _) -> runLeaseProbe planPath
+    (Nothing, Nothing, Nothing, Just planPath, _) -> runRecordWriter planPath
+    (Nothing, Nothing, Nothing, Nothing, Just planPath) -> runReaderProbe planPath
+    (Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
 -- The lane column is a packing decision taken from measurement, except where
 -- 'suiteColocations' below holds a group to another group's lane for safety.
--- Serially the suite spends 397 of its 399 seconds inside fifteen groups that
--- are waiting on a real deadline, so those fifteen are spread across the five
--- lanes until no lane holds much more than a fifth of them, and the eleven
--- hundred examples whose cost is computing — under two seconds between them —
--- ride along wherever there is room. The seconds beside each group below are
--- what it cost on its own, from
+-- The groups that wait on a real deadline are spread across the four lanes,
+-- and the hundreds of examples whose cost is computing ride along wherever
+-- there is room. The seconds beside a group below are what it cost on its own,
+-- from
 --
 -- > cabal run kanban-test -- --print-slow-items=2000
 --
 -- which is how to check the packing again after a group's cost moves. Those
--- measurements predate "Spec.Repository.Lease", whose 1.7 seconds are small
--- enough to ride along anywhere on cost alone; it sits in @UsageLane@ for the
--- reason 'suiteColocations' states rather than for its cost.
+-- measurements predate the removal of the review, solve and ping groups, which
+-- left the supervision lane without a group and so removed it, and they predate
+-- "Spec.Repository.Lease", whose 1.7 seconds are small enough to ride along
+-- anywhere on cost alone; it sits in @UsageLane@ for the reason
+-- 'suiteColocations' states rather than for its cost.
 suiteGroups :: [SuiteGroup]
 suiteGroups =
   [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
-    SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
-    SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
-    -- Beside "Spec.Agent.Supervision" rather than spread for cost: it
-    -- spawns a fake provider per example and sleeps inside several of them,
-    -- and that lane holds the subprocess-deadline assertions its churn would
-    -- be measured against. Groups in one lane are serialised, so the two
-    -- cannot overlap at all — the same reasoning 'suiteColocations' records
-    -- for the pair it names, at a cost of about 22 of this lane's seconds.
-    SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
-    SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
-    SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
-    SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,
-    SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
-    SuiteGroup "Spec.Agent.Roster" LifecycleLane AgentRoster.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
     SuiteGroup "Spec.Repository.Authority" PingLane RepositoryAuthority.spec,
     SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
@@ -194,7 +155,6 @@ suiteGroups =
     -- against that churn. Its own cost is a few seconds of forced cleanup.
     SuiteGroup "Spec.GitHub.ConcurrentReaders" UsageLane ConcurrentReaders.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
-    SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,
     SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,

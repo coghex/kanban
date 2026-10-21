@@ -18,7 +18,6 @@ module Kanban.Process
     killVerifiedGroup,
     killVerifiedGroupWith,
     managedProcess,
-    managedProcessPid,
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
@@ -169,10 +168,6 @@ verifyGroupLeader (Just pid) = do
       Just identity
         | identity.processIdentityGroupPid == identity.processIdentityPid -> Nothing
         | otherwise -> Just "process is not the leader of its own process group"
-
-managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
-managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
-managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
 
 -- | The census every liveness check in this module rests on. `ps` output is
 -- captured as bytes and decoded once, leniently, rather than through the

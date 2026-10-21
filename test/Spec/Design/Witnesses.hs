@@ -48,9 +48,6 @@
 module Spec.Design.Witnesses (spec) where
 
 import Control.Exception (SomeException, try)
-import Data.Aeson (Value (Object), toJSON)
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -86,7 +83,6 @@ import Kanban.GitHub
     planCoordinator,
   )
 import Kanban.Repository (parseRemoteRepository)
-import Kanban.Settings (defaultSettings)
 import Kanban.UI.Events (boardMouseAction, boardMousePress, mutatesSelectedWork)
 import Kanban.UI.Keys (BoardAction, binding)
 import Kanban.UI.Types
@@ -454,11 +450,11 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "`binding` has the type `BoardAction -> KeyBinding`, taking no configuration, and the settings document Kanban writes carries exactly the keys `chatVerbosity` and `schemaVersion`.",
+                "`binding` has the type `BoardAction -> KeyBinding`, taking no configuration.",
               factRationale =
-                "A configurable binding has to be read from somewhere. The one declaration site for a board key takes only the action, and the one persisted user document has no field a key could arrive in, so the table cannot be overridden. Kanban.UI.Keys already names itself as where configurable bindings would be read into; that is the signature this pins.",
+                "A configurable binding has to be read from somewhere. The one declaration site for a board key takes only the action, so the table cannot be overridden. Kanban.UI.Keys already names itself as where configurable bindings would be read into; that is the signature this pins.",
               factReads = [],
-              factCheck = pure (everyFault [compileTimeBindings, settingsDocumentKeys])
+              factCheck = pure compileTimeBindings
             }
       ),
     Declaration
@@ -819,15 +815,6 @@ mutatingActions =
 -- | The bindings table takes the action and nothing else.
 compileTimeBindings :: Maybe Text
 compileTimeBindings = pinnedType "the board's binding table" binding "BoardAction -> KeyBinding"
-
--- | The keys the persisted settings document carries.
-settingsDocumentKeys :: Maybe Text
-settingsDocumentKeys =
-  sameAs "the keys the settings document carries" ["chatVerbosity", "schemaVersion"] observed
-  where
-    observed = case toJSON defaultSettings of
-      Object fields -> sort (map (Text.pack . Key.toString) (KeyMap.keys fields))
-      other -> [showText other]
 
 -- | A decided press is a pure function of the dashboard's own state.
 pureBoardPress :: Maybe Text

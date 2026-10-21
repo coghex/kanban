@@ -902,8 +902,7 @@ loadModelRoster = do
                   Right contents ->
                     either (Left . RosterLoadError path) Right (decodeRoster contents)
 
--- | Atomic save with the same private-directory, temporary-file, @0600@,
--- rename discipline 'Kanban.Settings.saveSettings' established.
+-- | Atomic save: private directory, temporary file, @0600@, then rename.
 saveModelRoster :: ModelRoster -> IO (Either Text ())
 saveModelRoster roster = do
   path <- rosterPath

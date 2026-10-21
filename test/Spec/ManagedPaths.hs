@@ -18,9 +18,9 @@ import Kanban.ManagedPaths
   ( ManagedComponent (..),
     managedRecordCandidates,
     managedRecordHome,
+    managedRecordPath,
     managedRecordPathAt,
   )
-import Kanban.Review (issueReviewerRecordPath)
 import Spec.Support.Env
   ( withEnvironmentValue,
     withManagedRecordHome,
@@ -45,6 +45,10 @@ everyComponent = [DrainerComponent, IssueReviewComponent]
 -- asserted on its own wherever a relative base is in play.
 absoluteOnlyComponents :: [ManagedComponent]
 absoluteOnlyComponents = [DrainerComponent]
+
+-- | The issue-review record's path, as the removed review backend resolved it.
+reviewerRecordPath :: IO FilePath
+reviewerRecordPath = managedRecordPath IssueReviewComponent
 
 spec :: Spec
 spec = describe "Managed discovery record locations" $ do
@@ -179,7 +183,7 @@ spec = describe "Managed discovery record locations" $ do
         withManagedRecordHome home $
           withEnvironmentValue "XDG_DATA_HOME" base $ do
             drainerRecordPath `shouldReturn` drainerRecord
-            issueReviewerRecordPath `shouldReturn` reviewerRecord
+            reviewerRecordPath `shouldReturn` reviewerRecord
 
     it "resolves a ~/Library installation with no XDG base set" $
       withTemporaryCacheRoot $ \home -> do
@@ -189,7 +193,7 @@ spec = describe "Managed discovery record locations" $ do
         occupy reviewerRecord
         withManagedRecordHome home $ do
           drainerRecordPath `shouldReturn` drainerRecord
-          issueReviewerRecordPath `shouldReturn` reviewerRecord
+          reviewerRecordPath `shouldReturn` reviewerRecord
 
     it "moves no record when any install-directory override is set" $
       withTemporaryCacheRoot $ \home ->
@@ -199,11 +203,11 @@ spec = describe "Managed discovery record locations" $ do
           -- dashboard that never saw --install-dir has to find the
           -- installation by.
           drainerBaseline <- drainerRecordPath
-          reviewerBaseline <- issueReviewerRecordPath
+          reviewerBaseline <- reviewerRecordPath
           withEnvironmentValue "KANBAN_DRAINER_INSTALL_DIR" (home </> "moved-drainer") $
             withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" (home </> "moved-review") $ do
               drainerRecordPath `shouldReturn` drainerBaseline
-              issueReviewerRecordPath `shouldReturn` reviewerBaseline
+              reviewerRecordPath `shouldReturn` reviewerBaseline
 
   describe "the home a record hangs off" $
     it "anchors both components to $HOME" $

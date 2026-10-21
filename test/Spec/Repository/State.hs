@@ -25,8 +25,6 @@ import Kanban.Cache
   )
 import Kanban.Domain
 import Spec.Support.Fixtures (epoch)
-import Kanban.Settings (ChatVerbosity (..), Settings (..), saveSettings, settingsPath)
-import Kanban.Transcript (closeSessionLog, openSessionLog, transcriptRoot)
 import Spec.Support.Env
   ( permissionsOf,
     withEnvironmentValue,
@@ -349,43 +347,6 @@ spec = do
           commitSnapshots (Map.fromList [(Codex, UsageSnapshot [UsageWindow "week" 77 epoch] epoch)])
             `shouldReturn` UsageCommit (Right ()) Nothing
           permissionsOf lockPath `shouldReturn` 0o600
-
-    -- The transcript root is three levels deep, so the intermediate "logs"
-    -- directory is one no writer ever chmodded; here both it and a kanban
-    -- directory an earlier version left loose are tightened.
-    it "tightens intermediate levels an earlier writer left loose" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let xdgRoot = temporaryRoot </> "cache"
-            repository = Repository "/tmp/project" "coghex" "kanban"
-        createDirectory xdgRoot
-        setFileMode xdgRoot 0o755
-        createDirectoryIfMissing True (xdgRoot </> "kanban" </> "logs")
-        setFileMode (xdgRoot </> "kanban") 0o755
-        setFileMode (xdgRoot </> "kanban" </> "logs") 0o755
-        withEnvironmentValue "XDG_CACHE_HOME" xdgRoot $
-          withFileCreationMask 0o000 $ do
-            opened <- openSessionLog repository "solve-claude" 45 Nothing
-            case opened of
-              Left message -> expectationFailure (Data.Text.unpack message)
-              Right sessionLog -> closeSessionLog sessionLog
-            logsRoot <- transcriptRoot repository
-            permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
-            permissionsOf (xdgRoot </> "kanban" </> "logs") `shouldReturn` 0o700
-            permissionsOf logsRoot `shouldReturn` 0o700
-            permissionsOf xdgRoot `shouldReturn` 0o755
-
-    it "creates the config level it owns as 0700 under a permissive umask" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let xdgRoot = temporaryRoot </> "config"
-        createDirectory xdgRoot
-        setFileMode xdgRoot 0o755
-        withEnvironmentValue "XDG_CONFIG_HOME" xdgRoot $
-          withFileCreationMask 0o000 $ do
-            saveSettings (Settings FullChat) `shouldReturn` Right ()
-            path <- settingsPath
-            permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
-            permissionsOf path `shouldReturn` 0o600
-            permissionsOf xdgRoot `shouldReturn` 0o755
 
 -- | Every fixture here commits through the one API production uses, so none of
 -- them can seed a state no Kanban process could have produced.

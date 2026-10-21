@@ -40,8 +40,9 @@ import System.Info (os)
 -- 'usableXdgBase' — not one rule for reading the XDG base directory, so
 -- they are asked about one at a time rather than resolved together.
 data ManagedComponent
-  = -- | What @tools\/install_issue_review.py@ recorded, read by
-    -- "Kanban.Review.Canonical".
+  = -- | What @tools\/install_issue_review.py@ recorded. No application
+    -- module reads it since the review backend was removed; the component
+    -- stays until this module is trimmed (#799).
     IssueReviewComponent
   | -- | What @tools\/install_drainer.py@ and @tools\/drain_prs_service.py@
     -- recorded, read by "Kanban.Drainer".

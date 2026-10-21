@@ -19,7 +19,6 @@ import Kanban.Models
     loadedOperatingMode,
     noAgentModeMessage,
   )
-import Kanban.ReviewToolServer (reviewToolServerFlag)
 import Options.Applicative
 
 data ColorPolicy = ColorAuto | ColorTruecolor | Color256 | ColorNever
@@ -39,8 +38,7 @@ data Options = Options
     optionJson :: Bool,
     optionAscii :: Bool,
     optionNoCache :: Bool,
-    optionConfig :: Maybe FilePath,
-    optionReviewTools :: Maybe FilePath
+    optionConfig :: Maybe FilePath
   }
   deriving stock (Eq, Show)
 
@@ -53,19 +51,11 @@ data Options = Options
 -- no build-tool dependency on @executable kanban@, so a mode selection written
 -- only in @app\/Main.hs@ is unreachable from every example.
 --
--- The order is @main@'s, and it is not arbitrary: the re-entered review tool
--- server is not a dashboard at all, and the observational modes answer without
--- needing configuration or a repository (§5). 'DashboardMode' is what is left,
+-- The order is @main@'s: the observational modes answer without needing
+-- configuration or a repository (§5), and 'DashboardMode' is what is left,
 -- which is why it is last.
 data LaunchMode
-  = -- | @--review-tools@, carrying the endpoint directory it proxies over:
-    -- Kanban re-entered as the stdio MCP server a review session's
-    -- @claude@ spawns (D-15). Internal machinery — only a launch this
-    -- process itself built ever invokes it — and it loads no roster, resolves no repository, reads no
-    -- configuration, and takes no lease: everything a tool call needs
-    -- lives in the parent on the other end of the endpoint.
-    ReviewToolServerMode FilePath
-  | -- | @--glyph-test@.
+  = -- | @--glyph-test@.
     GlyphTestMode
   | -- | @--usage@.
     UsageQueryMode
@@ -74,12 +64,10 @@ data LaunchMode
   deriving stock (Eq, Show)
 
 launchMode :: Options -> LaunchMode
-launchMode options = case options.optionReviewTools of
-  Just endpointDirectory -> ReviewToolServerMode endpointDirectory
-  Nothing
-    | options.optionGlyphTest -> GlyphTestMode
-    | options.optionUsage -> UsageQueryMode
-    | otherwise -> DashboardMode
+launchMode options
+  | options.optionGlyphTest = GlyphTestMode
+  | options.optionUsage = UsageQueryMode
+  | otherwise = DashboardMode
 
 -- | Whether this mode reaches a model provider, and so has nothing to do when
 -- the roster loads none.
@@ -91,15 +79,12 @@ launchMode options = case options.optionReviewTools of
 -- answers about something a no-agent install does not have. Which providers
 -- those are is the mode's own question and is asked past this gate:
 -- 'Kanban.Usage.usageProviders' narrows the report to a provider set this
--- refusal has already established is non-empty. Nothing else is: the review
--- tool server proxies to a parent that resolved everything before launching
--- it and likewise consults no roster, @--glyph-test@ asks the terminal rather
--- than a provider, and the dashboard is a board-only Kanban in this mode
--- rather than a refused one.
+-- refusal has already established is non-empty. Nothing else is:
+-- @--glyph-test@ asks the terminal rather than a provider, and the dashboard
+-- is a board-only Kanban in this mode rather than a refused one.
 launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
-  ReviewToolServerMode _ -> False
   GlyphTestMode -> False
   DashboardMode -> False
 
@@ -120,9 +105,8 @@ launchModeRefusal mode loaded
 -- | Whether this invocation takes the repository's board lease.
 --
 -- Only the dashboard does. Every other mode either never resolves a repository
--- (the review tool server is handed its endpoint; @--glyph-test@ answers from
--- the terminal) or resolves one without becoming a board
--- (@--usage@ is global). None of
+-- (@--glyph-test@ answers from the terminal) or resolves one without becoming
+-- a board (@--usage@ is global). None of
 -- them writes the durable @gh@ record, so none of them has anything to
 -- serialise against — and a mode that took the lease would refuse to run
 -- beside an open board for no reason at all.
@@ -194,13 +178,6 @@ optionsParser =
           ( long "config"
               <> metavar "FILE"
               <> help "Override the global configuration path"
-          )
-      )
-    <*> optional
-      ( strOption
-          ( long reviewToolServerFlag
-              <> metavar "DIR"
-              <> internal
           )
       )
 
