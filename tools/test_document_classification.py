@@ -79,9 +79,9 @@ TEST_PARSED_PATHS = {
     # over it (issue #494).
     ".github/pull_request_template.md",
     # tools/test_release_runbook.py reads the report-what-you-have-installed
-    # bullet, which may credit `kanban --doctor` with AI-action readiness alone
-    # and has to send a reporter to each managed service's own controller for
-    # the PR drainer and the issue approval service (issue #618).
+    # bullet, which has to send a reporter to each managed service's own
+    # controller for the PR drainer and the issue approval service, and may
+    # name no removed flag nor claim readiness (issue #618).
     "SUPPORT.md",
     # tools/test_agent_workflow_contract.py parses §4; this module parses §7.
     "docs/agent-workflow-contract.md",

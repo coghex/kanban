@@ -13,14 +13,13 @@ a Kanban plugin.
 Scope boundaries:
 
 - These workflows are **user- or daemon-invoked**, never spawned by Kanban's
-  own CLI. Kanban's Haskell code spawns exactly five workflows per brand
-  (`solve`, `pr-review`, `pr-rereview`, `pr-revise`, and — since issue #127 —
-  `repair`), which is why the
-  drafting and issue-review assets are deliberately excluded from the Haskell
-  invocation-parity pinning in `tools/test_claude_plugin.py` and
-  `tools/test_codex_plugin.py`. See
-  [agent-workflow-contract.md](agent-workflow-contract.md) for the workflows
-  Kanban does invoke by name.
+  own CLI, which spawns no workflow at all. The five a dashboard once spawned
+  by name per brand (`solve`, `pr-review`, `pr-rereview`, `pr-revise`, and
+  `repair`) remain a named partition in `tools/test_claude_plugin.py` and
+  `tools/test_codex_plugin.py`, which is why the drafting and issue-review
+  assets are deliberately excluded from that Haskell invocation-parity pinning.
+  See [agent-workflow-contract.md](agent-workflow-contract.md) for those
+  workflows.
 - This document defines responsibilities, boundaries, and the scope gate
   (§4) that a consuming project may declare to narrow which discretionary
   candidates the hunters propose. It does not define any project's gate; that
@@ -276,8 +275,7 @@ body template, and the same signoff flow.
 
 Every issue a packaged drafting workflow creates ends its body with an
 origin marker. `tools/approve_issues.py` (`ORIGIN_RE`) parses it to route the
-issue to the opposite agent for canonical review, and
-`src/Kanban/Review/Prompts.hs` tells reviewers to find it, so the literals
+issue to the opposite agent for canonical review, so the literals
 are a hard contract, not a formatting preference:
 
 - Claude-created issue bodies end with `<!-- issue-origin:claude -->`.
@@ -300,8 +298,7 @@ brand, so drift from the parser's accepted format fails CI.
 
 The packaged issue-review and issue-rereview workflows — including
 `autoissue`'s immediate review handoff — resolve the canonical backend the
-same way `Kanban.Review.resolveCanonicalIssueReviewer` and the packaged
-`solve` workflows do:
+same way the packaged `solve` workflows do:
 
 ```bash
 RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
@@ -373,9 +370,8 @@ manifest schema change. Because these locations are project-scoped rather
 than user-scoped, a consuming project reaches them through the plugin install
 or link flow described in each plugin's README. `tools/setup_workflows.py`
 performs that install for other repositories, and
-[workflow-setup.md](workflow-setup.md) documents it along with the read-only
-`--doctor` report that diagnoses it. This document is the inventory that flow
-consumes; it is not itself an installer.
+[workflow-setup.md](workflow-setup.md) documents it. This document is the
+inventory that flow consumes; it is not itself an installer.
 
 ## 8. Completeness check
 

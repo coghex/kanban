@@ -5,8 +5,7 @@
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
 repository. It remains idle without consuming meaningful CPU and makes no
 network requests unless the application starts, the user explicitly updates
-data, terminal focus triggers an eligible update, or an explicitly started
-review/solve workflow performs its bounded work.
+data, or terminal focus triggers an eligible update.
 
 The dashboard combines:
 
@@ -16,17 +15,20 @@ The dashboard combines:
   assignees, linked work, mergeability, and CI state.
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
-- Hideable issue-review sessions backed by the canonical v2 reviewer, with
-  interactive specification revision backed by Codex app-server.
-- Hideable, resumable issue-solve sessions backed by the selected canonical
-  Codex or Claude CLI, plus a process/session inspector.
 
-Board observation is read-only. An explicitly started issue review may post its
-review comment and switch review labels; an explicitly started solve invokes
-the existing solve workflow, which may claim an issue and create a worktree,
-branch, and PR. Autosolve invokes the same ordinary solve workflow, then Kanban
-owns the bounded review/revision/rereview state machine and its label handoffs.
-Ordinary navigation and updates never mutate GitHub.
+That is the whole application: a board and the usage panel beside it. The
+owner's workflow skills and scripts — the plugin bundles, the PR drainer, the
+issue approval service and the review scripts — are tracked in this repository
+and installed by their own installers, but they are not part of what `kanban`
+does. The application starts none of them, controls none of them and reads none
+of their state; `docs/agent-workflow-contract.md` states what they depend on and
+`docs/pr-drainer.md`, `docs/issue-approval.md` and `docs/workflow-setup.md`
+describe them.
+
+Every GitHub request the application makes is a read, and it starts no agent,
+spawns no worker and submits no model prompt. Ordinary navigation and updates
+never mutate GitHub. The two usage providers read account status only, so an
+update spends no quota (section 14).
 
 ## 2. Goals
 
@@ -37,11 +39,11 @@ Ordinary navigation and updates never mutate GitHub.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
 - Remain fully keyboard-operable; mouse support is limited to card selection,
-  live-session opening, details dismissal, panel/column scrolling, and the
-  sidebar's update button.
+  details opening and dismissal, panel/column scrolling, and the sidebar's
+  update button.
 - Perform one asynchronous unified board-and-usage update at startup, then block
   on terminal events while idle and redraw only after input, resize, provider
-  completion, or an active review event.
+  completion, or a notice expiring.
 - Keep usage and GitHub refreshes independent so one failing source does not
   hide valid data from another.
 - Preserve the last good snapshot when a refresh fails.
@@ -73,9 +75,8 @@ Ordinary navigation and updates never mutate GitHub.
 - TUI: `brick` on `vty`/`vty-unix`.
 - CLI parsing: `optparse-applicative`.
 - JSON: `aeson`.
-- Concurrency: lightweight TUI threads plus a bounded Brick `BChan`; explicitly
-  started solve and PR jobs run in detached, repository-scoped worker
-  supervisors with durable JSONL event journals.
+- Concurrency: lightweight TUI threads plus a bounded Brick `BChan`; the GitHub
+  and usage refreshes run in short-lived workers that report back through it.
 - GitHub access: the authenticated `gh` CLI, preferably through one GraphQL
   query per explicit board refresh.
 - Git inspection: local `git -C PATH ...` commands only; these do not contact a
@@ -105,9 +106,10 @@ References:
 kanban
 kanban --path ~/work/project
 kanban --path .
+kanban --usage
 ```
 
-Initial options:
+Options:
 
 ```text
 --path DIR                         repository path; defaults to cwd
@@ -115,421 +117,68 @@ Initial options:
 --color auto|truecolor|256|never  color policy; defaults to auto
 --border box|open                 border renderer; defaults to box
 --glyph-test                      print vertical-line candidates and exit
---doctor                          report AI-action readiness read-only and exit
---usage                           print the loaded providers' usage windows and exit
+--usage                           print Codex's and Claude's usage windows and exit
 --fresh                           with --usage, probe live instead of reading the cache
 --json                            with --usage, write the machine-readable document
---ping codex|claude               start that provider's window with one deliberate
-                                  model request, then exit
---mission MISSION_ID              advance exactly that mission in the foreground,
-                                  then exit
---mission-scheduler               advance this repository's runnable missions for
-                                  one bounded pass, then exit
---ascii                            emergency non-Unicode border fallback
+--ascii                           emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
 --version
 --help
 ```
 
-`--fresh` and `--json` modify `--usage` and are inert without it.
+`--fresh` and `--json` modify `--usage` and are inert without it. The parser
+refuses every other option with its ordinary usage error and starts nothing.
 
-`--ping` takes a required brand argument. Omitting it, naming an unknown
-brand, and supplying `--ping` more than once — including twice with the same
-brand — are all errors that exit non-zero without launching any provider.
-That refusal happens before any mode is selected, so it holds however else the
-invocation is spelled: `kanban --doctor --ping nope` reports the unknown brand
-and exits non-zero rather than running the doctor and succeeding, and
-`kanban --mission m --ping nope` does the same rather than starting the
-mission runner. Only refusal comes first; a well-formed `--ping` still yields
-to the modes below.
+`--repo` takes the bare `OWNER/NAME` form, optionally with a `.git` suffix, or
+a remote URL that names a repository on github.com — `https://`, `ssh://` and
+`git://` URLs and SCP-style `git@github.com:OWNER/NAME`. It is the escape hatch
+for setups the remote cannot resolve on its own: SSH host aliases, multiple
+remotes, bare mirrors, and any host other than github.com. A value that names
+no repository is reported and exits non-zero rather than being ignored.
 
-Startup sequence:
+Which mode runs is decided in one place, `Kanban.CLI.launchMode`, in a fixed
+order: `--glyph-test`, then `--usage`, then the dashboard. Exactly one of them
+runs, so an invocation naming both `--glyph-test` and `--usage` prints the glyph
+candidates and nothing else. `--glyph-test` answers from the terminal alone and
+touches neither configuration nor a repository.
+
+Startup sequence for the dashboard:
 
 1. Canonicalize `--path`.
-2. Resolve the repository root with `git rev-parse --show-toplevel`.
-3. Read the configured GitHub remote URL locally.
-4. Resolve `owner/name` from the remote, unless `--repo` supplied it directly.
-   The flag is the escape hatch for unusual setups: SSH host aliases, multiple
-   remotes, and bare mirrors.
-5. Load configuration, and the cached usage snapshots if enabled. No
-   repository snapshot is loaded: open cards are live-only (section 13).
-6. Enter the TUI immediately and asynchronously update GitHub plus both usage
+2. Load configuration (section 16), from `--config` when given. Configuration
+   that cannot be decoded is reported on standard error and exits non-zero;
+   warnings are printed and the launch continues.
+3. Resolve the repository root with `git rev-parse --show-toplevel`.
+4. Read the configured GitHub remote URL locally and resolve `owner/name` from
+   it, unless `--repo` supplied the identity directly.
+5. Resolve the repository roster the configuration declares (section 16). A
+   roster entry that cannot be used degrades into a startup notice and never
+   refuses the launch.
+6. Take the repository's board lease (section 15), refusing a second dashboard
+   for the same repository before anything is drawn.
+7. Load the cached usage snapshots and the cached completed generation, when
+   caching is enabled. No open-card snapshot is loaded: open cards are
+   live-only (section 13).
+8. Enter the TUI immediately and asynchronously update GitHub plus both usage
    providers once. The providers remain independent and failure-isolated.
 
 The board body starts as section 17's centered loading panel and draws its
 first card only when the first complete open generation publishes. The usage
 pane starts from its cache when there is one, and empty otherwise.
 
-`--doctor` short-circuits that sequence after step 1, before configuration
-and repository resolution, so a fresh clone with no configured remote can
-still ask why an AI action would not start. It prints readiness per
-dependency and per AI action, exits non-zero when any action is blocked, and
-is strictly read-only: status-only probes, no agent session, no login flow,
-no model quota, and no mutation of the filesystem, provider configuration,
-launchd, or GitHub. See
-[workflow-setup.md](workflow-setup.md) for the setup command it names.
-
-`--usage` short-circuits it after step 5's configuration load and before
-step 2's repository resolution. Usage is global (section 14), so this mode
-resolves no `owner/name` and applies no repository override: it honors
+`--usage` short-circuits that sequence after step 2's configuration load and
+before step 3's repository resolution. Usage is global (section 14), so this
+mode resolves no `owner/name` and applies no repository override: it honors
 `--config` and the global usage, timeout, and cache settings, and answers
-normally from a directory that is not a checkout or has no configured
-remote. It never enters the TUI and never starts a background refresh.
+normally from a directory that is not a checkout or has no configured remote.
+It never enters the TUI, never starts a background refresh and never takes the
+board lease, so it runs beside an open board. Its output, freshness rules and
+exit status are section 14's.
 
-`--ping` short-circuits it on the same terms as `--usage`, and after it: the
-run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
-`--usage`, `--ping`, and exactly one of them runs. `--mission` and
-`--mission-scheduler` are not among them — neither is run-and-exit, both
-advance durable work — but both are selected after all four and before the
-dashboard, in that order, so an invocation naming a mission and an
-observational mode runs the observation and starts nothing. A ping is the
-only mode that spends the user's quota (section 14), so every observational
-mode wins
-over it; an invocation naming one of them — `kanban --doctor --ping codex` —
-runs that mode and launches no ping. Ping mode establishes a repository
-identity where it can, and never requires one: `--repo` names a repository
-outright and is read as one without git or a checkout, so the override it
-selects applies from any directory; without it, the invoking directory is
-asked, and failing there is not an error. An established `owner/name` applies
-that repository's timeout override under section 16's ordinary inheritance
-rules, and an absent one leaves the global timeouts in force, so a ping still
-answers from a directory that is not a checkout or has no configured remote. A
-`--repo` that names no repository at all is reported rather than ignored.
-
-Both of those two modes refuse outright in the no-agent operating mode section
-7's `agents` list derives, an unusable `models.toml` included: with no provider
-loaded there is no account status to report and no window to start, so each
-prints the mode-naming message to stderr and exits non-zero without probing or
-spending anything. No other mode is refused — `--doctor` least of all, since
-saying why an AI action would not start is exactly what it is for. The question
-is asked after the malformed-`--ping` refusal, so an unknown or repeated brand
-is still reported as itself.
-
-In the single-agent mode that list derives, `--usage` reports the one loaded
-provider and `--ping` accepts only that brand. The brand a ping names is
-required and intentionally selected, so a ping asked for the provider this
-install does not load refuses by name — saying which provider the roster loads
-and where that is set — and starts no window rather than redirecting one onto
-the other account. That refusal comes after the no-agent one, so an install
-that loads nothing still says so in the mode's own words rather than naming a
-brand.
-
-`--mission` advances exactly one mission in the foreground and then exits. It
-takes the stable identifier of one mission and operates only on that mission:
-a missing, malformed, unknown, or repository-mismatched identifier is reported
-as itself and refuses, and no such refusal ever resolves to a different
-mission. Choosing among a repository's missions, and arbitrating between them,
-belong to the repository scheduler and are deliberately absent here.
-
-It resolves configuration and a repository as the dashboard does, and takes
-neither a board lease nor a provider gate. The lease it does take is that
-mission's own advancement lease (section 16): a second runner on the same
-mission refuses cleanly, while a dashboard attached to it reads the durable
-record and submits ordinary operator commands without competing for anything.
-The provider gate is skipped because reattaching to a live worker, resolving an
-unknown outcome, and ending a registered subtree all need no provider at all —
-an unusable `models.toml` would otherwise block the recovery of a mission
-already under way. A transition that would launch a provider-backed worker
-fails at that launch instead, in the no-agent wording above.
-
-The run ends when the mission becomes terminal, paused, or blocked —
-`waiting_input`, `waiting_barrier`, `waiting_capacity`, `paused`, or
-`interrupted` — and reports the transitions it made. Reaching one of those is
-not an error: it is the runner saying the mission needs something it cannot
-supply. The one exception is a capacity wait whose recorded retry time has
-passed, which the runner ends itself by waking the waiting step (below); a
-capacity wait still in force ends the run like any other blocked state, and its
-halt names the time it retries at. While registered work is live the runner waits on that worker's own
-durable state and on this mission's records, never on a timed GitHub refresh
-(section 3); GitHub is read when a step is planned, immediately before an
-effect, and when a settled worker's result has to be validated. The runner
-never merges a pull request, never applies a verdict label, and never reports
-an indeterminate result as a success — and absence is not a result: a target
-that has left the open read is an outcome nobody can settle from that read, not
-a step that succeeded.
-
-An invocation naming both `--mission` and `--mission-scheduler` is refused
-outright, before any mode is selected and whatever else it names, exactly as a
-malformed `--ping` is. The two are not two spellings of one request — one names
-the mission to advance and the other says to choose among them — so there is no
-reading under which obeying either one is obeying the invocation, and selection
-order would silently start work that was not asked for.
-
-`--mission-scheduler` advances this repository's runnable missions for one
-bounded pass and then exits. It is not a daemon: repeating passes and deciding
-how long to wait between them belong to the supervisor above it
-(the mission runner service script, which this release no longer ships), which ran either as a job installed per
-repository by its installer or in the foreground, and which
-excludes the two from each other through one per-identity run lock. Kanban
-discovers that job, decodes the status document and incidents it publishes,
-starts and stops it, and replays a mission's own durable events from a cursor
-(section 15); what it does not yet do is render any of that or poll on a
-cadence of its own, so nothing on the board shows it and a job is still watched
-from the command line.
-
-A pass admits every runnable mission and advances each by at most one
-transition. A mission is runnable when it is nonterminal, unpaused, and not
-waiting on operator input or a barrier; a mission waiting for provider capacity
-is runnable once a waiting step's recorded retry time has arrived, read against
-the pass's own clock, and not before. A mission whose advancement
-lease is already held is skipped, and the holder-liveness rule is the
-acquisition's own — an owner that cannot be shown to be gone counts as holding
-it. Losing that lease to somebody else between selection and launch is reported
-as the ordinary contention it is rather than as a failed pass; that is the only
-refusal treated that way. Every other one a child reports — an identifier that
-cannot address a mission, a mission the store does not hold, a record that will
-not decode, one recorded against another repository, a store that will not open
-— fails the pass, because the inventory reads snapshots and not specifications,
-so a child's refusal is the only place such a mission is ever found.
-
-What is limited is agents, not missions. At most `[missions] agent_ceiling`
-mission-dispatched agents — two unless configured otherwise (section 16) — may
-be live at once for one repository: a solve worker, a pull-request worker, or
-one issue action on the repository's review host, counted across every mission,
-every pass, and every checkout of that repository however its owner and name are
-cased (`Kanban.Mission.Admission`).
-The count is read from the worker cache, where a worker whose specification
-names a mission invocation is a mission's agent; the review host itself is
-never one, and a worker launched from the board names no invocation and is
-neither counted nor delayed. A worker is live until its own records prove
-otherwise, by the worker lease's own rules: a terminal state, a recorded
-process identity a snapshot no longer finds, or — before any state exists — an
-item lease that no longer names it or names a supervisor shown gone; an
-acknowledgement alone proves nothing, since a launch acknowledges a supervisor
-it could not see exit and keeps its lease for that case. An issue action is live until it is terminal, since a host that
-died leaves its unfinished actions to be re-homed and run by the next one — and
-without a state it is live too — and a terminal one still holds its slot while a
-process it ran, such as a canonical review's subprocess, survives. The host takes
-a census of a running gate's tree on every poll and once more before a settle
-kills it, since what the gate spawned is recorded by a census that sees it and
-by nothing else. A settle that cannot show that tree ended keeps the gate's
-recorded pid and identity on the terminal state; a gate whose identity was
-never captured, or any of whose censuses could not be taken, keeps its pid with
-no identity and so holds its slot for good, since nothing could ever show its
-tree gone. A failed census also leaves a `.census-gap` marker beside the action's
-records, so the slot stays taken after a successor host or a stale recovery
-has rewritten the action's state; collection keeps such an action's records,
-and one whose settle kept an unidentified gate pid, past any retention window,
-since removing them would free the slot. The
-canonical gate's process group is swept on every exit, a clean one included,
-because a descendant that stayed in the group outlives a gate that exited
-normally. A
-record that will not decode, and a snapshot that cannot be taken, keep the
-slot. Lowering the ceiling below what is running starts nothing new until
-enough of it finishes, and ends nothing.
-
-A mission step asks for a slot only when it would start an agent — never to
-observe or settle a live worker, record a session ending, or reconcile a step —
-and it asks before anything about the launch is journaled or read from GitHub.
-The claim is decided under one repository-wide lock beside the mission store,
-so two steps that both see a free slot cannot both take it; a reservation covers
-the moment between a grant and the worker writing its specification, is keyed
-by the invocation the worker records, and is dropped once its holding process
-is gone, without releasing anything a surviving worker occupies — unless that
-worker is there and live but has not yet written its first state, in which case
-it is kept until the worker starts, so the start still reaches the rotation. A step with no
-slot journals nothing, marks nothing, fails nothing, and is not a lifecycle:
-the mission stays runnable, a registered child request stays queued and
-unanswered, and the same launch is asked for again later. A step that could
-not decide — an unusable ceiling, or a worker cache or admission record it
-could not read — launches nothing. The per-target worker lease and the
-canonical approval lock still apply beneath the ceiling; a launch they refuse
-gives its slot straight back.
-
-A mission-dispatched agent session that fails at a provider limit waits for the
-limit to lift instead of failing its step (the mission runner design's D-9 and
-D-18, `Kanban.ProviderLimit`). The limit is identified only from the provider's
-own structured evidence about that session, never from error text. For Claude,
-the session log's final `result` reports `is_error`, and either its latest
-`rate_limit_event` is `rejected` without overage covering it (`overageStatus`
-neither `allowed` nor `allowed_warning`), or it recorded no such event and
-`api_error_status` is 429. For Codex, the session's final turn failed and the
-account's rate-limit snapshot — the `codex` bucket of the same
-`account/rateLimits/read` the usage sidebar makes, read after the failure —
-names `rate_limit_reached` or a workspace owner or member usage limit; a final
-turn run on the app server may instead name `usageLimitExceeded` or
-`rateLimitExceeded` as its `codexErrorInfo`, which counts without the snapshot.
-Only the invocation's final turn is evidence: an earlier turn's limit says
-nothing about why the session finally failed.
-`allowed_warning` never counts. Depleted credits — Codex's
-`workspace_owner_credits_depleted` or `workspace_member_credits_depleted`, or a
-Claude rejection whose overage is disabled `out_of_credits` — fail the step
-with a detail saying credits are depleted, whatever else the evidence says.
-Every other failure concludes exactly as before: a deadline, a moved or
-unreadable target, a session that never reached the provider or was cancelled
-before its turn failed, a snapshot that cannot be read, and a value this
-release does not recognise. Only the runner's reading of a plan step's settled
-worker applies the rule, so a worker launched from the board is observed
-exactly as before, and a registered child's limit is recorded as the end it was
-for its parent to decide about.
-
-Such a step becomes `waiting_capacity`, carrying a wait recorded once and never
-recomputed (section 16): the retry time, the number of consecutive waits the
-step has had, and the failed session the wait was recorded for. The retry time
-is the provider's reset — the rejected event's `resetsAt` for Claude, the latest
-reset among the exhausted windows for Codex when every window that blocks, or
-whose usage cannot be read, names one — even one already past, which is
-due at once; evidence with no usable reset backs off one minute, doubling with
-each consecutive wait of the same step, to at most one hour. Reading the same
-failure again, a restarted runner, and passes that skip the waiting mission
-change neither the count nor the deadline. Once nothing else in the mission can
-move, the mission is `waiting_capacity` too. The failed worker is terminal, so
-the wait holds none of the agent slots above; a waiting mission gets no child
-and no place in the rotation until its retry time, so it neither spins nor
-holds a slot idle. From then on it is runnable again: its child wakes the step
-back to `pending` and the mission to `running` in one write, and the next
-iteration dispatches the step afresh — a new invocation, a new session, and the
-same pause, lease, precondition, and ceiling checks any dispatch takes. A retry
-that meets a limit again continues the count; any other conclusion ends the
-sequence, and the next limit starts again from one minute. A wait whose retry
-time is missing or will not decode is never retried automatically: the mission
-stays waiting, its halt says why, and every pass reports it and fails, as it
-does for any other record it cannot account for — whatever the mission's own
-lifecycle, including one a peer's failure has since ended.
-
-Free slots go to waiting missions in a durable round-robin (the mission runner
-design's D-8, `docs/designs/mission_runner_design.md`): a mission's
-place is the number of its latest successful admission, so the mission admitted
-longest ago — or never — goes first, and a restarted runner resumes the same
-order. Only a launch that started its own worker moves a mission to the back;
-one that was refused, went stale, failed to start, or joined a worker somebody
-else started leaves its place alone. A pass launches the children in that order and,
-before any starts, enters in line those missions its own records say may ask
-for a slot — a step pending with every dependency met — withdrawing each
-mission's place as soon as that mission's own child exits, whatever the
-children ahead of it are still doing. A mission that can only watch its
-worker, settle a step, or record a result is not entered, so it never holds
-a free slot idle for a mission behind it. A free
-slot a mission ahead may still take is left for it, so the rotation rather than
-which child reaches the lock first decides who gets it; a slot nobody ahead can
-take is used, so a lone runnable mission may use every free slot over
-successive passes. Priority for a direct operator command is not part of this
-rotation; it belongs to Mission Control's `SAG-5`.
-
-Each admitted mission is advanced through its own `kanban --mission` child,
-launched with a non-terminal standard input, its output captured rather than
-inherited, this process's own working directory as the checkout, and the same
-resolved repository and absolute configuration the pass was given. A child
-launched for a pass makes exactly one controller iteration and exits; it never
-waits on the agent it started, which is a detached worker the next pass
-observes. A pass does not return while a child it launched is still running,
-and the children stay in the pass's own process group so a signal to that group
-reaches all of them.
-
-The pass writes exactly one JSON document to stdout and every word of narration
-to stderr. That document names its schema and version, the repository, each
-admitted mission and its disposition, each outstanding attention identity and
-what became of its notification, the mission agents it saw live once its
-children were done against the ceiling it applied, and a termination reason of
-`completed`, `refused`, or `failed` — exiting 0, 2, and 1 respectively. Beside
-`advanced`, `settled`, and `blocked`, a disposition may be `awaiting` — the
-mission's only eligible work was watching its own live worker — or `deferred`,
-held back by the agent ceiling, with the detail saying why; neither is progress
-for the supervisor's pacing, neither fails the pass, and neither raises
-attention. A ceiling that is not a positive whole number refuses the pass by
-name. Dispositions are derived from the child's own machine-readable result,
-its exit status, and the mission's durable snapshot, never from terminal text;
-to that end `--mission` gains an internal `--mission-result FILE`, which makes
-the run one step and writes a typed account of it, and is written only when a
-caller asks for one, so an operator's own `--mission` run is unchanged — it
-still runs until the mission halts, waiting out a held launch as it waits out
-live work. A launch identity minted before the child is
-created travels with it as an internal `--mission-invocation`, is written into
-that account, and is the first thing checked when it is read — before the
-mission and the repository, because it is the only one of the three that
-separates this launch from another launch of the same mission in the same
-repository. A result is therefore bound to its launch rather than to the path
-it was left at, and a document an earlier pass — or this pass's own earlier
-attempt — left in that place is refused rather than adopted.
-
-That holds for an invocation that never reaches a pass. A configuration that
-will not load, a checkout that resolves to no repository, and a mission store
-that will not open each end the run before anything is admitted, and each leaves
-the same document: `failed`, exiting 1, nothing admitted and nothing observed,
-with the reason in its detail. Answering one of those on standard error alone
-would reach the supervisor as an unparseable pass — an incident naming nothing,
-in place of the failure it was told about. Such a report names the repository
-the invocation asserted through `--repo`, which is both the identity the
-supervisor compares it against and the one resolution would have produced, since
-an explicit `--repo` is used verbatim; once a repository has actually been
-resolved the report names that one instead, because an invocation without
-`--repo` learns its identity from the checkout's own remote. A failure before
-either names none at all, and a reserved spelling no repository name can carry
-says so, rather than leaving the field to be guessed at or echoing back
-something that is not an identity.
-
-A record that is *absent* — missing, or written under a schema version this
-release does not know — is passed over silently, exactly as section 16 says. A
-record that is there and will not decode, or that decodes and names another
-repository, is not: that is mission state nobody can account for, and the pass
-it appears in is a failed one rather than a quiet repository. It is still a
-pass: the missions it could read are advanced, so a failed pass routinely
-carries dispositions beside the reasons it failed, and a reader takes the
-termination for the verdict rather than inferring one from an empty list. A child's result
-is held to the same standard, and is refused unless it names both the mission
-it was launched for and the repository this pass is advancing.
-
-A pass reaches no network. The runnable set, the lease decision, and every
-disposition come from durable records on this machine, so a pass with nothing to
-advance launches no child and makes no GitHub request at all. What it still does
-in that case is observe attention: a mission waiting on a person is precisely
-the one nothing is advancing, and its outstanding attention is reported, and
-notified about once, whether or not any mission was admitted.
-
-Attention itself is created by the transition, not by the pass. Entering
-`waiting_input` opens a waiting episode and gives it a stable,
-repository-qualified identity that repeated observations and a restart both
-preserve; leaving that state ends the episode, and a later re-entry is a new one
-with a new identity. That identity is derived from the repository, the mission
-and the moment, so it is checked against the record carrying it, and attention
-recorded outside `waiting_input` is refused on the way in and on the way out —
-an episode is exactly a visit to that state, and a record saying otherwise
-would be read as a mission waiting on somebody it is not. A waiting mission
-that records no attention is not refused: that is what a mission which entered
-the state before episodes existed looks like, and the next transition opens
-one. The other waits raise none: a barrier and a capacity wait
-are this machine's own arithmetic, and a pause is something an operator already
-did. Because the transition creates it, an interactive `kanban --mission` run
-records attention too; only a scheduler pass observes and notifies.
-
-Notifications are off by default (section 16). When they are on, the operator's
-configured command is run through the same bounded capture seam a usage command
-uses, with the repository and the word `attention-required` appended after the
-command's own arguments — so only their order is fixed, not their position —
-followed by one argument per item the episode is about — the waiting step's own when it
-names one, otherwise every target the mission's selector resolved to, and none
-at all when it names none. Nothing else is passed: no title, no summary, no
-path. The items come last so the two fixed positions do not move with their
-number. It runs in its own process group, and that group is swept on every path
-out, so a command that outlived its bound is ended rather than left running and
-a descendant it backgrounded goes with it. Every path means every path: an
-operator's stop, a failure while the command's output is being read, and a
-caller's own bound expiring around the pass all end that group, because the
-group being its own is exactly what puts it out of reach of a signal sent to
-the pass's. A mission whose own specification
-cannot be read launches nothing, because that is indistinguishable from a
-mission that names no item and notifying on the second reading would spend the
-episode's one attempt on a false claim; the episode is reported and stays
-eligible. Delivery is at most
-once per waiting episode: a durable suppression record is written before the
-command is launched and the identity is never retried afterwards, whatever the
-outcome, so a crash in that window loses the notification rather than risking a
-second one. A command that exits zero has completed, which is not proof that
-anybody was shown anything, and no record says otherwise. A notification that
-failed resolves no attention and stops no scheduling.
-
-Its own terminal is the authenticated console, and it is authenticated by
-being unreachable rather than by presenting anything. A line typed there is
-turned into a command inside the running process and handed straight to its
-controller, so no artefact exists for another process to read, copy, or replay;
-such a line may pause or resume the mission, record a `user_override` that
-resolves an unknown outcome, end a registered subtree, or register a child of a
-live registered session. A redirected standard input is some other process's
-output and is not read at all. Everything that arrives as a file is an ordinary
-operator command with no override authority, whoever wrote it — which is what
-an attached dashboard submits, and is deliberate: a credential durable enough
-for a second process to present would be durable enough for a third to copy.
+Only the dashboard takes the board lease and writes the durable `gh` record
+(section 15). `--glyph-test` resolves no repository and `--usage` resolves none
+that it acts on, so neither has anything to serialize against.
 
 ## 6. Layout
 
@@ -554,7 +203,7 @@ scrollable four-column board.
 ║ ┃ ↻ ┃                    ║              ║              ║              ║              ║
 ║ ┗━━━┛                    ║              ║              ║              ║              ║
 ╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  s search  F filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  u update  c sidebar  v brief  ? help  Ctrl-L repaint  q/Ctrl-C quit
 ```
 
 The sidebar's foot holds one control, the `↻` update button, which starts the
@@ -607,13 +256,11 @@ Responsive behavior:
 
 - An open overlay replaces it in the same way, and outranks a filter box or a
   search still focused underneath it. A card's details overlay and the help
-  overlay name the bindings section 7 gives their scope; the settings,
-  process, and solve-chooser overlays name the keys each answers itself; and a live-agent overlay names what its focused session answers in
-  the mode that session is effectively in — insert or normal — so the row
-  changes with the mode badge beside it. No overlay repeats those keys inside
-  its own box: the row along the bottom of the terminal is where they are
-  named. None of that adds rows to section 7's table or to the help overlay,
-  which stay the complete list of the bindings they already document.
+  overlay are the two overlays there are, and each names the bindings section 7
+  gives its scope. No overlay repeats those keys inside its own box: the row
+  along the bottom of the terminal is where they are named. None of that adds
+  rows to section 7's table or to the help overlay, which stay the complete
+  list of the bindings they already document.
 - The footer's notice line is transient by time as well as by interaction. A
   settled notice — one reporting a finished fact, whatever its producer,
   category, or severity — disappears on its own ten seconds after it becomes
@@ -625,8 +272,8 @@ Responsive behavior:
   usage refresh, a quit settling its cleanup — stays for as long as that operation
   does, and takes the ordinary ten seconds from the moment it settles; a
   composed notice is active while any of its fragments names such an
-  operation. The startup line's diagnostics — an invalid cache, a settings
-  problem, an authority notice, a degraded roster entry — are reported
+  operation. The startup line's diagnostics — an invalid cache, an authority
+  notice, a degraded roster entry — are reported
   nowhere else, so they ride its loading fragment until the first open
   generation publishes: an event notice arriving during the load — a usage
   result, a history pause, a completed-cache warning — composes onto the
@@ -650,12 +297,11 @@ Responsive behavior:
   the rows a notice takes and taller again once it clears; a notice wrapped
   across several rows reserves all of them. On a terminal narrower or shorter
   than the windowed box, the fullscreen dimension is the windowed one, and a
-  terminal too small for an overlay clips it exactly as it always has. Each
-  panel's one scrolling interior — a transcript, the process list,
-  the settings roster — takes the rows the chrome around it leaves rather than
-  a fixed count, so a taller box shows more of what is being scrolled and still
-  scrolls the rest. Every overlay opens windowed, and the Codex/Claude solve
-  chooser keeps its windowed box in every extent.
+  terminal too small for an overlay clips it exactly as it always has. A
+  panel's one scrolling interior — the details body, the help rows — takes the
+  rows the chrome around it leaves rather than a fixed count, so a taller box
+  shows more of what is being scrolled and still scrolls the rest. Every
+  overlay opens windowed.
 
 ## 7. Keyboard interaction
 
@@ -696,11 +342,11 @@ configuration or dependency, and terminals without focus reporting keep their
 manual update behavior.
 
 Focus updates have a 60-second cooldown from the latest board refresh start,
-including startup, manual updates, workflow updates, and coordinator retries.
+including startup, manual updates, and coordinator retries.
 The cooldown uses a monotonic clock and lives only for this dashboard launch.
 A focus event during the cooldown, a running or queued board refresh, or
 dashboard shutdown is ignored without queuing another update. Lost focus does
-nothing. Manual updates and required workflow refreshes bypass this cooldown.
+nothing. Manual updates bypass this cooldown.
 Remaining focused does not start periodic updates: eligibility is checked only
 when another gained-focus event arrives.
 
@@ -848,14 +494,14 @@ write, and no change to board freshness. Rendering, keyboard selection, mouse
 target resolution, card actions, and boundary movement all read the same visible
 entries, so a row the user can see or select never dispatches to a different
 underlying card. Clicks inside the searched column keep their ordinary meaning
-on the cards and epic headers actually displayed, and one that opens details or
-a live session ends search the way Enter does.
+on the cards and epic headers actually displayed, and one that opens details
+ends search the way Enter does.
 
 A search moves to another column by a click or an arrow key, and both reach one
 transition, so the state is the same however it was reached. A left or right
 click aimed at any column but the searched one moves the search there, and does
-nothing else: it does not open details, toggle an epic's expansion, open a live
-session's overlay, or change that column's selected row, and the rule is
+nothing else: it does not open details, toggle an epic's expansion, or change
+that column's selected row, and the rule is
 identical for a card, an epic's header, and the column's whitespace — reaching a
 specific card there takes a second click. Left and Right move the search one
 column, clamped rather than wrapped like the ordinary board's column movement,
@@ -983,469 +629,6 @@ criteria first, then any query — so no raw row index is ever mixed with a
 filtered one. Each criteria edit re-seats every column on the entry it was
 showing, by that entry's item or epic identity; a card the criteria hid takes
 its column's first selectable entry instead, exactly as a closed search does.
-
-### Embedded issue reviews
-
-Pressing `r` on an issue or from its open details starts its label-selected
-review stage, or reopens the issue's existing session. Two kinds of revision
-session are replaced rather than reopened: one that has *failed*, since it has
-lost the thread it would send on and so takes no further input, and any settled
-one still holding text nobody managed to send, since reopening it is the one
-press that would strand that text for good. It counts wherever it sits — a
-message handed back onto the input line, one queued behind it, or a draft typed
-while the turn was still running — because once the session cannot send, all
-three are equally lost. Both start a fresh revision carrying that text across,
-the old input line first.
-
-Text a replacement cannot take is held for the issue rather than for any one
-session. `r` starts whatever stage the labels ask for, and a revision that
-publishes its verdict moves them to a canonical stage, which runs the gate as a
-subprocess and has nothing to send on: put there the text would look kept while
-being unreachable, and dropped there it would be lost to the single keystroke
-the user made to carry on. Held for the issue it survives however many stages
-come and go, and the next session that can send is handed it. An interrupted revision is the one settled phase that
-stays resumable and keeps its input, but only while its connection lives:
-once that ends it is as finished as a failed one and is replaced the same way.
-Canonical review and
-rereview use the synchronous v2 reviewer; interactive revision uses one
-persistent Codex app-server. Pressing `r` on an epic header is a no-op that
-sets a notice instead: an epic is structure rather than reviewable work, so
-neither a collapsed tracker nor a childless header — from the board or from
-that header's own details overlay — starts a session, opens the review
-overlay, or acquires a review badge. A collapsed tracker's notice names `e`,
-because expanding it is what makes its reviewable children selectable. `S`,
-`A`, and `x` still resolve both header shapes to the epic issue. On a PR,
-`r` is the unified
-review/revise/repair key: it starts review, revision, or rereview according to
-the durable review labels, except on a card that is both in Done and reporting
-a problem status, which starts a repair instead. App-server starts on demand and one process hosts all
-interactive revision threads for the running dashboard; PR actions use resumable
-canonical-model CLI sessions because their permissions include PR comments,
-labels, worktree edits, commits, and pushes.
-
-PR routing mirrors issue routing while keeping implementation and review
-separate:
-
-1. With no workflow label, the opposite brand runs `pr-review`.
-2. `reviewed:changes` switches to the PR-origin solver brand, which runs the
-   canonical `pr-revise` workflow: it acts only on a current canonical
-   CHANGES_REQUESTED verdict for the PR head (rerouting stale feedback through
-   canonical rereview instead of editing), works in a clean isolated
-   worktree, verifies the remote head before pushing, waits for required CI,
-   and invokes exactly one canonical `pr-rereview`. Kanban never manually
-   adds, removes, or synthesizes `reviewed:approve`, `reviewed:changes`, or
-   `reviewed:revised`; the canonical rereview publishes the fresh verdict
-   directly, so Kanban never waits on a Kanban-created `reviewed:revised`
-   handoff.
-3. A PR still carrying a legacy `reviewed:revised` label (from before this
-   unification) routes to the opposite brand for `pr-rereview` only, without
-   editing the PR again, and removes the stale label once it publishes.
-4. A card that is in the Done column *and* whose §9 status is a problem —
-   a merge conflict, a failed check, or a blocking label while
-   `blocking_severity` is red — overrides all three above and runs the
-   packaged `repair` workflow. Both halves of that condition are required:
-   `pullRequestStatus` reports the same problems for a draft or unapproved PR,
-   and those stay in Reviewing under the routing above; a Done PR with no
-   problem status keeps whatever its labels derive, which includes revision.
-   Like `pr-revise`, repair works on the PR's own code, so it runs on the PR's
-   own origin brand and ends by invoking exactly one canonical rereview on the
-   opposite brand rather than reviewing itself. Repair never merges and never
-   removes a blocking label: it ends by triggering that rereview, and merging
-   stays a separate, explicit action.
-
-This fourth meaning belongs to the user's own `r` alone. Autosolve drives its
-pull request through the same session machinery internally, and keeps its
-label-derived review/revise progression so a problem status cannot divert a
-running loop into a repair.
-
-Every model and effort the Haskell layer spawns an agent on is a cell of the
-model roster (`src/Kanban/Models.hs`), read at startup from
-`~/.config/kanban/models.toml` and otherwise the compiled defaults the tracked
-`models.toml.example` mirrors. The settings overlay is the other way it
-changes: an assignment edited there is written back to that same file, and the
-roster the dashboard holds moves to what was saved only once the write
-succeeds, so a running process never resolves a cell that is not on disk. That
-file's `agents` list is the loaded provider set, and the size of that set is
-the operating mode: two providers is dual, one is single-agent, and zero is
-no-agent — as is a `models.toml` that will not load at all, which has no list
-to count. Settings names the derived mode on a read-only line, because moving
-it is an edit to that one key in the file rather than a key on the screen.
-Review and rereview read `pr_review`, revision and repair read `pr_revise`,
-solve reads `solve`, the embedded issue-review thread reads that thread's own
-provider's `issue_review`, and `kanban_run_claude` reads `issue_revise.claude`;
-which brand's column applies is the routing described here. The defaults
-reproduce today's assignments exactly: Codex-origin PRs on Opus 5.5 xhigh
-for review and GPT-6-Sol high for revision and repair, Claude-origin PRs on
-GPT-6-Sol xhigh for review and Opus 5.5 high for revision and repair, and
-both solvers on GPT-6-Sol high and Opus 5.5 high.
-
-Single-agent mode moves that column rather than the roles. Every supported
-pull-request action runs on the one loaded provider whatever the pull request's
-origin marker says, including review and rereview for a grok-origin,
-kimi-origin, or google-origin pull request and every action for an unknown or
-external origin. Grok-origin, kimi-origin, and google-origin revision and repair
-remain refused because those origins have no spawned provider to collapse onto.
-Canonical issue review, including a kimi-origin or google-origin issue's
-review, likewise collapses onto the loaded provider; kimi-origin and
-google-origin issue revision remain refused, and the session that filed the
-issue authors its amendment. The embedded issue review starts the
-loaded provider's own backend, the Codex app-server in a Codex-only install and
-the `claude` stream-json session in a Claude-only one; a fresh solve starts on
-it without opening the chooser, because there is nothing to choose between;
-and the usage surfaces read only its account. Which provider that is has one
-declaration site, beside the one that answers whether any is loaded at all, and
-no surface derives it from the `agents` list on its own. Origin markers are
-still written in every mode: a solve stamps its brand's marker as it always
-did, and it is the routing that stops reading them. What single-agent does not
-move is the roles themselves — authored work still reads `pr_revise` and the
-canonical gate still reads `pr_review` — nor which keys the board offers, which
-is decided at the spawn boundary rather than on the footer. Dual mode is
-unchanged in all of it.
-
-A roster that cannot supply the cell a launch needs starts no process and
-reports why. A press that has not created a session yet — a chooser digit, an
-`r` on a pull request — refuses before it creates one, so the next press is a
-fresh choice and the operator can still select a brand the roster does load. A
-launch that already owns a session, a resume or an autosolve round, settles
-that session as a failed one carrying the message, exactly as a blocked
-preflight does, rather than leaving it waiting on a provider that will never
-start. That covers a present `models.toml` that is unreadable, unparseable,
-foreign-versioned, or invalid — the refusal names the file and the defect — and
-equally a valid roster that does not load the brand this run's routing
-selected. Neither case falls back to the compiled
-defaults. An absent file is not one of these: it silently *is* the defaults.
-The cell a launch resolves is recorded in the worker specification it writes,
-and that record — the provider as well as the model, effort, and label — is
-what its detached supervisor constructs argv from. Nothing is resolved a
-second time: a launch that resumes an existing provider session replays the
-assignment that session's previous worker recorded and consults no roster at
-all, so editing `models.toml` between two turns of one session cannot move it
-onto a different model, and a resume still starts when the file has since
-become unusable. A session whose worker predates the record resolves once on
-its first resume and records the result.
-
-Every model name Kanban displays is the `display` value of the assignment
-actually in force, never a value written down beside the roster. A surface
-that belongs to a session — its header, its transcript's opening lines, its
-row in the processes overlay, and the row an unattached worker gets before its
-session attaches — shows the assignment that session recorded, so the name on
-screen survives an edit to `models.toml` and stays the one its supervisor is
-really running; only a session with no recorded assignment, which is a fresh
-one before its first launch and one recovered from a worker specification
-written before the record existed, resolves the live cell instead. A surface
-that belongs to no session resolves live because there is nothing to replay:
-the chooser's two rows are `solve.codex` and `solve.claude`, and the reviewer
-line an autosolve session carries is the `pr_review` cell that review will run
-on when it starts — the opposite brand's in dual mode, the one loaded
-provider's in single-agent. A surface whose cell cannot be resolved names no
-model at all — it says the model roster is unavailable, dimmed where the name
-was its own dimmed text — and never falls
-back to the compiled defaults; review prose, which cannot be dimmed, states
-the same thing in words.
-
-A missing or contradictory `pr-origin` marker fails visibly rather than
-guessing. `<!-- pr-origin:grok -->`, `<!-- pr-origin:kimi -->`, and
-`<!-- pr-origin:google -->` are known
-origins: dual-mode review and rereview run on Codex, including for a valid Kimi
-or Google marker on a fork pull request, while an unknown or external origin still falls
-through to both loaded providers. None of Grok, Kimi, or Google is a compiled
-adapter, so the board refuses revision and repair of a grok-origin,
-kimi-origin, or google-origin pull request rather than
-spawning Codex or Claude to edit it.
-
-The review is a direct, explicit workflow and never starts an approval daemon.
-Initial review and rereview synchronously invoke the vendored
-`tools/approve_issues.py` backend (installed with
-`tools/install_issue_review.py`; see
-[the agent-workflow contract](agent-workflow-contract.md)) as the canonical
-`issue-review:v2` fingerprint publisher so the existing solve gate accepts
-Kanban-reviewed issues. Kanban does not reconstruct where that backend was
-installed: it reads the absolute path out of the record the installer writes,
-whose own location `--install-dir` cannot move, so an installation made
-anywhere is found by a dashboard launched with no special environment. Which
-location that record is at is `tools/kanban_config.py`'s answer, the one place a
-managed record's path is written down: the XDG location
-(`$XDG_DATA_HOME/kanban/issue-review`, `~/.local/share` when that variable is
-unset or empty) first and
-`~/Library/Application Support/kanban/issue-review` second, on both
-platforms, taking the first that is occupied, and this platform's own write
-default — macOS's `~/Library`, the XDG one everywhere else — when neither is.
-That is what the Python installer and backend do, so the board and they
-resolve one installation rather than two. A non-empty
-`KANBAN_ISSUE_REVIEW_INSTALL_DIR` still wins, and a record carrying no
-recorded path — an installation predating the record — falls back to the
-directory holding it. Each way that lookup can fail — an override or recorded
-backend that is not there, a record that will not parse, a recorded path that
-is not absolute — is reported as its own diagnostic naming the document
-consulted and the repair for that case, never as the bare installer command
-the user may already have run. Preflight, both packaged PR coordinators, and
-the packaged issue-review and solve workflows resolve identically. Interactive revision remains inside Kanban.
-Each `r` invocation advances exactly one durable label-driven stage:
-
-1. With neither workflow label, the routed reviewer performs the initial review.
-   In dual mode, Claude-origin issues route to GPT-6-Astra high, Codex-origin
-   issues route to Claude Fable 5.1 high, Kimi-origin and Google-origin issues
-   route to GPT-6-Astra high, and unmarked issues require both. Single-agent mode
-   collapses each of those routes onto the loaded provider; no-agent mode
-   starts no reviewer, publishes nothing, and changes no label. An approval
-   stands while the reviewed spec is current and the reviewing brands are the
-   ones the origin requires; the marker's `models=` field records which models
-   ran and is never checked, so replacing a default model or effort retires no
-   approval (contract §2.3.1). The retired reviewer
-   personas stay readable in the other direction, since a historical review that
-   predates the marker's `verdicts=` field has only its human-readable summary
-   to recover a per-reviewer verdict from.
-2. For supported origins, `reviewed:changes` switches back to the author brand
-   for revision:
-   GPT-6-Astra xhigh for Codex-origin issues and Claude Fable 5.1 high for
-   Claude-origin issues. Unmarked issues default to GPT-6-Astra xhigh. The
-   Codex half is the embedded thread's own coordinator and so reads
-   `issue_review.codex`, not the gate cell stage 1 names; the Claude half is
-   `issue_revise.claude`. The
-   agent writes one canonical specification
-   amendment as an issue comment, then replaces `reviewed:changes` with
-   `reviewed:revised` without approving. Kimi-origin and Google-origin issue
-   revision are refused at the board and action-registry boundaries in every
-   operating mode because neither Kimi nor Google is a spawned provider and
-   Codex is already their dual-mode reviewer; the session that filed the issue
-   authors the amendment instead. As a
-   second line of defence against the marker changing after the board cached
-   the issue, the embedded coordinator re-reads the live body and stops without
-   commenting or changing labels when it finds a Kimi or Google marker during REVISION.
-3. `reviewed:revised` routes back to the same opposite-brand reviewer set. A
-   passing rereview replaces it with `reviewed:approve`; a failing rereview
-   returns to `reviewed:changes` for another cycle.
-
-Revision agents resolve mechanical or repository-verifiable omissions directly.
-Any product, compatibility, scope, policy, migration, or user-visible decision
-with multiple reasonable answers must pause for a structured user question.
-Required agents are never silently substituted. No stage edits the checkout,
-the issue body, or implements the issue.
-
-Kanban registers a client-side `kanban_prompt_user` dynamic tool on every
-thread. Developer instructions require every user-facing question to call this
-tool rather than place a question in prose. Choice and free-text requests pause
-only their owning turn. Kanban renders the request, returns the selected answer
-as the tool result, and lets other sessions and the board remain usable.
-Command and file-change approval requests use the same waiting-state UI.
-
-Kanban also registers `kanban_run_claude`, on the threads that have a separate
-Claude revision agent to reach through it — which is a Codex coordinator on an
-install that loads Claude as well. A Claude coordinator revises inline and is
-served no such tool, and a Codex-only install loads no agent for it to reach,
-so both are told about neither. Claude-authored revision stages use it instead
-of launching `claude` through a Codex command: the latter runs inside Codex's
-sandbox and cannot reliably reach the macOS keychain-backed Claude login. The
-client tool starts the official CLI directly from Kanban on the roster's
-`issue_revise.claude` cell — `claude-fable-5-1` at `high` by
-compiled default — under `--permission-mode plan --safe-mode`, refusing to
-spawn at all when the roster loads no Claude provider. It streams a standalone
-prompt over stdin, and returns its output to the coordinator. It has a
-ten-minute deadline, terminates its process group on timeout, and cannot edit
-the checkout or mutate GitHub directly.
-
-The third client tool, `kanban_github_issue`, owns authenticated issue I/O.
-Codex is forbidden from invoking `gh`, `curl`, or GitHub APIs through the generic
-command path. The tool can read one issue and its comments, post one issue
-comment, and add/remove only `reviewed:approve`, `reviewed:changes`, and
-`reviewed:revised`; every other mutation is rejected before `gh` runs. The
-review overlay reports when the bounded operation starts and whether it returns
-successfully, so normal review transitions never present a generic command
-approval prompt.
-
-Review overlays contain a bounded, mouse-wheel-scrollable transcript, one-line
-input, structured questions, command approvals, and tabs for all open
-sessions. `Esc` from normal mode, a normal-mode `q`, or an outside click hides
-the overlay without interrupting work; selecting the issue
-and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
-follow-up turn, and Ctrl-C interrupts the active turn of an interactive
-revision or ends a canonical stage's whole action, which does not resume.
-Enter is live only while
-something is still there to read the draft: a session in a terminal phase, and
-a canonical review stage in any phase, takes no follow-up at all, while an
-interrupted app-server revision remains resumable and does. Only running turns
-chain short spinner ticks; completed, hidden, and idle sessions schedule no
-redraws.
-
-An issue review, rereview, and revision are runner-owned, so quitting stops
-none of them. Each is a durable child action of the repository review host
-described in the persistent-worker milestone below, and the host owns the
-app-server process, not the dashboard.
-
-Two different retentions meet in that overlay, and they are not the same
-contract. The child's event journal and raw log hold every event the action
-ever produced, bounded only by the worker cache's own retention. The overlay's
-transcript is bounded as it always was. A child's terminal envelope is the last record in its journal: a monitor stops
-replaying there, so anything appended after it would be seen by a dashboard
-that reattaches and not by one that was watching. Whatever outlives an action
-— a provider thread announced after it was settled, a canonical gate that
-finished while it was being terminated — is recorded on the host's own journal
-instead, where it is evidence without being replay.
-
-Ending an action moves nothing in the overlay at the press. Both gestures that
-end one — the kill, and Ctrl-C on a canonical stage — used to mark the
-transcript and move the phase before the command had even been written, and no
-reattached overlay can reconstruct a mark that is not a journal event; it also
-announced a kill that a failed ledger write meant had not happened. The
-transition belongs to the evidence instead: the host journals the command's
-own line before it applies it and the child's terminal envelope after, and a
-live overlay applies those two records exactly as a reattached one does.
-
-A dashboard reattaching to a live
-action replays that whole journal through the same transitions a live event
-takes, so it arrives at the same bounded transcript suffix, the same pending
-question or approval, the same activity, and the same scroll-follow state a
-dashboard that never closed would be showing — and no overlay bound, replay
-path, or transcript reconstruction ever truncates evidence the journal still
-holds.
-
-A gesture announces what it asked for only once the command carrying it was
-written. An unwritable ledger means nothing was requested, and the failure the
-submission reports is the notice that says so — one an announcement would
-overwrite with a promise.
-
-Every input the overlay sends — a structured answer, an approval decision,
-feedback or steering, a deliberate resend of a refused steer, an active-turn
-interrupt, and ending the whole action — travels to that child as a durable,
-correlated command with an acknowledgement written back. A command is claimed
-before it is applied and settled after, and a command carrying any
-acknowledgement is never applied again — so a retry, a replay, a restart, and
-an acknowledgement that could not be written all still deliver it exactly
-once. A command written to an action that has already ended is refused rather than
-owed: settling takes a child off the host's live list, and a dashboard that
-has not yet seen its terminal event still writes to it — so nothing would ever
-look at that command again while the draft it came from had been cleared. The
-overlay refuses such a submission itself, from the action's own durable state
-rather than its picture of it, and keeps the text on the line. That check and
-the write are still two steps, so the overlay also holds what it wrote until
-the child's journal accounts for it: a command that reached its action
-journals its line before that action's terminal envelope, so anything still
-held when the terminal event arrives is a message the action never read, and
-it is offered back to the input line rather than lost. That release is not
-conditional on the envelope being what settled the session: a result event can
-publish the terminal phase first, and that phase stands, but the envelope is
-still the last thing the journal can say and what is held at that point was
-still never read. Ending an action and
-interrupting a turn are held by nothing, carrying no text of their own. The
-host and the reconciliation each refuse anything that slips past, on the
-ledger rather than the journal, because the terminal envelope is still the
-last record that journal takes.
-
-A claim left standing is an attempt whose result was never observed, and
-whatever next reaches that action answers it — including the action's own live
-host, on its next poll, since every reader treats a claim as settled and a
-final acknowledgement that could not be written would otherwise stand until
-some later host or recovery pass arrived — from the child's journal where
-that records what was delivered, and as unobserved only where it does not.
-Adoption by a replacement host is one such arrival and the reattached
-dashboard's own stale-worker recovery is the other, so the reconciliation is
-one shared step both run rather than something only re-hosting performs: an
-action whose host died and which no replacement adopts is still terminalized,
-and terminalizing it over a standing claim would lose a message the overlay
-had already cleared from its input line.
-The journal entry is written before the acknowledgement precisely so a failed
-acknowledgement leaves the answer recoverable rather than turning a delivered
-message into one reported as lost. Applying a command and recording that it
-was applied are one step against the action ending: a settle between them
-would close the journal, leaving the provider holding a message the
-acknowledgement calls accepted and the transcript has no trace of. The two
-orderings are exhaustive rather than racing — a delivery already under way
-finishes both steps before a settle takes effect, and one that has not started
-finds the action settled and is refused without being applied. The
-reconciliation above appends nothing to a journal that has already carried a
-terminal envelope, for the same reason nothing else may; it still settles the
-ledger, so the command is never re-applied, and what a terminal action gives
-up is only having its text offered back. Command identifiers carry a process-local sequence as well
-as a clock and a pid, because two presses in one clock tick would otherwise
-deduplicate to one. Every
-command that acts on a thread names the thread, turn, or request the overlay
-was showing when it was submitted — not the newest the action has recorded,
-which can already have moved on while a journal event was still in flight — and is refused rather than retargeted when the child has since
-moved on — including feedback, whose turn must still be the turn the child is
-on, so a message meant to steer one turn never steers the next or opens a
-fresh one. Ending the action is the one command that names none, because it
-ends the child whichever thread it is on, and everything queued behind it is
-refused rather than acted on. A
-question raised while no dashboard was running stays pending and is answerable
-by the one that arrives next; a command the owning session rejects is
-acknowledged as rejected and its text handed back to the input line rather
-than left looking sent.
-
-Solve, PR, and review overlays are three presentations of one session record.
-Everything not specific to the kind of agent behind them — status derivation,
-transcript growth and its follow state, the input line and its bound, the
-animation tick chain, and the base key table — has a single implementation;
-only what a phase is called and looks like, what submitting or interrupting
-does, and when a spinner is worth running differ. Consequently all three carry
-the tab strip over their own in-memory sessions and answer `Tab`, which moves
-to the next session by ascending number with wraparound, preserving each
-session's draft and scroll position, and does nothing at all when that kind
-holds a single session.
-
-Every kind's animation ticks carry a generation. Repeated triggers for one
-running turn coalesce onto the chain already in flight rather than starting a
-second, a tick from a superseded chain is dropped rather than rearming, a
-session replacing an earlier one for the same number cannot collide with a tick
-that one queued, and a chain expires and unarms as soon as its session stops
-being worth animating. Which sessions those are is the one condition that
-differs: a review spinner runs only while the review overlay is on screen,
-since its ticks are the only thing driving review redraws, while solve and PR
-spinners also drive the board's own card badges and activity timers and so keep
-running with no overlay open.
-
-What feedback does to a running turn depends on the channel the review runs
-on, because only one of the two can redirect one.
-
-On the app-server, feedback sent into a running turn is steered into it against
-the turn it was aimed at, so the app-server rejects it when that turn has moved
-on. A rejection never discards the message. With the thread now idle it becomes
-the follow-up turn the same keypress would have started a moment later — one
-request, and no second transcript entry. While any turn is running it is reported undelivered
-rather than redirected into a turn the user never addressed: the transcript
-entry is marked as not delivered, and the text returns to the input line, or
-waits in the session behind whatever is already there. A draft typed after the
-send and a second rejected message are both preserved; sending frees the line
-and brings the oldest waiting message back.
-
-On the CLI's stream-json channel there is no operation that redirects a turn in
-flight at all, so feedback ends that turn and becomes the next one. The
-interrupt is confirmed before anything is sent: the message is written only
-once the backend has acknowledged the request *and* the turn it named has
-stopped, in whichever order those two arrive, so it is never written into a
-turn that is still running and never silently dropped because the interrupt did
-not land.
-
-Anything short of an answer that both names the interrupt and agrees with it
-counts as failing to land, and every one of those is reported as this failure
-rather than as an undelivered steer, which has no counterpart here. A refusal,
-an answer that cannot be read, an answer naming a request this client never
-sent, and a line that does not parse at all — which carries no record type, so
-nothing says it was not the answer — are treated alike: the channel carries one
-interrupt at a time and no other control operation, so none of them is somebody
-else's answer to keep waiting for. So are a turn that reached its verdict
-first, a turn ending that is not the one the interrupt named, and a process
-that died before answering.
-Each is bounded — the message comes back rather than waiting on something that
-has already been and gone — and the turn stays whatever it was.
-
-The message comes back the way a rejected steer does when the session can still
-send it, and waits in that session's queue when it cannot, which is where a
-session whose backend has gone keeps it: visible in the overlay, and back on
-the input line the next time one can be sent — including into the fresh
-revision `r` starts once the session holding it can no longer take it, whether
-it failed or reached a verdict. A turn ended
-this way is reported as interrupted, so a session can tell it from one that
-finished on its own, and an explicit cancellation is the same exchange with no
-message riding on it. One interrupt runs on a thread at a time: a second is
-refused while the first is unresolved, which leaves the draft where the user
-typed it.
-
-Review, solve, and PR transcripts follow the live tail only while they are
-already at the bottom. Scrolling up during a turn holds the view where it is,
-however much output arrives; scrolling back down to the bottom resumes tailing,
-as does making the session visible again or starting a new turn. Output only
-ever moves the viewport for the session actually on screen, so a hidden overlay
-or a background review tab never disturbs what is being read.
 
 ## 8. Board state model
 
@@ -1648,7 +831,7 @@ Fields:
 - Up to three wrapped excerpt lines.
 - Assignees, when present.
 - Relative updated time, recomputed on every redraw rather than stored as
-  fixed text. Redraws happen only on input, resize, or worker results, so no
+  fixed text. Redraws happen only on input, resize, or refresh results, so no
   timer is needed to keep it honest.
 - Tracker sequence key when the issue is a tracker child.
 - A `CLOSED` lifecycle badge when the issue is completed, leading the metadata
@@ -1821,12 +1004,6 @@ completed card's presentation still matches the view it was drawn in.
 The overlay presents this content without editing any of it. The board actions
 that reach the selected card — `w` — dispatch from it as well, against the
 item it is showing.
-
-### Incidents panel
-
-The dashboard has no incidents panel and no `i` binding. The PR drainer and the
-issue approval service are run, watched, and stopped from the command line, and
-the board neither polls them nor lists what they report.
 
 ## 12. Epic and tracker grouping
 
@@ -2153,25 +1330,6 @@ overrun ends within the two together rather than within the configured seconds
 alone. Waiting for the coordinator's owner and waiting out a rate limit are not
 the fetch being slow and consume none of that budget (section 15).
 
-The same setting bounds the single-item precondition read, resolved for the
-repository being read. That read asks whether one recorded target still holds
-— the mission runner takes it before every effect, and a worker takes it again
-at the last instant before its agent session begins — and it is one `gh`
-request in exactly the sense the paragraph above means, so a `gh` wedged on it
-costs what a wedged page costs. An overrun is reported as that read having
-timed out, naming the configured seconds, and reaches each caller through the
-path it already has for a precondition it could not verify: the run ends
-without writing a blocked lifecycle, and the worker refuses its turn as
-unverified. Neither is ever reported as the target having moved or gone, which
-is a different reading and a different repair. A timeout is published as one
-only when the interrupted read's own cleanup both proved its `gh` process group
-gone and took that group off the durable record. Either half failing is
-reported in its place, and leaves the record naming that group, marked
-cleanup-pending — or, when even the mark cannot be written, holds the refusal
-in memory (section 15) — so the next fetch re-verifies that entry rather than
-starting a `gh` beside it — a group killed but still recorded is no more a
-clean timeout than one that was never confirmed dead.
-
 Completed history is acquired the same way, in the background. A second
 traversal follows the closed issues and the closed-or-merged pull requests, each
 connection to its final page, asking for the same fields as the open one and for
@@ -2276,10 +1434,9 @@ the last good snapshot.
 ## 14. Usage acquisition
 
 Usage is global rather than repository-specific and refreshes once at startup
-and when the user presses `u`, in every operating mode but no-agent. That mode
-loads no provider, so it spawns no usage process at all: not at startup, not on
-`u`, and not from the sidebar's `↻`, each of which still updates the GitHub
-board data.
+and when the user presses `u` or clicks the sidebar's `↻`. Both providers are
+always loaded: there is no setting that switches one off, and the application
+reads no `models.toml`.
 
 Usage providers are best-effort observers of unstable interfaces. A failed or
 unsupported provider never affects the board or another provider, and each can
@@ -2389,8 +1546,9 @@ keeps users unblocked when a client update breaks a built-in parser.
 
 ### Burn planning
 
-Either provider table may also carry an estimate of what one solve round costs
-it, beside — and independently of — its `command`:
+Either provider table may also carry an estimate of what one solve round — one
+pass of the owner's solve workflow, run outside this application — costs it,
+beside — and independently of — its `command`:
 
 ```toml
 [usage.codex]
@@ -2423,8 +1581,7 @@ count.
 One pure derivation produces that count for every surface, taking the
 configured estimate as an argument the way the clock and zone already are, so
 the printed commands and the sidebar cannot drift into two formulas.
-`kanban --usage` and `kanban --ping` — which prints its post-ping refresh
-through the same renderer — state it in full, appended to the window line it
+`kanban --usage` states it in full, appended to the window line it
 describes:
 
 ```text
@@ -2494,26 +1651,16 @@ Reset and relative times are recomputed whenever a redraw happens for another
 reason, from the instant that redraw carries; the application never wakes on a
 timer to maintain a countdown.
 
-No provider block is drawn at all in the no-agent operating mode, since nothing
-is probed to fill one; section 6 describes what the sidebar keeps in its place.
-
 ### The `--usage` command-line surface
 
 `kanban --usage` answers the same question from a shell without starting the
-dashboard. It reports the providers the operating mode loads — both in dual
-mode, the one loaded in single-agent — and exits zero when at least one
+dashboard. It reports Codex and Claude, and exits zero when at least one
 produced windows, non-zero when none did. A provider that fails prints its own
-line and never suppresses or replaces the other's. In the no-agent operating
-mode it reports no provider at all: there is none loaded to report on, so it
-prints the mode-naming message to stderr and exits non-zero without probing,
-exactly as `--ping` does (section 5).
+line and never suppresses or replaces the other's.
 
 One derivation decides that set for every usage surface, so the sidebar's
 provider blocks, the update the `u` key and the sidebar's `↻` share, and both
-the cached and the forced-live `--usage` read the same accounts. An entry the
-snapshot cache still holds for a provider this install has stopped loading
-stays on disk untouched; it is neither probed nor displayed, because it is not
-this install's own reading.
+the cached and the forced-live `--usage` read the same accounts.
 
 ```text
 Codex
@@ -2596,158 +1743,31 @@ reader's zone. Configuration warnings and cache warnings go to standard error
 in both renderings, so a `--json` consumer's standard output carries the
 document alone.
 
-### Deliberate consumption
-
-Everything above is observational: the sidebar, `u`, `--usage`, `--doctor`,
-preflight, and release verification read account status and submit no model
-prompt. Decision D-2 keeps it that way, and nothing in this section weakens it.
-
-A *deliberate-consumption action* is the explicit opposite. It submits a model
-prompt and spends the user's quota on purpose, and the rules that make it safe
-to have alongside the observers are:
-
-- It runs only when the user invokes it by name. It never runs at startup, from
-  a board or usage refresh, from `u`, from `--usage`, from `--doctor`, from
-  preflight, or from any release-verification path, and it has no key binding.
-- It is never retried. A failure is reported, not reissued: a second attempt
-  would be a second charge nobody asked for.
-- It never replaces or intercepts an observational path, and no configured
-  external usage command can become one. A configured `[usage.codex]` or
-  `[usage.claude]` command still replaces only the refresh.
-
-`kanban --ping BRAND` is the only such action. It starts the named provider's
-rolling window on purpose, so spare capacity in a window that never started can
-be discovered before it is needed rather than after.
-
-- The brand is required and singular (section 5).
-- The request is one fixed prompt, `Reply OK.`, at the client's minimum effort,
-  under non-mutating permissions, from a private Kanban-owned scratch directory
-  under the XDG cache root rather than the user's repository. It never uses a
-  bypass-approvals or bypass-sandbox mode. Claude runs from the probe's own
-  scratch directory, so both Kanban-launched Claude processes leave their
-  session state in one place outside the user's project. No part of a ping
-  depends on that directory having been used before: the first ping on a cold
-  cache creates it, and what keeps that run off the client's folder-trust
-  prompt is the non-interactive invocation, which the client documents as
-  skipping that dialog, together with giving the process no input to wait on.
-- It is bounded by `timeouts.ping_codex_seconds` and
-  `timeouts.ping_claude_seconds`, both defaulting to 120 seconds. These are
-  separate keys from `codex_seconds` and `claude_seconds`, which bound reading a
-  number rather than waiting on a model.
-- Kanban launches exactly one ping process, in a session of its own, and clears
-  its process group once the process ends however it ended. A leader exiting is
-  not the same thing as the ping being over: a client that forked a helper
-  would otherwise leave it spending the window past the bound. Retries internal
-  to a vendor client are that client's own and are neither controlled nor
-  observed here.
-
-That group is only ever signalled while it is provably still Kanban's. A group
-id is the leader's pid, and reaping the leader releases it, so a group read by
-id after that point could belong to anything. The ping is therefore watched to
-its end without being reaped — its exit read from a process snapshot, which
-omits a zombie — and the group is censused and cleared inside the window where
-the kernel still reserves that pid to Kanban's own child. The check that
-enforces this is asking the process handle for its pid, which answers with
-nothing once the handle has been reaped: moving the sweep after the wait stops
-it signalling rather than starts it signalling strangers.
-
-Membership at that moment is the whole census, because joining an existing
-group takes being a child of one of its members — and the ping runs in a
-session of its own, where nothing outside it could have joined at all. A
-process group is not enough on its own for that: any process in Kanban's own
-session may join a group of that session. The census therefore covers a
-descendant at any depth forked at any point in the run, including one whose own
-parent has already exited, and nothing else. Termination then re-checks each
-member by pid, start time, and current group before each of TERM and KILL, and
-sends neither when nothing matches.
-
-Asking for the group whose id is the ping's own pid also settles the
-precondition rather than assuming it: a group's id is its leader's pid, so
-while the ping is unreaped only the ping can hold that id. Had the spawn failed
-to make it a group leader, no such group would exist and the census would
-select nothing, rather than selecting whichever group it had been left in.
-
-The deadline is measured against a monotonic clock, and every snapshot is
-bounded by what remains of it. `ps` has no deadline of its own, and a hung one
-would otherwise stop the countdown and hold the ping open past its configured
-bound — the opposite of what the timeout exists to do.
-
-The cleanup that follows carries a deadline of the same kind, covering every
-read it makes: the census, and each of the escalation's own re-checks between
-TERM and KILL. Bounding only the first would leave a `ps` that answered once
-and then stopped answering able to hold the escalation open, and with it the
-group it was clearing. A re-check that never answers leaves the escalation
-unable to say the group is gone, so the cleanup finishes without one.
-
-The cleanup also censuses again after an escalation reports the group clear,
-and keeps going until a read shows it empty. An escalation can only verify the
-identities its census named, so a member that forks a worker and exits between
-those two reads leaves it correctly reporting everyone it was told about gone,
-while the worker it never saw carries on. Repeating is safe for the same reason
-the first read was — the leader is unreaped throughout, so the group stays
-provably Kanban's — and the deadline is what ends it: a group that kept
-producing members reaches the blind termination above, which takes it without
-naming anyone in it.
-
-A machine whose process snapshots fail or hang loses the ability to see the
-ping finish, never the cleanup. Such a snapshot is treated as a poll that
-learned nothing rather than as a reason to wait on the handle, because that
-wait would reap the leader and take the group's only ownership proof with it.
-The ping is then noticed only at its deadline — the user's own configured bound
-— and the group is cleared there without a census, on a timer rather than on
-evidence. That is the one case in which a group is signalled unverified, and it
-remains safe for the same reason as every other: the leader is unreaped, so
-that id still names either the group Kanban created for it or no group at all.
-
-Exactly one usage refresh follows any ping process that started — whether it
-succeeded, exited non-zero, or timed out, because all three may already have
-spent quota — and none follows a ping whose executable could never start,
-because nothing ran. That refresh is the ordinary one and routes through the
-same escape hatch everything else does. Its result is printed with every
-returned window's end time.
-
-The exit status is deterministic. A ping that fails to start, exits non-zero,
-or times out fails the command; so does a failed refresh; so does a failed
-cache write, even though the refreshed result was already printed. A ping that
-failed stays a failure however well the refresh after it went.
-
-With caching enabled, a successful refresh is merged into `usage.json` under
-the pinged brand alone, leaving the other provider's stored entry intact, and
-the replacement is the same atomic rename every other cache write uses. The
-pinged brand's entry is the whole of what the command submits, and the merge
-against the committed map is section 16's transaction, so the refresh a
-concurrent Kanban process committed during this ping's own is not rolled back.
-A failed refresh or a failed write leaves the previous cache as it was.
-`--no-cache` and a global `cache = false` suppress those reads and writes and
-nothing else: the ping, the refresh, the printed result, and the exit rules
-above are unchanged, and persistence the user switched off is not a failure.
-
 ## 15. Refresh and event model
 
 - Brick owns the blocking terminal event loop.
 - The GitHub and usage providers each run once in short-lived startup workers
   and again after an explicit unified update or an eligible terminal focus
-  event. Workflow handoffs may also require a board refresh.
+  event.
 - One repository-scoped coordinator owns every `gh` a board refresh starts and
   the durable `gh` group record for that repository, and decides the order that
   repository's refresh jobs run in. Every production board-refresh entry point
-  goes through it — startup, `u`, focus updates, and the refreshes a finished
-  review, solve, or pull-request action requires — so two requests arriving
+  goes through it — startup, `u`, and focus updates — so two requests arriving
   together resolve to one owner and neither can spawn `gh` while the other
-  holds it. The coordinator and the lease below do not, on their own, keep the record's
-  updates from losing an entry, because processes the lease does not govern
-  rewrite the record too. What does is a cross-process lock: every
-  read-modify-write of the record — registering a group, dropping one, the
-  coverage check, reclaim's read together with the clear it pairs with, and the
-  legacy migration — holds an exclusive, blocking `flock` on
-  `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.record-lock` for the whole
-  of it, inside the in-process ordering, so no interleaving of those updates
-  can lose an entry. That file carries no payload, is never unlinked or
-  renamed, is neither the record nor the lease, and is taken by every process
-  that rewrites the record, lease or none. An update that cannot establish it
-  fails the way a failed record write does rather than running unsynchronised,
-  whatever the record would read as without it: a reclaim refuses and a drop
-  fails.
+  holds it. The coordinator and the lease below do not, on their own, keep the
+  record's updates from losing an entry: the lease keeps a second dashboard out,
+  and nothing in the coordinator's ordering reaches another process. What does
+  is a cross-process lock: every read-modify-write of the record — registering a
+  group, dropping one, the coverage check, reclaim's read together with the
+  clear it pairs with, and the legacy migration — holds an exclusive, blocking
+  `flock` on `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.record-lock` for
+  the whole of it, inside the in-process ordering, so no interleaving of those
+  updates can lose an entry. That file carries no payload, is never unlinked or
+  renamed, and is neither the record nor the lease; it is taken by every rewrite
+  of the record, so the record's integrity rests on it and not on there being
+  only one process that writes. An update that cannot establish it fails the
+  way a failed record write does rather than running unsynchronised, whatever
+  the record would read as without it: a reclaim refuses and a drop fails.
   Scope is one coordinator per repository within one dashboard process, and one
   such process is all there can be: dashboard mode takes a repository-scoped
   POSIX write lease on
@@ -2761,30 +1781,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   repository contend, and two repositories the old lossy key confused do not.
   The lease has no staleness rule of Kanban's own — no PID file, no heartbeat,
   no timeout, no reaper — because the kernel releases a dead holder's locks,
-  which is the whole recovery story. Only dashboard mode takes it: `--worker`,
-  `--glyph-test`, `--doctor`, `--usage`, `--ping` and `--mission` do not,
-  having no board to serialise. That does not keep them off the durable
-  record. `--mission` reads the board and observes targets through the same
-  fetch a dashboard does, and a worker rereads its precondition the same way,
-  so each reclaims from and writes to this repository's shared `gh` record and
-  takes its cross-process lock for every rewrite — without holding the
-  dashboard's lease. Each of those processes also holds one in-process record
-  lock for its whole life, as a dashboard's refresh coordinator does: the
-  `--mission` runner mints it once and every board read and target observation
-  it takes goes through it, and a persistent worker and an issue-review host
-  each mint theirs once and use it for every precondition reread — the host's
-  for every child it adopts. The in-memory refusal below therefore covers all
-  of that process's later reads. `--mission` does take a lease of its own, but that is the
-  selected mission's advancement lease under the state root (section 16),
-  which serialises advancement of one mission rather than access to this
-  repository's `gh` record. A mission runner and a dashboard on the same
-  repository therefore run side by side, which is exactly the attachment the
-  mission contract expects, and it is what the record's writer classification
-  below exists for. Any acquisition failure other than confirmed
-  contention fails startup rather than proceeding unheld, since
-  a board that could not establish the lease has not established that it is
-  alone. The durable record and the restart-time reclaim refusal remain what
-  covers a board that has exited.
+  which is the whole recovery story. Only dashboard mode takes it: `--glyph-test`
+  and `--usage` have no board to serialise and neither refreshes through a
+  coordinator. Any acquisition failure other than confirmed contention fails
+  startup rather than proceeding unheld, since a board that could not
+  establish the lease has not established that it is alone. The durable record
+  and the restart-time reclaim refusal remain what covers a board that has
+  exited.
 - Holding that lease, and before its first refresh, a dashboard brings any `gh`
   record an earlier release left at the old case-preserving, lossy path under
   the canonical one. A legacy file is claimed only when the `repositoryKey` in
@@ -2797,8 +1800,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   interruption can leave a duplicate that the next start merges away but can
   never leave a possibly-live `gh` unrecorded. Entries keep schema version 1
   throughout.
-- Every entry names its writer: the process that spawned that `gh` — a
-  dashboard, a mission runner, or a worker's precondition read — identified by
+- Every entry names its writer: the dashboard process that spawned that `gh`, identified by
   pid and start time from a process snapshot taken for that one spawn while the
   child is still parked behind its launch barrier. Every later rewrite of the
   entry, including one a failed cleanup makes, keeps that writer. For as long
@@ -2957,9 +1959,8 @@ above are unchanged, and persistence the user switched off is not a failure.
   has started. A partial page set, a cancelled generation, and a page that
   timed out publish nothing at all.
 - A published generation replaces the board whole. Selection is preserved by
-  the item's identity, the details overlay keeps its target, and live worker
-  and review session association is reconciled, exactly as every refresh has
-  always done — all of it in one step, so nothing on screen is ever half of one
+  the item's identity and the details overlay keeps its target, all of it in
+  one step, so nothing on screen is ever half of one
   generation and half of another.
 - Every completed generation has an identity too, claimed by the board itself
   before the history job is queued rather than by the coordinator when one
@@ -3016,8 +2017,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   refuses the quit and reports that instead: halting there would drop the one
   thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
   and then end it from outside. That stray `gh` is the only thing that refuses
-  the quit at all: an issue review, revision, solve, or pull-request agent is
-  runner-owned and may safely be left running.
+  the quit at all.
 - That in-memory refusal is the repository's for the rest of the process, not
   the finished job's. Any job may end holding a group back this way — a
   background history page spawns `gh` under the same durable record a
@@ -3027,519 +2027,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   the refusal is recorded once the job's verdict is final and while it still
   holds the owner, and every later fetch of either kind is turned away by it
   before it spawns anything — reported as the in-memory case it is, since a
-  restart cannot know to hold back over a group nothing wrote down. The same
-  holds in every other reader process, because each keeps one record lock for
-  its process life: a `--mission` runner's board read or target observation,
-  and a worker's or an issue-review host's precondition reread, records its
-  own verdict against that lock once it has unwound, however it ended, and
-  every later read the process takes — a single-item read included — is
-  turned away before it spawns anything. A precondition reread refused this
-  way is the unverified refusal. The first refusal recorded is the one kept,
-  so repeated refusals do not nest its message.
-- The drainer is managed by whichever service manager its host has, decided by
-  probing rather than by naming a platform: launchd on a macOS host that has
-  `launchctl`, systemd on a host whose `systemctl --user` reaches a live user
-  manager, and a refusal naming that condition — not macOS — on a host that is
-  neither. Every service-manager interaction goes through one backend
-  boundary, so the lifecycle above is the same on both. Installing, starting,
-  stopping and uninstalling therefore behave identically; what differs is only
-  the artifact each manager reads, a LaunchAgent plist under
-  `~/Library/LaunchAgents` or a user unit under `~/.config/systemd/user`. The
-  systemd unit preserves the LaunchAgent's own semantics: the exact argument
-  vector with no shell between, the same working directory, environment, and
-  output routing, no restart, no `[Install]` section and therefore no start at
-  login, and a stop that signals only the runner so it performs its own
-  shutdown.
-- Every canonical GitHub repository has its own PR drainer: its own job
-  identifier and definition, its own runtime status, its own service and dated
-  logs, and
-  its own `--config` selection. Starting, stopping, querying, logs, status, and
-  incidents for one repository do not affect another. One installed copy of the
-  controller, the drainer, and the configuration parser serves all of them.
-- A drainer's identity is the checkout's canonical GitHub `owner/name`,
-  normalized case-insensitively, so two spellings that differ only in case name
-  one drainer and two clones of one repository cannot drain it concurrently. A
-  checkout whose remote does not resolve to a supported github.com repository
-  can neither install nor control a drainer.
-- That identity is resolved through the remote the *shared* Kanban
-  configuration names — the same remote the dashboard resolves its own
-  repository through — never through a repository's installed `--config`. A
-  repository's `--config` lives in the record its identity selects, so letting
-  it decide the identity would decide it from a record already found by it: the
-  installer and the installed controller would resolve two different
-  repositories from one checkout. The `--config` still decides everything its
-  drainer runs with, including the remote its default-branch check and merges
-  use.
-- The PR drainer controller derives the installed job from the repository's
-  normalized identity alone: `job_for_identity` in `tools/drain_prs_service.py`
-  takes the identifier and the definition path from the selected
-  service-manager backend and the runtime and log directories from the
-  identity's slug. The one thing it reads from the installer's discovery record
-  — `config.json` in the drainer's own resolved directory,
-  `~/Library/Application Support/kanban/pr-drainer` on macOS and
-  `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
-  unset, empty, or not absolute) on every other platform, resolved for every
-  Python component by one module and probed XDG-first so an installation made
-  under either spelling is found where it already is — is that repository's
-  optional `config_path`. The record's `repositories` table holds one entry per
-  installed repository naming the backend that wrote it, that job's identifier,
-  the definition's absolute path, and the installed checkout, written as a
-  discriminated union on `backend`; an entry naming none is the shape written
-  before that field existed, which makes it launchd's. Every controller call
-  includes both a repository root and a repository identity; the controller
-  resolves the checkout's own remote and refuses any identity but that one —
-  including another remote of the same checkout, since a fork's upstream is a
-  different canonical repository. Neither `--repo OWNER/NAME` nor a `--config`
-  naming another remote can therefore select or create another repository's
-  drainer. The refusal names the shared configuration's `remote_name`, and
-  re-running the installer, as what moves the caller and the drainer together.
-  The application itself neither discovers nor drives the job.
-- The installed definition records the identity its identifier was derived
-  from, and the
-  managed runner is held to it by the same check. A definition outlives the
-  configuration it was written from, so a runner that re-derived its identity
-  at launch would follow a changed `remote_name` into another repository's
-  status file, incidents, and logs under a label the dashboard cannot
-  discover. Instead the job drains nothing, writes the refusal to its own
-  service log, and stays refused until the installer is re-run — which mints
-  the job for whichever repository the configuration now names, leaving the
-  superseded one inert.
-  A second checkout of the same repository is that repository's own drainer,
-  not a foreign one: it is reported as running, and a second install or start
-  is refused naming the checkout that already holds it.
-- The installer links the controller, the drainer, the shared configuration
-  module, and the service-manager backend the controller drives its host's
-  manager
-  through out of one asset root, which is separate from the repository the job
-  drains and is validated by the files it supplies rather than by Git metadata:
-  a live development checkout, or the unpacked release archive, which carries
-  none. Out of a checkout, whatever is on disk there —
-  a mid-edit file, a checked-out feature branch, a checkout the remote has moved
-  past — is what every repository's drain actually runs, and nothing in the run
-  says so. Each managed run therefore compares those four executing sources
-  against that checkout's local `origin/master` and reports what it finds to the
-  same service log, ahead of both of its refusals: one line naming every
-  differing source and every cause the comparison can attribute to it — a
-  working-tree edit, a non-master `HEAD`, unpushed commits, or a `HEAD` the
-  baseline has moved past — and at most one further line summarizing every
-  comparison it could not make. The advisory is a report and nothing else.
-  Sources matching the baseline are silent, the comparison only reads and never
-  fetches or writes repository state, and no divergence, missing source, absent
-  ref, or failure of the comparison itself refuses, delays, or otherwise changes
-  what the run does. A source installed out of a release archive is inside no
-  repository at all, so it is one of the comparisons that cannot be made and is
-  summarized in that second line rather than reported as a divergence.
-  Gating a drain on a dirty checkout is what this
-  deliberately does not do: the drainer has to keep working while a human works
-  the same checkout.
-- The status response also projects the post-merge cleanup a merged pull
-  request still owes, which no other surface reports: a merge attempts its own
-  cleanup immediately, but what that attempt leaves outstanding is retried only
-  by the polling loop's sweep and by one bounded pass on the way out of an
-  intentional stop, so debt that outlives both is owed by a drainer that is no
-  longer working it, and debt below the incident threshold has raised no
-  incident to be seen through. The projection names each owing pull
-  request, its outstanding steps in the wording the drainer uses for an
-  incident, its failed-pass count, and its last error, ordered by pull-request
-  number so an unchanged state answers identically every poll. It distinguishes
-  three answers, on the same rule the open incident set follows: a set, a
-  verified-empty set, and unknown for a queue state that is absent, unreadable,
-  malformed, or of an unsupported version. Reading it is strictly read-only —
-  no lock, no migration, no repair — and can never fail a status call, which is
-  the diagnostic used when the repository is already in a bad state.
-- A fast-forward blocked by local changes snapshots them, and a restore that
-  conflicts afterwards deliberately leaves two copies behind: the private
-  anchor under `refs/drain-prs/autostash/` and a `git stash list` entry under
-  the reserved message `drain-prs-autostash-recovery <sha>`. The pass that hits
-  the conflict removes neither. Each drainer process runs two cleanup passes
-  once at startup, on the seam both modes pass through and before either can
-  merge or fast-forward: the anchor sweep, then the recovery-entry retirement.
-  That order is load-bearing, because the sweep can only prove an anchor
-  redundant while its snapshot is still a stash entry. Removing a stash entry
-  is the destructive one, so it happens only when the entry's raw message is
-  the reserved form matched in full, the object ID that message names is the
-  entry's own, and that exact commit is in the history of some ref that is
-  neither `refs/stash` nor one of those anchors — an anchor is the drainer's
-  own second copy, and counting it would make the lifecycle circular, while
-  tree similarity, patch similarity, age, and stash position prove nothing.
-  The reserved message is a convention and not creator provenance: Git records
-  no creator for a stash entry, so an exact match a person wrote is eligible
-  and is not claimed to be distinguishable. Because `stash@{n}` is positional,
-  the entry's identity is rebound by a fresh full read immediately before the
-  removal and any movement aborts it untouched, at most one entry is retired
-  per read, and the removal is then proved: the entry gone, the snapshot still
-  reachable from a qualifying ref, and every other entry still present in the
-  same relative order. Whatever a failed proof finds missing is restored from
-  its recorded object ID and verbatim message — at the top of the stash, since
-  Git offers no positional reinsertion — and a restoration is itself proved by
-  the number of entries carrying that object ID and message rising by exactly
-  one, never by such an entry merely being present: the occurrence that went
-  can be indistinguishable from a surviving one, and `git stash store` adds
-  nothing while `refs/stash` already names the commit. A restoration that
-  fails, that one included, is logged naming the object ID and a recovery
-  command. A dry run decides and reports identically while creating, deleting,
-  and reordering nothing. Every failure of either pass is logged and stepped
-  over; neither may be what stops a pull request from merging.
-- The status response also names the local copies of work the drainer's
-  autostash lifecycle left behind in the checkout, which are otherwise visible
-  only in one log line per startup sweep — a line that repeats identically
-  every pass, so a possibly-sole copy of someone's work waits for a human to
-  read a service log. Two collections, separate because they fail separately:
-  every autostash anchor whose snapshot is in no `git stash list` entry, named
-  by the same ref, commit, commit date, and restore command the kept-anchor log
-  line names; and every stash entry the drainer itself stored, named by its
-  selector, its reserved message, and its date. Classification restates the
-  startup sweep's own rule rather than running it — an anchor is kept when its
-  commit is absent from a stash list that was read successfully, and every
-  anchor is kept when that list could not be read — and an entry counts as the
-  drainer's only on a full match against the exact messages the drainer writes,
-  so the entries a user pushed are never named and the stash stays theirs. Each
-  collection distinguishes the same three answers the projection above
-  distinguishes: entries, verified-empty, and unknown for one that could not be
-  enumerated or parsed, with one collection's failure leaving the other and
-  every other status field intact. Reading both is strictly read-only and
-  cannot fail a status call: no ref, stash entry, stash ordering, queue state,
-  or sweep behavior changes, and neither does what any caller of status goes
-  on to report.
-- An intentional stop discharges what it can of that debt before it completes.
-  The drainer holds the repository run lock for its whole lifetime, so the stop
-  is the last moment anything can work these obligations before the next start,
-  and it spends a bounded slice of its shutdown doing so — only obligations
-  already recorded, never a new merge, branch update, rereview, or
-  pull-request read. The budget is small enough that the whole transition —
-  signal, final pass, and confirmed exit — still fits inside the timeout a
-  controller invocation is given, and an obligation that wedges is left
-  outstanding rather than holding the stop open past it. What the pass does not
-  discharge stays recorded, stays in the projection above, and stays under
-  whatever incident it raised; what the pass finishes resolves that incident on
-  the same self-clearing path any other completing pass uses. The stop reports
-  how many obligations it discharged and how many remain, both read off the
-  persisted state either side of it, and succeeds either way: outstanding debt
-  is a debt to retry, not a failed stop.
-- Losing the network pauses a polling drainer rather than ending it (issue
-  #735). A recognized transport failure on one of its `gh` or remote `git`
-  commands — DNS, a refused, reset or unreachable connection, a connection or
-  TLS-handshake timeout — stops the pass where it struck and counts toward
-  nothing: not the three consecutive failures that end a run, not a pull
-  request's backoff, and not a cleanup record's failed passes. Until GitHub
-  answers again the drainer's only external operation is one read-only check of
-  its own API path a minute, on a fixed schedule, each bounded inside the
-  minute. A check that gets through resumes draining in the same run, and the
-  next pass rereads every gate before it mutates anything, and the pass the
-  outage cut short advances no cooldown clock. A merge, base-advance swap,
-  branch update, or CI rerun the outage left uncertain is looked up rather
-  than retried, and a merge that
-  landed at the attempted head gets its cleanup and its post-merge audit as if
-  the call had returned. A check that
-  meets anything other than an outage — authentication, permission, a
-  certificate, a malformed answer — ends the wait for the ordinary failure
-  handling. The controller reports the state as `offline` only while the live
-  drainer child is the one that said so. Offline is running, so a start is a
-  no-op; a stop while offline skips the final cleanup pass above, since every
-  obligation needs the network, and leaves the debt recorded for a connected
-  run. An outage raises no incident.
-- The canonical drainer, controller, and safety-first installer are versioned
-  with Kanban under `tools/`. The installer creates stable per-user links in
-  that same resolved directory — unless `--install-dir` or
-  `KANBAN_DRAINER_INSTALL_DIR` moves them and the runtime tree beneath them,
-  neither of which moves the record or the logs — with the per-repository log
-  directories under `~/Library/Logs/kanban/pr-drainer` on macOS and
-  `$XDG_STATE_HOME/kanban/pr-drainer` (`~/.local/state` on the same terms)
-  elsewhere; rerunning it refreshes
-  those links after repository relocation, and repairs a missing or stale
-  discovery record in place without an uninstall and without changing the
-  job's identity. An installation that already exists is found where it is,
-  the probe reading the XDG spelling first and the `~/Library` one second, and
-  a macOS host's is never moved. On every other platform a `~/Library`
-  installation is relocated to this platform's own convention exactly once and
-  whole: the two discovery records merge with the destination winning per key
-  at both levels, every recorded repository's runtime and log trees are
-  carried, and its definition is rewritten and reloaded against the
-  destination, after which the old location is taken apart except for its lock
-  file, the directory that has to remain to contain it, and a marker naming
-  where the installation went. That transition is held under the legacy
-  record's lock from the read that decides which repositories exist through the
-  removal, so a writer queued on that lock fails without recording anything —
-  a refusal every write to that record's `repositories` table carries itself,
-  rather than one its callers each have to remember. It cannot reach a writer
-  running an older installed copy of the controller, from before that gate,
-  which is what a pre-XDG host is running by definition; one of those arriving
-  after the removal recreates what it needs. So the run then reconciles what
-  came back, outside those record locks and re-taking them for each pass:
-  releasing is what lets a writer queued on it through, so a reconciliation
-  inside the transition's own locks could never see them, and it pauses before
-  taking those locks again because releasing one does not hand it to any
-  waiter in particular. The checkout and controller fences are held throughout
-  and extended to any repository it recovers. A writer that acquires after the
-  run's last look is past any process that terminates, so the run never lets it
-  take the lock at all: it closes the legacy record's lock file against every
-  opener but its own for its whole span, taking the lock before it changes the
-  file — a closed one is opened read-only, since loosening the mode to open it
-  the ordinary way is the window a stale transition takes it in — and keeping
-  the one descriptor it opened rather than reopening a file it has closed,
-  and the plan then
-  proves that nothing already had it open — refusing before anything moves if
-  something did, or if this host cannot be asked, since a process refused there
-  goes on to act against the installation it was invoked against rather than
-  one that moved while it waited. That is the prevention, and it is available
-  only there: every command enters `document_lock` before it reads or writes
-  anything, `uninstall_job` creates no directory at all, and the definition it
-  would unlink lives in the service manager's own directory, which cannot be
-  closed without closing the installation. The reconciliation therefore runs
-  inside that lock rather than handing it over, and what it is for is the
-  writers that never wanted it: `ensure_dirs` lays a repository's runtime,
-  incident and log trees down under no lock at all. A run whose final scan
-  finds the location clear occupies the emptied record path and the runtime
-  root with symlinks to the relocation marker; all three refusals predate this
-  whole arc, which is the only kind that reaches a controller predating it, so
-  a stale invocation returns non-success before it creates, removes or modifies
-  the legacy runtime or log tree, the corresponding trees at the destination,
-  or the repository's on-disk definition, and the definition the manager holds
-  stays the relocated one. Every transition that reaches a closed path raises
-  and so returns non-success; a `stop` predating #367 reaches none, since it
-  reads a snapshot that reports nothing running and returns without touching a
-  protected artifact or the manager. That snapshot has two inputs and the seals
-  cover only one: the status file is under the sealed runtime root, while the
-  checkout's own `.git/drain_prs.lock` is moved and closed by nothing, and a
-  drainer that currently holds that lock classifies the state `external` — a
-  branch that
-  signals the PID it names with `os.kill`, asks the service manager for
-  nothing, and is reachable by a drainer started from that checkout after the
-  relocation finished. Current ownership is what reaches it, and the PID in the
-  lock's document is only which process to name once ownership is established.
-  The two are not the same question: the lock file is persistent, released by
-  closing descriptors and never unlinked or truncated, so a finished run's PID
-  stays in it and names something live again the moment the operating system
-  reuses that number. Reading the document alone would therefore classify a
-  stopped drainer as `external`, refuse to start it, and aim that `os.kill` at
-  whatever had inherited the PID. The order is part of this: the lock is
-  established as held and the document is read afterwards, never sampled
-  before, since a run can take the lock and publish between two reads and a
-  PID sampled first would name the run before. What that settles is every
-  state a completed run leaves, which is where the defect arises, and any
-  acquisition that completes while the snapshot is being taken. It does not
-  settle the interval between a run taking the lock file and publishing its
-  PID, during which the lock is genuinely held, nothing on disk yet names the
-  holder, and the document still names the run before — so a reused PID is
-  reported and signalled there still. No reading order closes that one;
-  closing it means clearing the document at acquisition, which the acquisition
-  order deliberately does not do so that a losing contender cannot erase the
-  holder it is about to report. It is therefore bounded and recorded rather
-  than removed. A lock held while its document names nothing live is `stopped`
-  with no PID reported, since the only number available to report would be the
-  previous run's. What bounds the branch for
-  a controller predating #367 is the lock document itself:
-  a drainer publishes its PID in a shape such a copy's bare `int()` cannot
-  parse, so it finds no holder and delivers no signal. And the `run` a service
-  manager launches catches its own startup refusals and
-  answers with an exit code, which a controller from this change onward makes a
-  failing one so that neither the manager nor Kanban reading the job through it
-  is told a drainer ran, and which one predating it cannot be made to change,
-  since no bound outside a process reaches what it does with an exception it
-  already caught. Each bound is
-  a fact about the path rather than a
-  permission on a directory the invocation writes through, since `ensure_dirs`
-  chmods the install directory on every attempt. What an operator sees is that
-  copy's own rendering of the fault, which names one of those three paths; the
-  seals lead to the marker and the lock holds the same notice as its own
-  readable content, stating that the installation was relocated, naming the
-  legacy location and the destination, and giving the exact action. Before
-  declaring the location closed the run reads the set of processes holding that
-  lock open, out of `/proc`, which is a proof rather than a hope because the
-  mode has been closed since before the plan; a set that is not empty and a
-  host that cannot be asked are both reported with the lock left closed, naming
-  the process to stop and failing the install. A location left unresolved is
-  left open for the operator to see, and a path that could not be closed fails
-  the install and is named in that failure. A later run skips a location only
-  when all of it is closed and it holds nothing else, and otherwise reconciles
-  it exactly as it would an untouched one; the seals are managed entries no run
-  removes or reports as strays. That answer is written into the relocation
-  marker, because whether the run that closed the lock was in a position to
-  prove nothing could still take it is the one thing a later run cannot work
-  out from the artifacts, and the disposition reads it there: a marker that
-  does not say closing finished, a reopened lock, and a marker an older
-  installer wrote are all locations a later run acts on. What it performs then
-  is the closing half alone — nothing is left to move — over the repositories
-  the destination record names, recovered without insisting on the definitions
-  a stale uninstall deletes, since those are what it exists to put back. A
-  per-repository tree no record names — left by a controller whose record write
-  was refused, or by an uninstall, which keeps a repository's state
-  deliberately — is carried across rather than orphaned, under the repository
-  validated on-disk evidence establishes: a reversible directory slug only when
-  re-encoding the identity it decodes to through this host's own resolver
-  reproduces that slug exactly, and a hash-only slug only from an agreeing
-  canonical `repository` field in the tree's `status.json` or an incident there
-  that derives back to the same slug, with a log tree borrowing the validated
-  identity of the runtime tree filed under the identical slug and neither
-  checkout state nor the global definition counting as evidence. Evidence that
-  is present and malformed or that disagrees is never skipped past: it, a
-  hash-only slug with no structured identity, and a slug this host would spell
-  differently all leave the state where it was written, reported by slug and by
-  the reason. Every repository the report names is a canonical identity rather
-  than a slug, every collision or failure attributable to one names it beside
-  that slug, and an unattributed entry carries a null repository beside its own
-  slug in the data while the repair and the failure render the slug and the
-  reason instead. One already at its destination is kept and named like any
-  other collision. It is
-  bounded at three passes rather than looped, each merging the recreated record
-  on those same terms, carrying the trees it brought, rewriting the definitions
-  it names, and clearing the location again on the removal's own ownership
-  terms, where an entry this installer did not create is kept and named and
-  nothing at that location is removed at all. A tree that a distinct tree
-  already exists at the destination for is kept beside it and both are named,
-  per tree rather than per repository, so a repository whose runtime collided
-  and whose logs did not still has its logs carried and nothing chooses which
-  status file, whose incidents or which logs survive. Anything still unresolved
-  preserves that location and fails the install rather than reporting success,
-  naming every affected repository and every retained path in the default and
-  `--json` modes alike, and distinguishing a collision that has to be
-  reconciled first — a re-run resolves none of those trees — from a location
-  that only needs the installer run again. The installer's own writes
-  are made under the discovery record's lock and refuse outright when the
-  installation this process resolved at import is no longer the one this host
-  resolves, rather than recording into a location nothing reads or handing the
-  installed controller a directory that is gone. Installing a second repository
-  adds its entry beside the first rather than replacing it. Before enabling a
-  repository's derived
-  job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
-  that predates per-repository jobs when that singleton served the same
-  repository — unloading it and setting its plist aside so the two can never
-  run together — and leaves a singleton installed for a different repository to
-  migrate on its own next install. That singleton only ever existed under
-  launchd, so a systemd host has none to retire. Removing one repository is the
-  same operation in reverse and equally scoped: its stopped job is unloaded,
-  its definition deleted, and its one entry dropped from the discovery record,
-  leaving every other repository's install, the shared links, and this
-  repository's own runtime state, logs and incidents untouched.
-- The unattended mission runner is the third managed service, installed the same
-  way and discovered on the same terms, and read on them too — but with none of
-  the dashboard *lifecycle* above: no optimistic transition state, no busy
-  flag, and no poll of its own, for the reason the bullets after this one give.
-  the mission runner installer script loaded one stopped job per
-  canonical GitHub repository in a `mission-runner` namespace of its own,
-  through the service script's own install, start, stop, and
-  uninstall operations rather than by spawning the copy it installs, and it
-  never starts the service. A start of one of those jobs writes a fresh token
-  into the definition it kicks and is confirmed only by a live status document
-  carrying that token, beside the service manager still holding a live process
-  for the job. The lock a start releases so the run it is starting can take it
-  is a lock a foreground run can take instead, and that run publishes a live
-  status of its own — so neither signal, nor both together, can say whose run
-  wrote the status a start is looking at. Only the document naming the run that
-  wrote it can, and a start confirmed without it would report a foreground
-  process as the job it started. A start also refuses to run against any
-  directory but the one the record names, because refreshing the definition and
-  the record entry somewhere else *moves* the installation — and only the
-  installer releases the claim and the shared links the old directory is left
-  holding, so a start that moved a job would orphan them. An `install` or an
-  `uninstall` reached through the controller alone is refused on the same
-  terms and for the same reason; the installer is the exemption, because it is
-  the one caller that releases what it leaves, and it proves that release can
-  be completed before it commits the move rather than discovering afterwards
-  that the old directory cannot be cleared. What it cannot prove in advance is
-  the filesystem's answer, or what somebody has put at a managed path since —
-  so a release that ends with anything still standing reports the directory it
-  could not clear and what is in it, rather than a bare success. Withdrawing
-  the claim is what makes that directory unfindable, and the report is the only
-  thing that names it afterwards. Each installed job's definition also pins the
-  XDG config base its installer resolved the repository identity through,
-  because a job started from a cold manager re-resolves that identity and
-  refuses to act when it disagrees with the one its own definition records. The script links are shared — one installed copy of
-  the controller, the configuration parser, and the service-manager backend
-  serves every repository — while the job, its runtime state, its logs, and its
-  `--config` selection are the repository's own, so installing a second
-  repository adds an entry beside the first and uninstalling one takes that
-  entry and that job alone; which repositories still run from a directory's
-  links is the union of what that directory says and what the discovery record
-  says, so neither one being lost, corrupted, or rebuilt around a single entry
-  can strand a job that is still loaded. Every mutation
-  either makes — the shared links as
-  much as the job, its definition and its record entry, and the links a
-  relocation takes back from the directory it is leaving — is performed while
-  holding that repository's own run lock, because a foreground run takes none
-  of the locks that serialize managed transitions against each other and the run
-  lock is the only thing the two contend for: without it an install would
-  repoint the links and only then discover a run that began after it planned,
-  and an uninstall would delete the modules a run starting in that moment is
-  about to execute. Because that lock is never waited for, a contender is
-  refused rather than queued, and the refusal says whether it lost to a run to
-  be stopped or to a transition to be waited for. Kanban reads it through a
-  module of its own, on the other two services' terms and sharing no type and
-  no constructor with either.
-  The discovery record is resolved through the one Haskell resolution point
-  rather than spelled, so this reader and the controller cannot disagree about
-  which installation a host has; the installed job's command is read out of the
-  definition that record names, on both service managers, through the one
-  reading of a systemd unit's `ExecStart`; and the job's own subcommand and
-  everything it carries for it are dropped before the checkout and the identity
-  are rebound, which for this controller means binding them after the
-  subcommand rather than before it, since that is where its parser declares
-  them. The status document is decoded against a pinned schema and version and
-  against the board's own repository identity, and the states it distinguishes
-  are the runner's own: a pass advancing, idle between passes, waiting on a
-  person, draining the pass in flight before it stops, stopped on purpose, and
-  a run that failed. Draining is live, as the first three are, and is neither
-  advancing nor stopped. The open incidents
-  published beside them are decoded there too, each checked for its own schema
-  and version before its payload, so one another release wrote is absent rather
-  than misread.
-- Why there is *no* runner to observe is its own vocabulary rather than a single
-  unknown, because the repairs differ: a host with no supported service manager,
-  no installation for this repository, a record that will not decode, a record
-  declaring a schema or a version this release does not read, a record naming
-  the manager this host does not have, a definition that cannot be read, and a
-  job that is installed and simply stopped. The last keeps the controller
-  discovery found, because starting it is the repair and an unavailability that
-  threw the handle away would put that out of reach. None of them is an error,
-  and none is reported as an absent installation. Start and stop go through the
-  same bounded, process-grouped invocation the two services above use, and keep
-  the same distinction between a transition whose consequence the next status
-  read reconciles and an operation that gets no such promise. A stop returns as
-  soon as the runner reports draining, never when the drain ends, so the
-  dashboard's transition budget never has to cover a step.
-- One mission's durable events replay from a cursor its caller supplies: the
-  mission's own journal under the store's decoding rules — a line another
-  release wrote consumed and absent, a malformed or foreign one reported rather
-  than emitted as an event — and every session's log in its tree beside it,
-  each with an offset of its own so one stream's progress is never another's, an
-  unterminated trailing line left whole for the next pass, and a source that has
-  been collected read from the mission's own sealed copy, resolved through the
-  store rather than from the name the seal carries. A session that appears after
-  the first read replays from its beginning; reopening with the returned cursors
-  duplicates nothing and omits nothing.
-- Reading or controlling the runner acquires no advancement authority. No
-  mission advancement lease is taken and none is ever asked for, so observing a
-  mission never makes the observer eligible to advance it, and a lease somebody
-  else holds cannot turn a status read into a refusal. Nothing here follows
-  anything — no thread, no subscription, and no recurring poll of its own —
-  so the timer inventory below is the one it already was. The console that renders
-  all of this, and the cadence it reads at, are a later slice's.
-- That service's discovery record is `config.json` in its own resolved
-  directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
-  `$XDG_DATA_HOME/kanban/mission-runner` (`~/.local/share` when that variable is
-  unset, empty, or not absolute) on every other platform — probed XDG-first for
-  an occupied location so an installation made under either spelling is found
-  where it already is, with this platform's own convention written only when
-  neither is occupied. Occupied means anything at all at that path, a directory
-  or a link that cannot be followed included, and a record this installer cannot
-  safely write is refused by name rather than replaced or resolved to the other
-  location. The
-  per-repository log directories are under `~/Library/Logs/kanban/mission-runner`
-  on macOS and `$XDG_STATE_HOME/kanban/mission-runner` (`~/.local/state` on the
-  same terms) elsewhere. `--install-dir` and
-  `KANBAN_MISSION_RUNNER_INSTALL_DIR` move the script links and the install
-  directory beneath them, and move neither the record's own path — which is what
-  lets a dashboard that never saw the option find the installation — nor the
-  logs. The variable must name an absolute directory and is refused rather than
-  resolved when it does not: the installer reads it with the operator's working
-  directory and the job a service manager launches reads it with the checkout's,
-  so a relative value would name a different installation to each of them.
-  There is nothing to migrate: this component had no installation before
-  this slice, so relocation is that override and only that.
-- Worker results enter the UI through a bounded `BChan`.
+  restart cannot know to hold back over a group nothing wrote down. The
+  dashboard keeps one record lock for its process life, so the refusal is
+  recorded against it once the job has unwound, however it ended. The first
+  refusal recorded is the one kept, so repeated refusals do not nest its
+  message.
+- Refresh results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, terminal focus event, resize, provider
-  result, active review event/spinner tick, notice expiry, or explicit terminal
-  repaint.
+  result, board-refresh result, notice expiry, or explicit terminal repaint.
 - There are no periodic network or Git polls, and the dashboard polls no local
   service either. The only timer is one local one-shot timer per settled
   notice, which delivers that notice's ten-second expiry (section 6) as an
@@ -3557,40 +2052,27 @@ above are unchanged, and persistence the user switched off is not a failure.
 
 ## 16. Cache, configuration, and durable state
 
-Suggested paths:
+Paths:
 
 ```text
 ~/.config/kanban/config.toml
-~/.config/kanban/settings.json
 ~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
 ~/.cache/kanban/usage.lock
+~/.cache/kanban/gh-groups/<canonical-key>.json
+~/.cache/kanban/gh-groups/<canonical-key>.lock
 ~/.cache/kanban/gh-groups/<canonical-key>.record-lock
-~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
-~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
-~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
-~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.adoption
-~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.census-gap
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/specification.json
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/snapshot.json
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/events.jsonl
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/invocations.jsonl
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/control/requests/<id>.json
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/lease/owner.json
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
-~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
-~/.local/state/kanban/missions/.admission/<lowercase-owner>/<lowercase-repo>/state.json
-~/.local/state/kanban/missions/.admission/<lowercase-owner>/<lowercase-repo>/lock
-~/.local/state/kanban/missions/.deleted/<token>/
-~/Library/Application Support/kanban/mission-runner/config.json
-~/Library/Application Support/kanban/mission-runner/dependants/<owner>.<repo>
-~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/status.json
-~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/pass.json
-~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/incidents/<id>.json
-~/Library/Application Support/kanban/mission-runner/locks/<owner>.<repo>.lock
-~/Library/Logs/kanban/mission-runner/<owner>.<repo>/service.{out,err}
+~/.cache/kanban/gh-groups/<canonical-key>.claim-<pgid>
+~/.cache/kanban/claude-probe/
+~/.cache/kanban/usage-command/
 ```
+
+`config.toml` is read and never written. `claude-probe/` and `usage-command/` are
+the scratch directories the Claude probe and a configured usage command run in
+(section 14); neither holds state. Everything else under the cache root is
+section 15's or this section's. The application writes nowhere else: it has no
+settings file, no log directory, no worker or session state, and nothing under
+`$XDG_STATE_HOME`.
 
 Defaults:
 
@@ -3610,21 +2092,11 @@ Defaults:
   process. Publishing does not wait on the cache: with caching switched off, or
   after a write that failed, the complete generation still stands in memory and
   the failure is reported rather than the generation discarded.
-- Persist lightweight UI preferences separately from future repository
-  semantics. Chat verbosity defaults to Standard and offers Compact, Standard,
-  and Full display modes.
-- Record every managed agent provider line before parsing or display filtering.
-  Raw workflow logs always remain full; changing display verbosity never
-  changes their contents. Directories use `0700` and files use `0600`. Every
-  directory level Kanban creates below the XDG cache, config, and state roots
-  carries `0700`, whatever the umask and whichever writer created it first; the
-  roots themselves are shared and keep their own modes.
-- Create the files here with user-only permissions (`0600`), under every one of
-  those roots. A file that is appended to rather than rewritten — a worker's
-  event journal, a mission's event journal — is created `0600` whatever the
-  umask, and is tightened to `0600` before each append, so one an earlier
-  release left loose self-corrects instead of waiting for a rewrite that never
-  comes.
+- Create every directory and file here with user-only permissions. Directories
+  use `0700` and files use `0600`. Every directory level Kanban creates below
+  the XDG cache root carries `0700`, whatever the umask and whichever writer
+  created it first; the root itself is shared and keeps its own mode. A file
+  that is replaced is written `0600` before it is renamed into place.
 - Never cache an open issue or PR body. Startup renders no open card until the
   first live generation publishes, so nothing about a private repository's open
   work is written to disk. Completed history is the one exception, and carries
@@ -3636,451 +2108,12 @@ Defaults:
   by omission — the file is created `0600` under a `0700` directory like every
   other cache here — and it extends to nothing else: no open item's body reaches
   disk under any circumstances.
-- Bound the per-repository worker cache during startup discovery, so neither
-  retired leases nor finished workers accumulate for the life of the cache. A
-  retired `.stale-*` lease directory is collected once every identity it
-  records — its own lease owner and that worker's durable state — is confirmed
-  gone. A terminal worker's spec, state, journal, and ack marker are collected
-  once it has been acknowledged and a newer durable worker supersedes its
-  workflow step, and in any case once it is past a 14-day retention window
-  measured from its terminal heartbeat. The pass never touches a live lease, a
-  non-terminal worker, a worker that still owns its item's lease or still
-  matches a live process, or anything belonging to another repository. It fails
-  closed whenever a record will not decode or a process snapshot cannot be
-  taken, removes the `.spec.json` discovery anchor last so a partial removal
-  stays discoverable and retryable, and is quiet and non-fatal so discovery
-  proceeds regardless.
 - Include a `schemaVersion` in every snapshot. A snapshot with an unknown
   version is treated as absent rather than as corruption: the version is read
   before the payload, so a file another release wrote is silent even when its
   contents no longer fit the current shape. A file that is unreadable, carries
   no integer version, or fails to decode under a version Kanban does recognise
-  is corruption and keeps its warning. Settings follow the same rule, falling
-  back to the defaults silently for an unknown version.
-- A mission's `notifications` directory holds one record per attention
-  identity: the durable suppression the unattended scheduler writes *before* it
-  launches an operator's notification command. Its existence is the whole
-  contract — a record that is there, whatever it says and whether or not it
-  decodes, means that identity has had its one attempt and will never get
-  another, including after a restart and including when the attempt failed.
-  The outcome is written into it afterwards and may never arrive, because a
-  crash between the create and the launch loses that notification; delivery is
-  at most once per waiting episode and is not guaranteed. The file is named by
-  a digest of the identity because the identity itself spells a repository, a
-  mission and a timestamp and is not a path component; the record inside
-  carries it in full. It lives inside the mission's own directory so archiving
-  or deleting a mission takes its notification history with it.
-- A repository's agent admission record (`missions/.admission/<owner>/<repo>/`)
-  holds the rotation — each mission's latest successful admission — the slots
-  granted for launches whose worker has not yet written its specification, and
-  the missions a pass has entered to wait their turn. It is read and rewritten
-  only under the `lock` beside it, a `flock` the kernel releases for a holder
-  that dies, and every reservation and entrant a gone process left is dropped
-  on the next read. A record that will not decode, or carries a schema or
-  version this release does not know, is not read as empty: no slot is granted
-  against it, because forgetting a reservation in flight would grant its slot
-  twice. It sits beside the repository's mission store rather than in it,
-  because every name inside the store is a mission's, and its owner and name
-  are folded to lower case, so every spelling of one repository shares it.
-- The mission runner's runtime documents are the unattended supervisor's, not
-  Kanban's: the mission runner service script wrote one status document and
-  one incident directory per canonical repository, under the account's own
-  service root — `~/Library/Application Support/kanban/mission-runner` on
-  macOS, `$XDG_DATA_HOME/kanban/mission-runner` when that names an absolute
-  directory, and `~/.local/share/kanban/mission-runner` otherwise, resolved to
-  whichever of the two spellings this host's installation already occupies.
-  Each carries
-  its own schema and integer version and records the repository it describes,
-  so a reader can reject one written for another repository or by another
-  release. The per-identity run lock beside them is what makes a second
-  wrapper for one repository refuse rather than interleave, and the transition
-  and per-installation link locks beside that one are what keep an install, a
-  start, a stop, and an uninstall of one job from interleaving. Kanban reads
-  this runtime through the reader section 15 describes: the status document and
-  the incidents beside it, each against the schema and version above, and a
-  mission's own journal and session logs from a cursor. It writes none of it,
-  takes no lock here, and its start and stop go through the wrapper's own
-  commands rather than around them. Three of those commands are about this
-  runtime:
-  `run` writes the status document and opens an incident when a pass fails;
-  `status` only reads, creating no directory, rewriting no document and
-  resolving no incident, because it is the diagnostic reached for when the
-  runtime is already in a bad state and a reader that repaired what it read
-  would destroy the evidence; and `ack` reads the incident collection to find
-  the open one it then rewrites as resolved. `ack` is bookkeeping and nothing
-  more — it writes no status document and is powerless over the service, so
-  acknowledging the incident a failed pass opened does not make the next pass
-  succeed. The four beside them — `install`, `uninstall`, `start` and `stop` —
-  act on the managed job rather than on this runtime, and are what the
-  installer calls rather than spawns.
-- `pass.json` beside the status document records the one scheduler pass a
-  run may have out: its process identifier and start time, and the identifier
-  and start time of every member of its process group the run has seen. A start
-  time is `ps`'s, read in UTC and the C locale so a controller started in
-  another time zone reads the same process the same way, and to the second, so each is recorded only as observed after its
-  start second ended: the process was alive then, so nothing that reuses its
-  identifier later can share its start second, and an identity observed inside
-  that second is refused rather than trusted. A
-  pass leads a session of its own, so a wrapper killed outright runs no
-  cleanup and no service manager reaches the pass either; this record is what
-  does. Each pass starts behind a gate — the pass's own process, waiting for one
-  line on standard input before it becomes the scheduler — and the record is
-  written with the pass's identity before that line is sent, so a wrapper killed
-  anywhere between starting a pass and recording it leaves a gate that reads end
-  of input and runs nothing. The next `run` for the repository reads the record
-  under the run lock and settles what it names before starting a pass of its
-  own: every process verified by identity, and still in the pass's process
-  group when it is signalled, is asked to stop and then killed, and
-  the record is removed only once nothing it names is alive. A process it names
-  only by identifier — a recycled one, or the bare `pass_pid` a release before
-  this record left in its status document, which is copied into a record marked
-  legacy before anything overwrites it — is never signalled on that alone. A
-  survivor that cannot be verified gone blocks the run: the status document
-  says so, an incident names the processes and the record, and the record stays
-  for every later start to read again until the operator ends the processes or
-  confirms they are not the runner's. The detached workers a mission child
-  hands agent work to lead sessions of their own and are never part of this;
-  they own their agents, and the next pass reattaches to them.
-- Nor does the service manager end them. A new session leaves the process
-  group but not a systemd unit's cgroup, so the mission runner's unit alone is
-  rendered with `KillMode=process`: systemd signals only the wrapper, on a stop
-  as on any other, and kills nothing else once it is gone. A stop, a restart,
-  or a crash of the runner on Linux therefore leaves every mission-dispatched
-  worker and its agent running, as launchd already did by killing only the
-  job's own process group, and the runner's own leftovers are settled by the
-  rule above on the next start. The PR drainer's and the issue approval
-  service's units keep `KillMode=mixed`, because their children are their own.
-  An installation made before this needs no migration: a `start` rewrites and
-  reloads the definition before it kicks the job, so the next start of a
-  stopped runner carries the new kill mode. A start that finds the runner
-  already running refreshes nothing, so that run's stop is still governed by
-  the definition it was started from until it is stopped and started again.
-- A normal stop, and therefore a normal upgrade, which is a stop, an install,
-  and a start, *drains* the runner rather than cutting its current step off
-  (the mission runner design's D-15 and D-19). On the first stop signal the
-  wrapper starts no further pass. With none in flight it stops at once, and a
-  pass still waiting at its gate is ended there, having run nothing. With
-  one in flight it signals nothing, publishes `draining`, and lets that pass
-  and its `--mission` children finish their step. A step waits on GitHub calls,
-  never on an agent. The run then records `stopped` and exits, releasing its
-  run lock exactly once. A pass that fails on its own during a drain still
-  fails the run with its incident. Only a pass the stop cut off is excused
-  from its verdict: one whose scheduler was still running when the escalation
-  reached it and died of that signal, leaving output that does not parse as
-  a whole document. Output that does parse was finished by the scheduler: a
-  valid report is acted on, and an invalid one fails the run. A failed run's terminal status still names an
-  escalation. A drain never waits for a detached worker. The workers the
-  draining pass dispatched keep running, and the next runner's controller
-  iterations adopt them rather than dispatching their steps again. A command
-  queued under the mission store's `control/requests/` that the draining pass
-  did not consume stays there for the next runner. The drain is bounded by a
-  five-minute grace, measured from the first stop and never reset. A pass
-  still running when it ends is cut off exactly as a forced stop cuts one off:
-  its process group is signalled and, ten seconds later, killed. A second stop
-  signal during a drain does the same at once. An escalation opens a
-  `mission-runner-drain-escalated` incident, and the terminal status message
-  still names it. A mission whose step it cut off is left `interrupted` by the
-  next runner's reconciliation. `stop` sends its signal and returns once the
-  status document reports `draining`, or once the run is gone when there was
-  nothing to drain, saying which. A `stop` issued while the runner is already
-  draining is the second signal. It is sent to the wrapper itself (`launchctl
-  kill`, or `systemctl --user kill --kill-whom=main`), because systemd folds a
-  second stop request into the one in progress and signals nothing, and it
-  then waits for the run to be gone. A `start` during a drain starts nothing
-  and says so. An install or uninstall is refused while the draining run holds
-  its lock and succeeds once the drain has ended, so an upgrade hands the lock
-  over exactly once. The mission runner's systemd unit alone declares
-  `TimeoutStopSec=420`, longer than the grace plus the escalation and
-  settlement after it, so systemd never kills a drain the wrapper is still
-  inside. The other two units keep systemd's default. launchd's `kill` has no
-  timeout.
-- Beside those runtime documents the service keeps durable records of its
-  *installation*. `config.json` in the service root is the discovery record —
-  one `repositories` table holding each installed repository's entry, naming the
-  backend that wrote it, that job's identifier, its definition's absolute path,
-  the installed checkout, the install directory, and the `--config` that
-  repository was installed with. It is the only durable trace of an
-  `--install-dir` installation, which is why neither that option nor
-  `KANBAN_MISSION_RUNNER_INSTALL_DIR` moves the record's own path; the entry is
-  a discriminated union on `backend` in the shape the other two services' are,
-  and a reinstall under the other service manager replaces that manager's keys
-  rather than leaving both sets side by side. The per-repository log directory
-  under the state root is the second: `service.out` and `service.err` are where
-  the service manager sends an installed job's output, so they are the durable
-  account of a run that failed before it could write a status document. A record
-  that is missing, unreadable, or stale is repaired by reinstalling rather than
-  leaving the component undiscoverable; a record path occupied by something that
-  is not a plain file is refused by name, before anything is written, rather
-  than replaced. What the record does not decide *alone* is whether an
-  installation's shared script links may go. It is a copy of that answer kept
-  somewhere else: it can be absent while every job it named is still loaded, it
-  can be corrupt, it can decode partially, and repairing it rebuilds it around
-  the one entry the repairer knows about — so the next reader sees a small,
-  perfectly readable table and takes it for the whole truth. Every one of those
-  reads as "nothing depends on these". The install directory therefore carries
-  its own `dependants` directory as a second witness, one marker file per
-  installed identity holding that repository's canonical name, written and
-  withdrawn in the same locked transition that loads and unloads the job it
-  serves — by whichever route loaded it, not the installer's alone.
-
-  Neither witness is trusted instead of the other, because each launders the
-  same way in the direction the other survives: a `dependants` directory
-  somebody deletes is rebuilt by the next install around that install alone,
-  exactly as the record's repair is, while the record survives anything done to
-  the install directory. So the dependants are the *union* of the two. A claim
-  in either is a claim; a marker that is not a readable regular file, or whose
-  contents name a different repository than its own file name does, is a claim
-  under that file name rather than a claim discounted; and only when both
-  witnesses are unreadable is the answer unknown, which keeps the links. Both
-  destroyed at once leaves nothing to be right from: there is no third place
-  this is written, and the service manager's own job list is behind a boundary
-  with no verb for enumerating it.
-- The mission store under the state root is durable state rather than a cache,
-  and the paragraphs below about caching do not reach it. It is under
-  `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository
-  status there: a mission's history has to outlive the worker cache's fourteen-day
-  collection, and a record the cache is entitled to remove is not a record a
-  later run can be recovered from. Each of its four parts has a discipline of
-  its own — a specification written exactly once and never rewritten, a
-  snapshot replaced whole by rename, a journal whose every record is one
-  append-mode write of the whole line and which is read by byte offset, and sealed archive copies carrying the digest
-  and byte length that verify them after the source is collected. A session's
-  event stream, and the provider's raw log when its worker recorded one, is
-  sealed when the controller records the session's end, and every scheduler
-  pass seals whatever any mission's finished sessions still owe — terminal,
-  blocked, paused and interrupted missions included, none of them made
-  admissible by it. A seal that fails is journaled or carried in the pass's
-  detail and tried again by the next pass; it never fails, blocks or reorders
-  the mission. A seal already there is never replaced, and it is checked on
-  every attempt rather than trusted: one whose archived copy no longer verifies,
-  or no longer matches its source's length, is reported for the operator on
-  every pass, and so is an owed log whose source is gone with no seal. A
-  session whose worker record is gone is judged by its archive alone, to the
-  collector's standard: quiet while its sealed event stream verifies against its
-  digest and length and every other seal record it has reads and verifies too,
-  and reported on every pass otherwise. The
-  worker cache keeps every record of a worker a mission launched — its
-  specification carries the launch's invocation from the moment it exists —
-  until each log it owes has a sealed copy that verifies against its digest and
-  length and still matches its source's length; an index it cannot read keeps
-  them all. Workers no mission launched are collected exactly as before. A snapshot's
-  session tree is checked when it is written and again when it is read, since
-  only the first covers records this release wrote and a delete decides from
-  the second; a snapshot whose sessions are not a tree is reported rather than
-  adopted. Anything that removes durable state does so by moving it aside in
-  one step and clearing up afterwards — a released or retired lease, a deleted
-  mission — so an interruption leaves either the whole record or none of it,
-  never a lease standing without its owner record or a mission with only part
-  of itself. Every one of
-  those records carries its own `schemaVersion` outside its payload, so the
-  unknown-version rule below applies to each independently, a journal line
-  included; and no write ever treats that silence as permission, so
-  "is one already there?" is always a question for the filesystem rather than
-  for a successful decode.
-- A step record in a mission's snapshot may carry a provider-capacity wait
-  (`missionStepRecordCapacity`, section 5): the retry time, how many
-  consecutive capacity waits the step has had, when the wait was recorded, the
-  failed session it was recorded for, and the evidence's own detail. The field
-  is optional and the snapshot's `schemaVersion` did not move with it, for the
-  reason the attention identity's did not: a version bump would make every
-  snapshot written before it read as absent, which for a mission store is
-  forgetting every mission in flight. A step record written before the field
-  existed decodes with no wait, which is what it meant. The retry time alone is
-  decoded leniently: one that is missing or will not decode leaves the snapshot
-  readable and the wait standing with nothing to end it, and is carried exactly
-  as it was found so a later rewrite of the snapshot preserves it — it is never
-  read as a time that has passed. The wait survives the retry it is waiting for
-  (`pending` after a wake, `dispatching`, `running`, `recovering`) and is
-  cleared by any other step write, so a retry that meets the limit again
-  continues the count and one that concludes otherwise ends it.
-- A repository's mission root spells the owner and the name as separate path
-  components under `repositories/`, and that spelling is **injective**: each
-  component is refused unless it is a single plain name, so it carries no
-  separator, so the path recovers the identity that produced it and two
-  identities share a root only when they are the same identity. An owner or a
-  name that cannot name such a component is reported with its reason rather
-  than mapped onto some other repository's root, and nothing is created for it.
-  The spelling this replaced joined the two with the same hyphen it substituted
-  for separators, which is not injective at all — `data-science/tools` and
-  `data/science-tools` both wrote `data-science-tools`, so one repository's
-  snapshot replaced the other's, one repository's specification made the
-  other's mission report that it already existed, and one repository's lease
-  blocked the other's unrelated mission.
-- Missions written under that ambiguous root stay readable there; nothing is
-  migrated. This is the recorded choice, and migration is the rejected
-  alternative: the advancement lease is a directory inside the mission's own
-  directory, so moving a mission moves its lease, and a holder still running
-  against the old path would go on writing there while a third process — finding
-  no lease where the holder believes it left one — acquired that mission's lease
-  a second time. Reading in place resolves one mission to one directory for
-  every release, so there is exactly one lease per repository-qualified mission
-  whichever one opened it. Ownership of a legacy mission is established per
-  mission from the durable records it carries — its specification, its
-  snapshot, and its lease owner record, each of which names a repository — and
-  never from the ambiguous root as a whole, which belongs to no repository in
-  particular. Only a legacy directory that is *provably absent* routes past it:
-  a stat that could not be taken, and an entry present without being a
-  directory this store could have written, both refuse, because reading either
-  as "there is nothing there" would address the repository-qualified root and
-  let a second mission — with a second advancement lease — start beside history
-  nobody could see. A record that is there and was written under a schema
-  version this release does not recognize is likewise not evidence of absence:
-  it makes the mission unattributable, since the record silence hides may be
-  the other repository's. Records that disagree with one another, that name another
-  mission, that will not read, or that name no repository at all leave the
-  mission attributed to nobody: addressing it reports its path and why it was
-  refused, and not a byte of it is read as one repository's or replaced. The
-  same refusal covers a mission that has records under both roots. Enumeration
-  goes through that one resolution too, so an identifier it refuses is listed
-  by neither repository: reporting one would name a mission nothing can read or
-  write. `repositories/` and `.deleted` are the two
-  names the old spelling could never produce — every key it produced carries
-  the hyphen it joined owner to name with — which is what keeps the two
-  namespaces from aliasing, and what lets the holding area a delete moves a
-  mission through sit at the missions root where no repository's store can be
-  it.
-- A mission still living under that ambiguous root is never deleted. Every
-  other operation works on it exactly as on any other — it reads, it writes, it
-  enumerates, it holds one lease — but a delete removes a *directory* rather
-  than the records whose identity was checked on the way in, and a shared
-  directory holds nothing that can be proven to be one repository's alone. The
-  journal, the invocation log and the sealed archives are only ever read record
-  by record; a submitted command and the control token name no repository at
-  all; a record under a schema version this release does not recognize says
-  nothing about who wrote it; an unterminated tail is a record that was never
-  decoded; and a subdirectory that cannot be listed is not a subdirectory that
-  is empty. Each is a way to mistake "I could not tell" for "it is mine", and
-  the only answer that cannot be got wrong is to remove nothing there. Clearing
-  such a directory out is an operator's decision about history two repositories
-  may have written, and this release has no evidence to make it.
-- A mission a controller advances holds two further records, and each answers
-  a question the four above cannot. `invocations.jsonl` is written *before*
-  every external effect and flushed to the disk before that effect is
-  attempted: it carries a stable invocation identity, the owning action, the
-  target identity, the exact target version the effect was authorized against,
-  and what the effect was going to be, and a second record closes it with what
-  happened. An opening record with no closing one is an outcome nobody
-  observed — something may have happened — and it is resolved by fresh
-  evidence or by authenticated direction, never by repeating the effect. Its
-  identity is also how a replayed request returns the child it already
-  produced instead of launching a second one, and how the crash windows around
-  a launch are told apart. Its identity is written into the worker the launch
-  creates, so an invocation with no recorded conclusion can still find the
-  worker it became and adopt it; only when no worker names it is its step's
-  evidence consulted. A plan step's launch with nothing at all behind it — no
-  worker, no result, no departed target, no foreign live work — was cut off
-  mid-flight by the process that journaled it, and is `interrupted`: the
-  mission's lifecycle becomes `interrupted` before anything else is dispatched,
-  the scheduler admits it no more, and neither a restart, a resume, nor
-  evidence that turns up later replans the step; the runner's own `override`
-  does, releasing the launch record as it does for an unknown outcome. Every
-  other open launch is still a genuinely unknown outcome. The target version it records travels the same way, into
-  that worker's own specification, so the last instant before an agent session
-  begins can ask whether it still holds — and a target that moved, or that
-  cannot be read at all, stops the turn before anything is mutated. Those two
-  refusals stay distinct: a moved target is replanned against a new reading, an
-  unreadable one is waited on, and the mission records the second as an unknown
-  outcome rather than as a step that failed. Two effects have no step record to
-  carry that outcome on, and each is recovered from the record instead. A
-  registered child's launch records the parent it was asked for by, so a crash
-  before the session write puts the child back under that parent rather than
-  leaving a running session nothing accounts for; and an open subtree
-  termination is settled by observing the registered sessions themselves —
-  every one of them shown to have ended closes it, and anything less halts the
-  mission for authenticated direction, because a signal that may already have
-  been delivered is never sent again on the strength of the record. A worker
-  record that has been collected is evidence of nothing: it is read as an
-  unknown ending, never as a clean one, so a parent never settles over a child
-  whose outcome no longer exists to be read.
-  What a finished worker achieved is the action registry's to say, not the
-  runner's: a clean exit means the process ended, while whether a solve
-  produced an attributable pull request and whether an issue action published a
-  verdict are action-specific questions the registry already answers. The
-  runner rebuilds the handle from the worker's own durable record and asks, and
-  a run whose record cannot supply what that judgement needs is an unknown
-  outcome rather than a success. A registered action that owns no worker is
-  answered as it is dispatched, in the same iteration, because there is no
-  durable child for a later pass to observe — whether a plan step or a
-  registered child asked for it. A child's own end is judged the same way its
-  parent's is, through the action its launch recorded, so a child that exited
-  cleanly having achieved nothing keeps its parent waiting rather than settling
-  it. Both the step a child's launch invents and the identity that
-  request is deduplicated by encode the parent and the request so the pair can
-  be recovered from them: two live parents may each validly ask for the same
-  request, and a name that flattened them would answer the second with the
-  first one's child and judge it against the first one's action. A child's
-  refusals are typed like any other — a target that moved ends the child having
-  mutated nothing, and one that could not be read leaves it unverifiable — and
-  a step whose registered child cannot be shown to have ended reaches
-  `outcome_unknown` rather than waiting on evidence that is never coming, which
-  is what keeps a foreground run from waiting for ever on it. And a target that reaches a
-  terminal state between the controller's reread and the registry's own
-  resolution is reported as the stale plan it is rather than as a target that
-  could not be resolved.
-  A run that reaches a blocked lifecycle stays at its own terminal and asks
-  what to do, because that terminal is the only channel carrying the authority
-  such a state is resolvable by; exiting first would report the question after
-  closing the one door out of it. A run that ends on anything nothing could
-  establish the outcome of reports failure, which is the promise above that an
-  indeterminate result is never a success; that is read off the step records
-  and off the invocation journal both, because the two effects with no step
-  record of their own have nowhere else to carry it, and an authenticated
-  override releases such a record as well as an open one, so a mission is never
-  stuck on a launch it has already given up on. Every other blocked stop is a
-  mission doing what it was asked and reports none. A termination leaves its record open when it is
-  signalled, whatever it reached, because signalling is not ending: an ordinary
-  worker may be pending termination for a while yet, and an issue action's
-  child is a queued command its host has still to act on. The pass that reads
-  the sessions is what closes it — completed once every registered descendant
-  has ended, waiting while any is still ending, and unknown, with the mission
-  halting for direction, if one cannot be shown to have ended at all. A worker whose supervisor has committed its turn and is
-  still resolving the processes it recorded is going, not gone, and every pass
-  that asks whether a worker has finished asks it the one way, so the step's
-  evidence, the conflicting-work scan, and a subtree's accounting cannot
-  disagree about the same worker. A worker
-  whose state will not decode is that last case rather than the middle one:
-  nothing was read, so it was neither shown to be going nor shown to have
-  stopped, and the same unreadable state is what stopped the signal reaching
-  it. A registered child's parent is held to the same standard from the other
-  side — a request is launched only under a parent whose own state was read
-  and says it has not finished, because a session this mission registered
-  carries no process ownership and would otherwise read as merely
-  unverifiable for its whole life. And a conclusion that
-  cannot be written stops the run rather than being discarded: a step recorded
-  as running beside a launch the file still calls open is one no later pass
-  revisits, so the mission would go on to complete over a record that never
-  closed. End of input, or the word for it, ends the
-  run on the state it was already reporting, and a redirected standard input is
-  never prompted any more than it is read. An authenticated override reaches
-  the launch record as well as the step, since an unresolved launch is what the
-  recovery pass reads first and a step handed back without it would be taken
-  straight to `outcome_unknown` again on the next pass.
-  `control/requests/` is the channel an attached client takes direction on, and
-  everything in it is an ordinary durable operator command with no override
-  authority — no credential is stored there or anywhere else, because one
-  durable enough for a second process to present would be durable enough for a
-  third to copy.
-- The snapshot's session tree is what an advancing controller registers every
-  session it starts in, with the parent that asked for it. That tree is what a
-  subtree termination walks and what an owning action's "is a registered child
-  still live?" question reads, so a session recorded only as an identifier
-  elsewhere would be one no child could name as its parent, no termination
-  could reach, and no parent had to wait for.
-- Every mission record also carries the repository and the mission it belongs
-  to, and a record whose identity disagrees with the directory it sits in is
-  refused rather than adopted — the specification, the snapshot, each journal
-  line, each sealed-archive record, and the lease owner alike. Each is decoded
-  on its own, so for each of them a store restored from a backup, a directory
-  copied, or a repository renamed can put the two out of step; adopting one
-  would let a foreign record authorise deleting a mission, report another
-  mission's history as this one's, or hand out a lease whose real holder is
-  still running. Nothing this release writes can produce such a record either:
-  a write naming another repository or mission is refused before it is
-  staged.
-- The mission store holds no open issue or pull request body either. What a
-  mission records of its targets is their numbers and titles alongside the
-  request the user typed, never an item's body, so the rule below is not
-  weakened by it.
+  is corruption and keeps its warning.
 - Permit `--no-cache` and a global `cache = false` setting. Either suppresses
   both the read and the write of every cache here, the completed generation
   included: a run with caching off seeds no history and stores none, and leaves
@@ -4143,9 +2176,9 @@ Defaults:
   carries: nothing expands it, so `~/work/repo` is a non-absolute value. A
   non-absolute `path` is a decode-time configuration error naming the full key
   path, like any other invalid value, and it is the one roster mistake that is
-  loud rather than degraded — the file is read from a fixed location but
-  consumed by workers running from other directories, so a relative value
-  would name a different checkout for each of them.
+  loud rather than degraded — the file is read from a fixed location whatever
+  directory the dashboard was started in, so a relative value would name a
+  different checkout depending on where it was started.
 - Keep a roster entry whose checkout cannot be used, rather than refusing the
   launch. An entry whose declared `path` is missing, unusable, or not a Git
   checkout stays in the roster with no usable checkout; so does one whose
@@ -4155,14 +2188,14 @@ Defaults:
   entry for an unnamed repository. A difference of ASCII case alone is the
   same repository and stays usable, under the same fold that selects an
   override table. Every degraded entry is named, with what was wrong with it,
-  in the same in-app startup notice the settings and board-authority
+  in the same in-app startup notice the board-authority
   diagnostics use, one fragment per degraded identity, and never on the stderr
   channel the terminal takeover paints over.
 - Give the launch checkout the collision when its repository is also
   configured with a `path` naming a different checkout: the roster holds one
-  entry for that identity and it uses the launch checkout, silently. Actions
-  then target the checkout the operator is sitting in, which matters because
-  sessions are routinely launched from linked worktrees.
+  entry for that identity and it uses the launch checkout, silently. The roster
+  therefore names the checkout the operator is sitting in, which matters because
+  dashboards are routinely launched from linked worktrees.
 
 Configurable repository semantics include:
 
@@ -4244,11 +2277,6 @@ repository at all.
   absence — an item whose assignees never arrived is not shown as `unassigned`
   and does not fall into the backlog column, and a pull request whose closing
   references never arrived is not shown as `UNLINKED`.
-- Missing Kanban-owned setup: an AI action that preflight finds definitely
-  unready never spawns an agent. It reports `cannot start` naming the cause
-  and the command that installs it, rather than a generic agent failure, and
-  its session activity reads `setup required`. Only a definite local
-  observation blocks; an inconclusive probe lets the action run.
 
 No error should clear a previous good snapshot.
 
@@ -4283,8 +2311,7 @@ manual checks.
 Every frame is drawn through the whole-application composition the dashboard
 itself hands Brick, so nothing is reconstructed for the test, and every input a
 frame can vary over — the fixture snapshot's timestamps, the redraw instant and
-time zone, freshness, the notice line, drainer status, and the session, process
-and worker maps — is pinned. Beyond the three sizes, the matrix covers the box
+time zone, freshness, the notice line, and the usage snapshots — is pinned. Beyond the three sizes, the matrix covers the box
 and open border renderers, ASCII mode, a selected card, the details overlay,
 and the help overlay. Section 17's two blocking board states — the initial
 loading panel and `OPEN DATA UNAVAILABLE` — are captured at every one of those
@@ -4315,23 +2342,23 @@ KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 
 - Temporary Git repositories with HTTPS and SSH GitHub remotes.
 - Fake `gh`, `codex`, and `claude` executables placed on a temporary `PATH`.
-- Worker completion and timeout delivery through `BChan`.
+- Refresh completion and timeout delivery through `BChan`.
 - Terminal resize and narrow-layout behavior.
 - Clean terminal restoration after normal exit and exceptions.
 
 ### How the suite runs
 
-The suite runs as five concurrent processes — *lanes* — rather than one, and
+The suite runs as four concurrent processes — *lanes* — rather than one, and
 each lane runs its own groups one at a time. Most of the wall clock is spent
 waiting on real deadlines (TERM-to-KILL grace periods, provider probes that
-never exit, service invocations proven timed out), and those waits overlap
-across lanes; serially they do not.
+never exit, `gh` calls proven timed out), and those waits overlap across lanes;
+serially they do not.
 
 The unit of concurrency is a process and not a thread because every expensive
 example establishes what it drives through state the process owns rather than
 the example: environment variables and the `PATH` a fake executable is
 installed on, the working directory, the file-creation mask, the SIGTERM and
-SIGINT dispositions a managed worker installs and restores, and the process
+SIGINT dispositions a managed child process installs and restores, and the process
 tree that every census, group sweep and "leaves no survivor" assertion reads.
 Two examples sharing a process share all of it. Two lanes share none of it, and
 a lane is started in a session of its own, so one lane's group sweep cannot
@@ -4396,10 +2423,16 @@ writes only outside the working tree.
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` builds and runs both test suites on Linux as
-independent jobs behind one aggregate `build-test` job, which is the single CI
-context that branch protection, `tools/drain_prs.py`, and the release gate all
-resolve.
+`.github/workflows/ci.yml` runs the Haskell build, `cabal check` and
+`cabal test all --test-show-details=direct` in one job, the `tools/` suite
+(`python3 -m unittest discover -s tools -p 'test_*.py'`) in another with no
+Haskell toolchain, and the systemd drainer-lifecycle check in a third, as
+independent jobs on Linux behind one aggregate `build-test` job, which is the
+single CI context that branch protection, `tools/drain_prs.py`, and the release
+gate all resolve. The Haskell suite covers the application; the Python suite
+covers the scripts, the workflow bundles and the documents they read. The CI
+description here and the suites that exist are one thing: a suite added or
+retired is changed here in the same pull request.
 
 ### What parses this document
 
@@ -4435,89 +2468,46 @@ refresh, and terminal focus updates with a 60-second cooldown are implemented.
 Open issues and open pull requests are fetched live
 and uncapped on every refresh, with no display limit and no repository snapshot
 on disk. Checklist-based tracker hierarchy, inherited PR membership, tracker
-progress, and the on-demand Codex and Claude usage providers are also
-implemented. Malformed tracker diagnostics now fail visibly while preserving
-valid membership and standalone fallbacks. The dashboard no longer controls or
-monitors the PR drainer or the issue approval service: their sidebar controls, the `i`, `a`, `d`, and `m` bindings,
-the incidents panel, and the direct merge were removed, and the application
-ignores the configuration keys those scripts own (section 16). Both services
-are installed, started, and stopped from `tools/`; the drainer runs as a
-launchd job on macOS and a systemd user unit on Linux, and waits out a network
-outage in a live `offline` state — one connectivity check a minute, no drain
-work, no incident — instead of exiting on it. Native GitHub
-sub-issue membership, canonical v2 issue-review sessions, embedded revision
-questions, and the first resumable issue-solve flow are implemented. Issue
-review, rereview, and revision are now durable as well: each runs as an
-independently leased child action of one detached review host per canonical
-repository, survives the dashboard, and is reattached to and replayed by the
-next one, with every dashboard input travelling to it as a correlated,
-acknowledged, exactly-once command. A named mission can now be advanced
-outside the board as well: `kanban --mission` claims that mission's own
-advancement lease, reconciles its durable record against live worker and
-GitHub state, journals every effect before attempting it, and makes at most
-one transition per pass through the workflow action registry until the mission
-is terminal, paused, or blocked. Repository-wide selection and unattended
-scheduling are now implemented too: `kanban --mission-scheduler` advances
-every runnable mission by one transition per bounded pass, skipping any whose
-advancement lease is held, observes whatever attention is outstanding anywhere in the
-repository, notifies about each waiting episode at most once through a command
-the operator configured, and writes one machine-readable pass report;
-the mission runner service script repeats those passes for one repository,
-publishes a versioned status document and opens an incident on a failed pass,
-and refuses a second wrapper for the same repository. That wrapper is now a
-managed job as well: its installer script installs one stopped job
-per canonical GitHub repository in a `mission-runner` namespace of its own,
-writes the discovery record, and starts nothing.
-`Kanban.MissionRunnerService` discovers that job, decodes its status document
-and incidents, starts and stops it, and replays a mission's durable events from
-a cursor. The runner's own chain now survives its own failures: each pass is
-recorded by identity before it may run, and a wrapper settles whatever pass a
-killed predecessor left — the scheduler and its mission children, verified by
-identity, never the detached workers — before starting one, blocking with an
-incident on a survivor it cannot verify gone. On Linux the mission runner's
-systemd unit now signals only its wrapper (`KillMode=process`), so a stop,
-restart, or crash of the runner leaves every mission-dispatched worker and its
-agent running, as launchd already did, and the runner's own leftovers are
-settled on the next start; an existing installation takes the new unit on the
-next start of a stopped runner. A normal stop or upgrade now drains the runner
-instead of cutting its current step off: the wrapper starts no further pass,
-publishes a `draining` state the dashboard decodes as its own, and lets the
-pass in flight and its `--mission` children finish their step, without waiting
-for detached workers. `stop` returns once the drain is recorded. A drain is
-bounded by a five-minute grace, after which, or on a second stop, it escalates
-as a forced stop does and opens an incident. The runner's systemd unit
-declares a stop timeout longer than that. A step whose launch was journaled
-and cut off before any worker or result was recorded is `interrupted`, stops
-its mission, is never retried by a later pass or a restarted service, and is
-recovered by the runner's `override`. Every mission session's event stream and
-raw provider log are sealed into the mission archive when the session ends and
-retried on every pass, and the worker cache keeps a mission worker's records
-until those seals verify. Mission agents are now capped per repository: at most
-`[missions] agent_ceiling` (default two) mission-dispatched agents are live at
-once, counted from the worker cache across every mission, pass, and checkout,
-claimed atomically before a launch is journaled, and shared among waiting
-missions by a durable round-robin; each pass advances every runnable mission by
-one transition, and a mission held back by the ceiling is reported `deferred`
-and retried rather than failed. A mission step whose agent session fails at a
-positively identified provider rate or usage limit — read from Claude's
-recorded stream or from the Codex account snapshot after the failure, never
-from error text — now waits for the provider's reset time, or a bounded
-backoff, in `waiting_capacity` without holding a slot, and is dispatched again
-once that time passes, surviving a runner restart; depleted credits and every
-other failure still stop the mission. Rendering any of that is not implemented. The durable `gh` group record is shared safely by every process
-that reads the board: each rewrite takes a cross-process lock, and each entry
-names the process that spawned its `gh`, so a reader skips another process's
-live work, re-verifies a cleanup-pending leftover even while its writer runs,
-and reclaims only what an exited writer left (section 15). Each reader process
-— a dashboard, a `--mission` runner, a persistent worker, and an issue-review
-host — holds one record lock for its whole life, so a group one of its reads
-could hold back only in memory turns away every later read that process takes
-before it spawns anything. Board frames are
-bounded as section 7 describes: each column is laid out once per change to what
-it shows, and a frame builds the cards its viewport can reach rather than every
-card the column holds. The
-external usage-command escape hatch is also implemented. Broader
-provider-version fixtures remain for subsequent slices.
+progress, native GitHub sub-issue fallback membership, and malformed-tracker
+diagnostics that fail visibly while preserving valid membership and standalone
+fallbacks are implemented. The on-demand Codex and Claude usage providers, the
+external usage-command escape hatch, the `--usage` command-line surface and the
+sidebar's burn estimates are implemented too; broader provider-version fixtures
+remain for subsequent slices. Completed history is acquired in the background,
+cached whole, and filterable. The durable `gh` group record is shared safely by
+every dashboard: each rewrite takes a cross-process lock, and each entry names
+the process that spawned its `gh`, so a reader skips another process's live
+work, re-verifies a cleanup-pending leftover even while its writer runs, and
+reclaims only what an exited writer left (section 15). Board frames are bounded
+as section 7 describes: each column is laid out once per change to what it
+shows, and a frame builds the cards its viewport can reach rather than every
+card the column holds.
+
+Nothing else is implemented, on purpose: the dashboard has no agent control
+and neither controls nor monitors the owner's services. Those are installed,
+started, and stopped from `tools/`, which `docs/pr-drainer.md`,
+`docs/issue-approval.md` and `docs/workflow-setup.md` describe, and section 16
+lists the configuration keys the application ignores because the scripts own
+them. What was removed is named under Retired.
+
+#### Retired
+
+Epic #794 removed the application's agent-control half so that `kanban` is the
+board and its usage panel and nothing else, with the owner's skills and scripts
+tracked beside it rather than driven by it. What went, so that a reader does not
+conclude something is missing: the review, revision, solve and autosolve
+sessions and their chooser, overlays and process inspector; the issue-review
+host and the Codex app-server review client behind it; the detached worker supervisor
+and its journals; the mission runner, scheduler and store, with
+`kanban --mission`, `--mission-scheduler` and the runner service; the provider
+ping, `kanban --ping`; the readiness report, `kanban --doctor`; the internal
+`--worker-spec` and `--review-tools` entry points; the model roster, settings
+screen and operating modes; the board's keys `r`, `S`, `A`, `p`, `x`, `o`, `d`,
+`a`, `m` and `i`; and the dashboard's control and monitoring of the PR drainer
+and the issue approval service. The scripts those controlled are unchanged and
+stay documented in their own documents; `docs/designs/` keeps the retired
+features' designs only where a surviving slice still stands, each carrying a
+dated retirement note.
 
 ### Milestone 0 — Project foundation
 
@@ -4611,369 +2601,14 @@ unknown output. Automated CI covers fixtures without a live account; the first
 release requires a successful manual refresh against the current supported
 Claude version.
 
-### Milestone 6 — Local PR drainer control
+### Milestones 6 through 8 — retired
 
-Implemented for one independently controlled service job per canonical GitHub
-repository, whose identifier is derived from that repository's normalized
-identity, on both supported service managers.
-
-- Track the canonical drainer and controller implementations under `tools/`.
-- Reach every service manager through one backend boundary, selected by probing
-  the host: launchd on macOS, systemd user units on Linux, and a refusal naming
-  the absent service manager on a host with neither.
-- Install stable per-user links, shared by every repository, and one
-  job per repository through an idempotent installer that refuses
-  active services and ordinary-file replacement, and never starts the drainer
-  implicitly.
-- Discover the controller command from that job's own definition, located
-  through
-  this repository's entry in the installer-written discovery record rather than
-  an identifier Kanban derives, reading the record as a discriminated union on
-  the backend that wrote it and resolving a backend-less entry as the launchd
-  install it can only be.
-- Partition the job identifier, its definition, runtime status, service logs,
-  dated logs,
-  incidents, and `--config` selection by normalized repository identity, so
-  several repositories drain independently on one account.
-- Bind controller status and start/stop operations to the current repository,
-  and refuse a `--repo` identity the checkout's own remote contradicts.
-- Reinstall this repository's stopped job with that repository path
-  before starting it, refuse a second concurrent drainer for the same canonical
-  repository from another checkout, and retire the machine-wide singleton that
-  predates per-repository jobs before its replacement starts.
-- Remove one repository's stopped job, its definition, and its discovery entry
-  through that same boundary, leaving every sibling repository's install and
-  the shared configuration alone.
-- Record the installed identity in the definition and hold the managed runner
-  to it,
-  so a configuration change after installation stops that job instead of
-  re-pointing it at another repository.
-
-The dashboard side of this milestone — decoding the controller's status and
-incidents, the sidebar control and its status colours, the `d` and `m`
-bindings, the incidents panel, and the status polling — was removed. The
-scripts above are unchanged and are run from `tools/`.
-
-### Milestone 7 — Embedded issue reviews
-
-The first direct, one-off review slice is implemented.
-
-- Start one Codex app-server on demand and host one thread per issue.
-- Stream agent and command output through the bounded Brick event channel.
-- Register `kanban_prompt_user` and return structured choice/text answers.
-- Register `kanban_run_claude` so Opus uses the terminal user's authenticated
-  CLI outside the Codex command sandbox while remaining read-only.
-- Register `kanban_github_issue` for bounded, approval-free issue reads,
-  comments, and review-label transitions.
-- Render hideable session overlays, status markers, approvals, feedback, and
-  turn interruption without terminal emulation.
-- Route canonical reviewer families through the synchronous v2 publisher while
-  never starting its background daemon, resolving that publisher through the
-  installer-written discovery record rather than a default each consumer
-  spells out for itself.
-- Advance issue review, author-brand revision, and opposite-brand rereview as
-  three explicit stages using `reviewed:changes` and `reviewed:revised`
-  handoffs. This issue-level handoff is unrelated to PR revision, which does
-  not use a Kanban-created `reviewed:revised` handoff (see PR routing above).
-- Bound transcript and input memory and stop animation ticks when turns idle.
-
-Follow-up hardening should add broader fake app-server fixtures,
-protocol-version diagnostics, and persisted review-session mapping/resume.
-
-### Milestone 8 — Embedded issue solving
-
-The first solve/autosolve-compatible slice is implemented.
-
-- Capital `S` opens the model chooser and invokes the existing solve workflow,
-  stopping after PR creation. Capital `A` opens the same chooser and invokes
-  that ordinary solve workflow while Kanban owns the subsequent bounded
-  review/fix loop. Escape cancels either chooser.
-- Canonical solvers are GPT-6-Sol high and Opus 5.5 high.
-- Canonical opposite-brand PR reviewers are Opus 5.5 xhigh for Codex-origin
-  work and GPT-6-Sol xhigh for Claude-origin work.
-- Those pairings, the embedded issue-review thread's own model and effort, and
-  `kanban_run_claude`'s are roster cells rather than literals: the values above
-  are the compiled defaults, and a roster that cannot supply a cell refuses the
-  spawn instead of substituting one. The Python and plugin spawn sites still
-  carry their own literals.
-- Solver processes stream structured CLI output into a bounded, hideable
-  overlay, retain their resumable session identifiers, and run as owned process
-  groups. Solve, PR, and issue-review providers are owned by detached,
-  repository-scoped supervisors, so quitting the TUI leaves explicitly started
-  work visible and bounded rather than terminating it.
-- Each detached supervisor writes a private specification, atomic heartbeat
-  state, and append-only event journal under the XDG cache. A restarted TUI
-  discovers only workers for its repository, reconstructs the session and
-  autosolve parent state, and replays output without rerunning the provider.
-  Terminal journals remain discoverable until a newer worker is durable proof
-  that their workflow step was superseded, closing the crash window between a
-  terminal event and its GitHub-refresh handoff, and in no case longer than
-  section 16's retention window.
-- A provider event the parser does not recognize — an unknown top-level type,
-  an unknown Codex item, or an unknown Claude content block — contributes at
-  most one bounded single-line notice: a normalized, truncated type label and
-  a truncated compact payload prefix, whole-notice length included.
-  Normalizing a type means sanitizing it and collapsing its whitespace onto one
-  line, and nothing more: none of it is read as Markdown the way §11 reads a
-  card body, so a type shaped like a heading or an HTML comment keeps an
-  identity of its own. Only a literal JSON string names a recognized type, so a
-  non-string type cannot be coerced into a recognized branch and out of the
-  bound. A payload with no usable string type — missing, non-string, or blank
-  once normalized — and an `error` payload with no usable string `message`, use
-  the same bounded form; only a real textual error message is exempt and kept
-  in full. Repeats collapse per invocation: the first few
-  occurrences of each `(category, type)` are reported individually, later ones
-  only accumulate a count, and one aggregate summary naming the total is
-  appended before the terminal event on every path. The supervisor owns that
-  aggregator, not the flow: a deadline emits the terminal envelope from its
-  watchdog and then cancels the task, so the supervisor seals and reports
-  before committing any outcome, and the flow seals the same state on its own
-  unforced paths. Sealing is one-shot and refuses every later unknown notice,
-  so exactly one side reports and a stream still draining buffered output
-  cannot restart counts after the summary or append past the terminal
-  envelope. Deciding and writing a notice, and sealing and writing the
-  summaries, all happen under one lock, so neither a sample nor a summary can
-  be in flight while the other side terminalizes over it.
-  Aggregation is invocation-local and append-only, never rewriting an entry or
-  carrying counts across invocations, so a chatty unrecognized type costs a
-  journal and replayed transcript O(1) rather than O(n). Section 16's raw
-  session log is unaffected and still records every provider line in full.
-- An atomic repository-scoped lease permits only one live solve worker per
-  issue and one live review/revision worker per PR. A live lease refuses the
-  duplicate launch; a stale lease is retired so an interrupted worktree can be
-  recovered without erasing its commits or uncommitted changes.
-- The supervisor snapshots its provider process tree every 250 ms and persists
-  each observed PID, process group, start identity, and command. A provider
-  cannot reach terminal state while a matching recorded descendant survives,
-  or while a process-snapshot failure leaves that survival unverifiable: the
-  worker remains alive in an explicit red `orphaned` state, visible after a
-  TUI restart, until a successful snapshot confirms the child exited or the
-  user kills it. A snapshot failure is always reported as an explicit
-  failure, never silently treated as a verified empty survivor list.
-- Persistent workers have a four-hour hard deadline on their active task and
-  provider execution as a whole, measured from worker creation rather than
-  from whenever the watchdog thread happened to start — an already-overdue
-  deadline fires immediately. On firing, the watchdog kills the current
-  provider group and every still-matching recorded census group, cancels the
-  worker's own task execution (so a hang before any provider ever starts
-  cannot keep the supervisor and lease alive indefinitely), and commits one
-  canonical, externally visible `persistent worker deadline exceeded`
-  outcome — shown distinctly from a generic provider failure in worker
-  state, the journal, session/card activity, and the process inspector,
-  rather than collapsing to it. A provider that registers after the deadline
-  has already fired is killed immediately through the same stop guard. The
-  process inspector marks persistent workers and shows the remaining bound.
-  That kill deadline is distinct from verified terminal state and lease
-  release, which require a successful snapshot proving every recorded
-  descendant is gone — a persistent process-snapshot failure can keep a
-  worker orphaned, with the deadline outcome recorded as pending, and its
-  lease held well beyond four hours, since the watchdog is not an outer
-  bound on termination verification. If a stale supervisor is confirmed
-  dead, Kanban kills its recorded provider process
-  group and all still-matching census groups, then publishes a visible
-  terminal failure once a snapshot verifies they are gone; an unresolved
-  verification leaves it visibly unresolved for a later recovery pass to
-  retry. `x` terminates those groups and the supervisor with TERM/KILL
-  escalation and verifies the supervisor stopped before writing terminal
-  state; if a snapshot failure leaves recorded descendants unverified, it
-  reports a visible diagnostic and retains the lease instead, and a later
-  successful snapshot completes the pending "killed by user" outcome. An
-  issue action settled this way closes its journal with the same terminal
-  envelope a host would have written, after answering any claim its dead host
-  left standing — and so does the stale-worker recovery a reattached dashboard
-  runs, which reaches the same actions by a different route: a dashboard reattaching to it replays that journal and
-  nothing else, so a terminal state with no envelope in it leaves an action
-  that never appears to end — and leaves the journal open to the appends the
-  envelope exists to stop.
-- Issue review, rereview, and revision are runner-owned too, under one durable
-  detached review host per canonical repository. That host owns the
-  repository's app-server client and its connection pool; each action is an
-  independently durable child of it, with its own specification, state, event
-  journal and raw log, dashboard-input command ledger and acknowledgements,
-  lease, and terminal result. A child's lease is `issue-action-<n>`, kept apart
-  from the solver's `issue-<n>` so a solve and a review of one issue still run
-  at once.
-  Quitting refuses none of them, and a later dashboard discovers the host,
-  reattaches to each child, and replays its evidence.
-  The host takes no deadline of its own: each child is bounded individually
-  from its own creation, and the host exits once it holds no live child, so no
-  host-level bound settles a child still inside its own bound and a host
-  serving nobody leaves neither a lease nor a discovery record behind. Having
-  no deadline means having none anywhere — the supervisor's completion claim,
-  its orphan poll, and its lease release all stand aside for the deadline
-  watchdog once the bound elapses, and a worker with no watchdog that stood
-  aside at any of them would wait for a handshake nobody completes. It
-  records no provider of its own either — it runs no provider turn, and a
-  recorded provider process with no verifiable identity is what every
-  termination path reads as unresolvable — and instead registers its client's
-  actual connection processes with its own supervisor, so they are identified,
-  censused, and reachable by the ordinary kill and recovery paths. The client
-  registers each connection as it creates one, because any later moment leaves
-  an interval in which a process is running and nothing durable names it.
-  That client is started when a revision first needs one and not before. An
-  initial review or rereview runs the canonical backend, whose stage preflight
-  asks for that backend and the reviewers it selects and for no in-app
-  provider session at all, so requiring one to exist before any child had been
-  seen would have failed every gate on an install that has none.
-  Settling a child closes its journal before it records the terminal state,
-  because those are two writes and a host dying between them leaves whichever
-  prefix landed. A closed journal over a state that still reads as running is
-  the repairable one; a terminal state over an open journal is repaired by
-  nothing. What repairs it is the replay itself: a monitor stops at a terminal
-  envelope, so that stop is where a state which has not caught up is
-  completed — with the outcome the envelope already published, releasing the
-  lease, and appending nothing, since the envelope is the journal's last
-  record. Every other path that reaches such a child reads the envelope the
-  same way: the direct-termination fallback repairs from it rather than
-  ending an action a second time under a different outcome.
-  A child settled between asking for a provider thread and the provider
-  announcing one stays addressable until that announcement arrives, and the
-  thread it names is closed rather than left owned by nothing; a canonical
-  subprocess that starts after its child was settled is ended the same way.
-  Attaching that thread and settling the child are one step against each
-  other, not two reads racing: a settle between the check and the attach would
-  find no thread to finish while the attach installed one on an action already
-  terminal, leaving it running under a shared connection with nothing owning
-  it.
-  The wire names only an issue number, and an issue outlives the action that
-  asked, so an announcement resolves to the action whose start is still
-  waiting rather than to whichever child holds that issue now — and one issue
-  has at most one start outstanding at a time. A settled action keeps its
-  start outstanding on purpose, so its late thread is still closed, while its
-  released lease lets a replacement for that issue begin; two outstanding
-  starts cannot be told apart from an announcement naming only the issue, and
-  a response is not promised in request order, so each would take the other's
-  thread. A replacement therefore waits for the earlier start to be answered,
-  bounded by its own deadline rather than waiting forever.
-  Each child keeps a raw log of its own, recorded on its own state: a
-  shared-process backend writes every thread's traffic to one interleaved
-  client transcript, which the host records as its own and which is no
-  child's evidence.
-  Host selection and child admission cannot be made one step from the launch
-  side, so the ordering is established on the host's side instead: a host that
-  has decided to exit records a handoff marker before the scan that decision
-  rests on, and everything asking which host a new child may go to reads a
-  marked host as none. A child written before the marker is therefore seen by
-  that scan and adopted — the marker comes down and the host keeps running —
-  and one written after it belongs to a launch that reads the host as gone and
-  ensures another. A launch writes its child's specification before it reads
-  liveness, so the one interleaving that would strand a child, missed by the
-  scan while reading the host as live, cannot occur.
-  The marker answers that question and no other. Whether a child's named host
-  has gone, which is what permits re-homing, is answered from that host's
-  recorded identity and is deliberately blind to the marker: a host on its way
-  out has not gone, and reading it as gone would let another host take
-  children it is still serving.
-  On top of that ordering a launch waits for evidence that a host has actually
-  taken its child on, since a host ensured is not a child adopted; ensuring
-  never ends that wait, and a wait that ends with no evidence at all is
-  reported as a failed launch whose child's records are removed and whose
-  lease is released, rather than as a success nothing is running. Giving up is
-  itself a claim, because a host puts a child in memory before it journals the
-  first event that wait looks for: host and launch each try to create the
-  child's one `.adoption` claim file, exclusively and never half-written, and
-  whichever creates it first has the child. A host that finds the launch's
-  withdrawal there never runs the child; a launch that finds a host's claim
-  there reports the launch as adopted and removes nothing; and a withdrawn
-  child's specification is removed before anything else of it, so no later
-  scan finds it. A host checks that the specification is still there after
-  its claim stands and before it re-homes or runs the child: one whose scan
-  found the child, paused, and resumed after the withdrawal had removed both
-  the specification and the claim wins a claim over nothing, finds the
-  specification gone, and gives the claim back. A claim neither side can read
-  or write removes nothing and runs nothing. A host also
-  adopts a child whose named host is provably gone —
-  never one a live host is serving. A host counts as live unless it is
-  disproven: terminal, or recording an identity a successful process snapshot
-  does not contain. An unreadable snapshot keeps it, which is the same
-  fail-closed rule lease recovery applies. A child that had never started is
-  re-homed and run; one that had started is re-homed and settled without being
-  restarted, because its provider session belonged to a host that is gone.
-  Having started is recorded before the request goes out, not when a thread
-  comes back: under a shared connection a revision owns no process and holds
-  no thread until its provider announces one, so a host dying in between would
-  otherwise leave a record indistinguishable from a child that never asked for
-  anything — and the rerun that followed would run beside a request still live
-  on a connection that outlived its host.
-  Either way the specification is rewritten to name the host now serving it,
-  since discovery and the collection pass both read ownership from there — and
-  a rewrite that fails refuses the adoption rather than proceeding under the
-  old name, because an adopted child is one the host already holds and every
-  later scan skips it, so nothing would ever revisit the disagreement.
-  Refusing leaves the child a candidate again on the next poll.
-  A re-homed child keeps the processes its own state records, as well: under a
-  process-per-thread backend those name the connection the dead host left
-  running, and a recovery that rebuilt the child's state from scratch would
-  discard the only durable name for it in the moment before settling the
-  action and releasing its lease.
-  A re-homed child continues its own raw log rather than opening another: the
-  name a new one takes carries the issue number and a timestamp but no action
-  id, so a child pointed at a fresh log leaves the evidence it actually
-  produced addressable by nothing.
-  Ending a child settles its provider turn as well as its tooling: under a
-  shared connection the turn is interrupted, since dropping the bookkeeping
-  alone would leave the provider working for an action already marked
-  terminal.
-  Under a process-per-thread backend the thread /is/ a process, so the action
-  owning it records that process on its own durable state and not only on the
-  host's census — in the same instant the host does, which is the spawn
-  itself. The registration the client makes as it creates a connection names
-  the review that connection was spawned for, and the action with that issue's
-  outstanding start takes ownership there. Any later moment — when the start
-  request returns, when the thread is announced — is a window in which the
-  process runs, the host names it, and the child does not, and a host dying
-  inside that window leaves a termination reading only the child's own state
-  and finding nothing to end. That is what a termination or a stale-worker recovery reads
-  when the host is the thing that has died — exactly the case where nobody is
-  left to ask for a thread to be finished — and without it the connection went
-  on running past the action it served, beside a replacement action for the
-  same issue. Under a shared connection nothing is recorded there, and must
-  not be: one process serves every thread, so a child holding it would end
-  every sibling when it was ended.
-  The provider's process shape is the adapter's, unchanged: a shared-process
-  backend multiplexes concurrent children through the host's one connection,
-  and a process-per-thread backend gives each child its own. Ending or
-  recovering one child settles that child's thread or process and its
-  descendants and never the host, a sibling, a sibling's lease, or a sibling's
-  events.
-  Mutation authority is stage-specific and unchanged: `approve_issues.py` alone
-  publishes a canonical review comment or moves a verdict label, and the
-  revision's `kanban_github_issue` tool alone publishes the specification
-  amendment and moves `reviewed:changes` to `reviewed:revised`, never
-  approving. No worker, host, dashboard adapter, or recovery path posts a
-  verdict of its own or reports an unobserved canonical result as approval.
-- Live solve and PR overlays render the animated activity pip beside a
-  provider-independent activity timer. Codex command events and Claude Bash
-  tool calls expose their sanitized one-line command, keeping long silent
-  builds and probes visibly distinct from a frozen agent.
-- Ctrl-C in a live solve or PR overlay sends INT to the current process group.
-  Once it exits, the overlay becomes an input prompt and Enter resumes the same
-  returned agent session with the user's corrective guidance.
-- Active autosolve cards use a blue outline. A terminal
-  `KANBAN_NEEDS_INPUT: <question>` handoff turns either workflow orange; an
-  answer in the overlay resumes the same agent session. Process errors are red
-  and completed sessions are white.
-- Both modes preserve the existing solve contract: readiness gate, worktree
-  rules, effective specification, targeted testing, and PR creation. Autosolve
-  binds only to a newly linked PR with the selected solver's origin marker,
-  launches a fresh opposite-brand reviewer, and resumes the original solver to
-  run the canonical `pr-revise` workflow on `reviewed:changes`. Because
-  `pr-revise` invokes the canonical rereview itself, Kanban reads the
-  resulting verdict directly off the PR's labels rather than waiting on a
-  Kanban-created `reviewed:revised` handoff, and loops back into another
-  `pr-revise` round on a fresh `reviewed:changes` verdict. Approval or five
-  review rounds terminates the loop; Kanban never merges.
-- Kanban refreshes the board after startup and at explicit workflow handoffs
-  rather than polling the solver or GitHub continuously.
-- Linked issue and PR cards remain visible simultaneously so the issue stays
-  Active while its new PR advances through Reviewing and Done.
-- `p` opens a scrollable process/session inspector. Each retained session has a
-  one-line provider, lifecycle state, activity summary, and shortened session
-  identifier; live solve and PR rows include the current activity elapsed time.
-  Enter opens its existing interactive overlay, while `x`
-  terminates the selected worker and provider process groups and descendants. Completed and
-  latest failed or completed session for each item remains available for
-  debugging until replacement or exit.
+The drainer-control, embedded-review and embedded-solve milestones were
+implemented as milestones of this roadmap and then removed by epic #794 (see
+Retired above). Their milestone text is deleted rather than kept as history: the
+PR drainer's behavior is `docs/pr-drainer.md`'s, the review and solve workflows
+are the skills under `claude-plugin/` and `codex-plugin/`, and what the board
+reads from GitHub about them is section 8's and section 12's.
 
 ### Milestone 9 — Hardening and release
 
@@ -4990,10 +2625,9 @@ The remaining manual checks and release publication are now the canonical
 is implementation history rather than a second status checklist.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
-idle CPU is effectively zero apart from the inexpensive local service status
-timer and the one-shot notice-expiry timer a settled notice arms (section 15),
-and every network call is attributable to startup, an explicit update, an
-eligible terminal focus event, or bounded workflow work.
+idle CPU is effectively zero apart from the one-shot notice-expiry timer a
+settled notice arms (section 15), and every network call is attributable to
+startup, an explicit update, or an eligible terminal focus event.
 
 ## 20. Deferred ideas
 

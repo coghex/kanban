@@ -4,18 +4,20 @@ Contract version: 2
 
 ## 1. Purpose and scope
 
-Kanban's board is fully usable without any AI provider. A smaller set of
-explicit actions — issue solve, PR review/rereview/revise/repair, the
-approved-pull-request fix, the manual finalization fallback, canonical
-issue
-review/rereview, the solve readiness gate, and the two optional background
-services, the PR drainer and the issue approval service — call
-out to external executables, a canonical review backend, and (for the two
-services) a user-scoped launchd job or systemd user unit. This document is the single
-authoritative list of those external dependencies: what owns them, how
-Kanban invokes them, what they return or fail with, what authority they
-need, where their durable state lives, and whether they are mandatory for
-Kanban to run at all or optional AI/automation add-ons.
+Kanban's board is a read-only terminal dashboard and needs no AI provider, no
+service and no skill: the application starts none of them and reads none of
+their state (`docs/design.md` §1). This document is about everything else the
+repository tracks and the owner runs: the workflow skills and commands in the
+plugin bundles (issue solve, PR review/rereview/revise/repair, the
+approved-pull-request fix, the manual finalization fallback, canonical issue
+review/rereview, the solve readiness gate, and the janitor), and the two
+optional background services, the PR drainer and the issue approval service.
+They call out to external executables, a canonical review backend, and (for the
+two services) a user-scoped launchd job or systemd user unit. This document is
+the single authoritative list of those external dependencies: what owns them,
+how they are invoked, what they return or fail with, what authority they
+need, where their durable state lives, and whether they are mandatory or
+optional add-ons.
 
 It also declares the boundary between what Kanban owns and tracks in this
 repository and what remains explicit, opt-in user-machine state (each managed
@@ -27,9 +29,9 @@ A fresh checkout can use this document to answer: "why did action X fail,"
 manages or something I must set up myself."
 
 The tracked plugins also package issue-drafting and canonical issue-review
-workflows that Kanban's own CLI never spawns — a user or the review daemon
-invokes them directly. Their responsibilities, boundaries, and inventory live
-in [drafting-workflow-contract.md](drafting-workflow-contract.md); their
+workflows that a user, an agent session or the review daemon invokes directly.
+Their responsibilities, boundaries, and inventory live in
+[drafting-workflow-contract.md](drafting-workflow-contract.md); their
 external commands and user-scoped paths are declared in §4 here, alongside
 everything else.
 
@@ -37,28 +39,28 @@ everything else.
 
 ### 2.1 Issue solve (`$solve` / `/solve`)
 
-- **Owning source:** `src/Kanban/Solve.hs`, with the process itself built by
-  `src/Kanban/ProviderAdapter.hs`.
-- **Invocation:** resolves the executable the selected provider's adapter
-  record names (`findExecutable adapter.adapterExecutable`), then spawns
-  (`createProcess`) the spec that record's `adapterSolveProcess` builds, with
-  solve-specific arguments (model/effort flags and the initial or resume solve
-  prompt built by `initialSolvePrompt`/`resumeSolvePrompt`). `Kanban.Solve`
-  names no provider executable of its own.
-- **Inputs:** issue number, solver brand, Kanban's resolved repository identity
-  (`Kanban.Repository.resolveRepository`'s `owner/name`, whether it came from an
-  explicit `--repo` or from the configured `remote_name`), the optional
-  `--config` path, and an optional resumed session id with its follow-up user
-  message.
-- **Repository scope:** the resolved identity — not the worked checkout's own
-  remote — scopes every GitHub issue and pull-request operation of the run:
+- **Owning source:** the tracked solve workflows named under *Comment trust
+  boundary* below, rendered from `tools/command_sources/` and held by
+  `tools/test_claude_plugin.py`, `tools/test_codex_plugin.py` and the external
+  bundles' own tests. No Haskell module owns or spawns it.
+- **Invocation:** a provider session the user (or an agent the owner started)
+  runs as `$solve` / `/solve`, directly or as the first step of `autosolve`.
+  The workflow resolves nothing but `gh`, `git` and the vendored scripts beside
+  it, and spawns no provider process of its own.
+- **Inputs:** an optional issue number (absent, the workflow selects the oldest
+  approved, unassigned implementation issue), an optional `--repo
+  <owner>/<name>`, and the issue's effective spec as the trusted-comment
+  helper returns it.
+- **Repository scope:** a supplied `--repo` identity — otherwise the one the
+  workflow resolves once from its own checkout, never the worked checkout's
+  remote thereafter — scopes every GitHub issue and pull-request operation of the run:
   issue selection, the read-only canonical gate check and the vendored
   trusted-comment spec fetch (both by `--repo <owner>/<name>`), the issue claim
   and its release, the open-pull-request collision search, and pull-request
-  creation (all by `-R <owner>/<name>`). `initialSolvePrompt` states it and
-  `resumeSolvePrompt` restates it, so a session resumed after context
-  truncation cannot silently fall back to checkout derivation for the
-  operations it still owns. It also names the worktree directory,
+  creation (all by `-R <owner>/<name>`). The workflow states it again wherever a
+  session resumed after context truncation could otherwise fall back to
+  checkout derivation for the operations it still owns. It also names the
+  worktree directory,
   `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/issue-<n>-<slug>` — the
   convention §2.7 records for repair — while `git worktree list` remains the
   sole collision and interrupted-work recovery source, so a worktree registered
@@ -200,28 +202,23 @@ everything else.
   equivalent record, and Claude Code's and Codex's own workflows have no
   Copilot database dependency at all. `tools/test_copilot_session_brand.py` runs the
   fenced check against fixture databases and holds its placement.
-- **Outputs:** a durable session log, worker events, and on success a pushed
-  branch and an opened pull request whose body ends with
+- **Outputs:** on success, a pushed branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`. A Copilot CLI
   session running a Claude model stamps `pr-origin:claude` as well, through
   the Claude-on-Copilot bundle (`claude-copilot-plugin/`, issue #722), because
   a bundle's brand is the model its session runs rather than the executable
   hosting it. A pull request may also carry `<!-- pr-origin:grok -->`,
   `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` when Grok, Kimi,
-  or Google opened it
-  outside Kanban's spawned solvers; those markers are known origins, not
-  unknown ones, and dual-mode review routes them to Codex only.
-- **Failure semantics:** a missing executable surfaces
-  `SolveFailed "<name> was not found on PATH"`; a session may pause with a
-  trailing `KANBAN_NEEDS_INPUT: <question>` line and resumes with the same
-  session id once the user answers. A solve launched from the board is
-  observed as the action outcome `ActionFailed` when it fails.
+  or Google opened it; those markers are known origins, not unknown ones, and
+  dual-mode review routes them to Codex only.
+- **Failure semantics:** a session may pause with a trailing
+  `KANBAN_NEEDS_INPUT: <question>` line and resumes once the user answers.
 - **Required authority:** the user's existing `gh auth login` (issue
   assignment, branch push, PR creation); local filesystem access to create a
   worktree.
-- **Durable state:** the per-issue worktree, plus the session log file.
-- **Mandatory/optional:** optional — only exercised by the `S`/`A` keys, and
-  only after the user picks a provider.
+- **Durable state:** the per-issue worktree.
+- **Mandatory/optional:** optional — only exercised when the user invokes the
+  workflow in a provider session.
 
 That solve-agent trust boundary is deliberately narrower than, and independent
 of, the reviewer gate's arithmetic in `tools/approve_issues.py`; the two answer
@@ -289,12 +286,13 @@ that a particular comment should not.
 
 ### 2.2 PR review, rereview, revise, and repair
 
-- **Owning source:** `src/Kanban/PullRequestFlow.hs`, with the process itself
-  built by `src/Kanban/ProviderAdapter.hs`.
-- **Invocation:** resolves and spawns the selected provider's executable the
-  same way as solve — through that provider's adapter record, here through its
-  `adapterPullRequestProcess` — running the named canonical command:
-  `pr-review` and `pr-rereview`
+- **Owning source:** the tracked `pr-review`, `pr-rereview`, `pr-revise` and
+  `repair` workflows and the six bundled review coordinators
+  (`review_pr.py`, listed under *PR reviewer comment trust boundary* above),
+  rendered from `tools/command_sources/` and held by the bundle tests. No
+  Haskell module owns or spawns any of them.
+- **Invocation:** a provider session the user, an agent the owner started, or
+  `autosolve` runs the named canonical command: `pr-review` and `pr-rereview`
   run on the opposite brand from the PR's origin marker whenever the roster
   loads both providers — except `pr-origin:grok`, `pr-origin:kimi`, and
   `pr-origin:google`, which are known origins
@@ -302,41 +300,28 @@ that a particular comment should not.
   `pr-revise`
   and `repair` run on the PR's own origin brand and each internally invokes
   exactly one canonical `pr-rereview` after pushing a fix. None of Grok,
-  Kimi, or Google is a spawned provider, so board revision and repair of a
+  Kimi, or Google is a spawned provider, so revision and repair of a
   grok-origin, kimi-origin, or google-origin pull request are refused in
   every operating mode; the session that opened the pull request revises
   it itself. All six bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
-  no-agent mode, publishing nothing and changing no label (issue #572).
-  Kanban's own dashboard collapses it on the same terms: `agentForAction`
-  takes the operating mode, and single-agent routes all four actions to the
-  loaded provider (issue #589) except grok-origin, kimi-origin, and
-  google-origin revision and repair, which still have no spawned provider
-  to collapse onto. Which provider that is has one declaration
-  site, `Kanban.Models.soleAgent`, as `agentsLoaded` beside it is the one site
-  for whether any is loaded; the mode carries the provider rather than only a
-  count, so a surface holding one can ask. Origin markers are still written in
-  every mode — a solve stamps its brand's marker as before — and it is the
-  routing that stops reading them, not the solve that stops stamping them.
-  A worker that already exists is exempt: its brand comes from the assignment
-  its own specification recorded, so a roster edited between the launch and a
-  later event cannot relabel a running process, and live routing answers only
-  for a specification written before that record existed.
-  `authoredOnOwnBrand`
-  is the single predicate that decides which side of that split an action is
-  on, and brand routing, model selection, and preflight all read it. Which of
-  the four the `r` key selects is §7 of `docs/design.md`; `repair`'s own
+  no-agent mode, publishing nothing and changing no label (issue #572). Which
+  providers are loaded is `tools/kanban_models.py`'s reading of the roster's
+  `agents` list (§2.3). Origin markers are still written in every mode — a
+  solve stamps its brand's marker as before — and it is the routing that stops
+  reading them, not the solve that stops stamping them. `repair`'s own
   behavior is §2.7 below.
 - **Who may self-review:** the bundled coordinator's `--self-review` skips the
   nested reviewer spawn and lets the calling session review directly, which is
-  sound only when Kanban spawned that session as the reviewer the pull request
-  routes to — the `pr-review`/`pr-rereview` side of the split above. In dual
+  sound only when that session is the reviewer the pull request routes to — the
+  `pr-review`/`pr-rereview` side of the split above — and not the session that
+  wrote the pull request. In dual
   mode that is the opposite brand; in single-agent mode it is the one loaded
   provider, and a declaration naming that provider is accepted even where it
-  shares the pull request's own origin brand, because it is the reviewer
-  Kanban itself selected for the `pr_review` role. The coordinator cannot
+  shares the pull request's own origin brand, because it is the only reviewer
+  the install loads for the `pr_review` role. The coordinator cannot
   observe who invoked it, so the caller declares its own brand through
   `--self-review-as` and the coordinator refuses any single-reviewer route
   whose declaration is absent or is not the routed reviewer's brand, returning
@@ -354,14 +339,12 @@ that a particular comment should not.
   both brands, where `--self-review` stays non-operative as it always has
   rather than being refused; single-agent mode collapses that route too, so
   the declaration becomes operative there.
-- **Inputs:** PR number, PR origin marker, action
-  (`PullRequestReview` | `PullRequestRereview` | `PullRequestRevision` |
-  `PullRequestRepair`),
-  optional resumed session/user message.
-- **Outputs:** a session log; the canonical workflow itself publishes the
+- **Inputs:** PR number, PR origin marker, and the action — review, rereview,
+  revision or repair.
+- **Outputs:** the canonical workflow itself publishes the
   `reviewed:*` label and review comment, and an approval marks a draft PR ready
-  for review so it enters Done without waiting for CI — Kanban never sets a
-  verdict label or changes draft state directly.
+  for review so it enters Done without waiting for CI — nothing else sets a
+  verdict label or changes draft state.
 - **Large nested-review inputs:** all six packaged coordinators keep initial
   prompts up to 64 KiB inline. Above that threshold they place the complete
   metadata and unmodified patch in a unique read-only directory inside the
@@ -380,8 +363,8 @@ that a particular comment should not.
   copies against multi-megabyte patches, large metadata, overrides, cleanup,
   and serial isolation; the existing review contract and parity tests hold
   the unchanged authority boundaries.
-- **Failure semantics:** the same missing-executable and
-  `KANBAN_NEEDS_INPUT` handoff pattern as solve.
+- **Failure semantics:** the same `KANBAN_NEEDS_INPUT` handoff pattern as
+  solve.
 - **Issue-gate override:** the coordinator refuses to review a pull request
   whose linked issue lacks a current canonical approval, and clearing that is
   the issue's own review workflow's job. `--override-issue-gate`, paired with a
@@ -443,41 +426,26 @@ that a particular comment should not.
     directed approval merges through the drainer's ordinary queue.
 - **Required authority:** GitHub write on the PR (labels, comments, draft
   readiness, pushes). No action in this surface ever merges a PR.
-- **Durable state:** session log; the isolated worktree `pr-revise` works in,
-  and the head-branch worktree `repair` selects or creates (§2.7).
-- **Mandatory/optional:** optional — only exercised by the `r` key.
+- **Durable state:** the isolated worktree `pr-revise` works in, and the
+  head-branch worktree `repair` selects or creates (§2.7).
+- **Mandatory/optional:** optional — only exercised when the user invokes the
+  workflow in a provider session.
 - **Cross-brand handoff model policy:** for known-origin `$pr-review`/
-  `$pr-rereview` — the case Kanban's own invocation always produces, since
-  every Kanban-created PR carries a `pr-origin` marker — the session Kanban
-  spawns already *is* the correctly-pinned canonical reviewer (Kanban chose
-  its brand via `agentForAction` and its model/effort from the model roster's
-  `pr_review`/`pr_revise` cell for that brand — `src/Kanban/Models.hs`, whose
-  compiled defaults the tracked `models.toml.example` mirrors — before
-  invoking it, refusing to spawn at all if the roster cannot supply that
-  cell). A packaged workflow implementing this action must have that
-  already-correct session
-  perform the review itself and use its bundled coordinator only to publish
-  the result safely (gate/head/race checks, comment, label, and approval-only
-  draft readiness) — not spawn a further, unpinned nested reviewer that would
-  both waste and be unable to verify Kanban's guarantee.
+  `$pr-rereview` the session that runs the workflow is the reviewer, already
+  on the routed brand, and it uses its bundled coordinator only to publish the
+  result safely (gate/head/race checks, comment, label, and approval-only draft
+  readiness) — it does not spawn a further, unpinned nested reviewer.
   `pr-revise` and `repair` are the genuine exceptions: each runs on the PR's
   own origin brand, so its internal "invoke exactly one canonical
-  `pr-rereview`" step
-  must spawn the *opposite* brand from inside that session — a nested
-  invocation no top-level Kanban CLI spawn is present to configure, and the
-  only cases (along with the dual-review fallback for unknown/external
-  origin, which Kanban's own invocation never triggers) where "keep model
-  selection with Kanban's invoking code and canonical workflow policy" means
-  brand selection only (which of `codex`/`claude` runs), not a specific
-  pinned or verified model/effort: which model backs a `codex`/`claude`
-  install for canonical review purposes is then a host-configuration
-  concern, the same category as `gh`/`git`/`python3` being installed and
-  authenticated, not something the packaged workflow enforces or asserts
-  for that one nested call. None of this weakens the same "no override"
-  requirement for the top-level
-  `$pr-review`/`$pr-rereview`/`$pr-revise`/`$repair`
-  invocation itself, which Kanban's own CLI spawn continues to pin per
-  action as documented above.
+  `pr-rereview`" step must spawn the *opposite* brand from inside that session
+  — and, with the dual-review fallback for an unknown or external origin, they
+  are the only cases where a coordinator spawns a reviewer at all. For that
+  nested call the workflow selects the brand (which of `codex`/`claude` runs)
+  and, except where a coordinator pins it as below, not a specific verified
+  model/effort: which model backs a `codex`/`claude` install for canonical
+  review purposes is then a host-configuration concern, the same category as
+  `gh`/`git`/`python3` being installed and authenticated, not something the
+  packaged workflow enforces or asserts for that one nested call.
 
   The Claude plugin's bundled coordinator
   (`claude-plugin/plugins/kanban/scripts/review_pr.py`) is a deliberate,
@@ -485,8 +453,7 @@ that a particular comment should not.
   plugin's otherwise-identical coordinator copy, it pins and verifies that
   nested reviewer to the exact `gpt-6-sol`/`claude-opus-5-5` at `xhigh`
   values the `roles.pr_review.codex` and `roles.pr_review.claude` cells of
-  `models.toml.example` declare — the cells Kanban's own
-  `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
+  `models.toml.example` declare, and binds the
   verified model in the published `pr-review:v2` marker instead of
   `unspecified`. The tracked Grok, Kimi, Google, and Claude-on-Copilot
   coordinators (`grok-plugin/plugins/kanban/scripts/review_pr.py`,
@@ -568,33 +535,27 @@ existing coordinator error path rather than retrying with another identity.
 
 ### 2.3 Canonical issue review, rereview, and the solve readiness gate
 
-- **Owning source:** `src/Kanban/Review.hs` and the focused modules behind
-  it — `src/Kanban/Review/Canonical.hs` (backend resolution and invocation),
-  `src/Kanban/Review/Tools.hs` (the `gh` and `claude` tool runners), and
-  `src/Kanban/Review/Prompts.hs` (the developer instructions and tool schemas).
-  Both provider processes below are built by `src/Kanban/ProviderAdapter.hs`;
-  neither review module names a provider executable.
+- **Owning source:** `tools/approve_issues.py` (the canonical backend), which
+  `tools/install_issue_review.py` installs, the packaged issue-review and
+  issue-rereview workflows that invoke it
+  ([drafting-workflow-contract.md](drafting-workflow-contract.md)), and
+  `tools/approve_issues_service.py` for its service form (§2.8). No Haskell
+  module spawns, resolves or interprets it.
 - **Invocation:**
-  - Interactive Codex-side review/revision sessions talk to
-    `codex app-server --listen stdio://`, started from the Codex adapter's
-    embedded-review backend. That backend is a `Maybe` field: Claude carries
-    none until MODEL-13, and a launch resolving to a provider without one
-    refuses rather than falling back.
-  - Interactive Claude-side steps run the authenticated `claude` CLI
-    directly, through the Claude adapter's one-shot revision process.
-  - GitHub reads and label/comment mutations for the interactive session go
-    through `gh`, never a raw HTTP client.
-  - Kanban's own synchronous invocation (`runCanonicalIssueReview` in
-    `src/Kanban/Review/Canonical.hs`) is a **publishing** action, run when the user
-    presses `r`. It resolves the backend with `resolveCanonicalIssueReviewer`,
-    which never hard-codes `~/work/approve-issues.py` and never reconstructs
-    the installer's default: a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
-    wins, then the backend path the installer recorded, then — only when the
-    record names none — the directory that record lives in (see §3 and §5).
-    It then runs the single-issue form
+  - The packaged review workflows, the approval service, and the owner at a
+    shell run the backend's single-issue form
     `python3 <resolved path> --path <repository root> --review|--rereview
-    <issue> --legacy-policy dual --json`. It writes the `issue-review:v2`
-    comment and verdict labels; Kanban's own code never runs `--check`.
+    <issue> --legacy-policy dual --json`. It is a **publishing** action: it
+    writes the `issue-review:v2` comment and verdict labels. The path is
+    resolved without hard-coding `~/work/approve-issues.py` and without
+    reconstructing the installer's default: a non-empty
+    `KANBAN_ISSUE_REVIEW_INSTALL_DIR` wins, then the backend path the installer
+    recorded, then — only when the record names none — the directory that record
+    lives in (see §3 and §5). `--check` is the read-only gate question and
+    publishes nothing.
+  - The backend reads GitHub and mutates labels and comments through `gh`,
+    never a raw HTTP client, and spawns the reviewer it routes to as a
+    subprocess (`codex` or `claude`, below).
   - **Which model the backend reviews with** comes from the model roster's
     `roles.issue_gate.codex` and `roles.issue_gate.claude` cells, read through
     `tools/kanban_models.py` (issue #483). Precedence has three layers:
@@ -674,8 +635,8 @@ existing coordinator error path rather than retrying with another identity.
     precedence, state retention and the old flag's negative control, not live
     hook execution. Direct PR and drainer launchers are separate contracts.
   - **Which provider the backend routes to** comes from the same roster's
-    `agents` list, read as the operating mode `src/Kanban/Models.hs` derives
-    (issue #572, D-8). Only the loaded providers' `issue_gate` cells are
+    `agents` list, read as the operating mode `operating_mode_for` in
+    `tools/kanban_models.py` derives (issue #572, D-8). Only the loaded providers' `issue_gate` cells are
     resolved at all, so a Claude-only host no longer refuses for want of a
     Codex reviewer it will never spawn.
     - **dual** — two providers loaded, which is what an absent roster file
@@ -720,7 +681,7 @@ existing coordinator error path rather than retrying with another identity.
     A roster that is present and *unusable* is none of these three: it keeps
     the refusal above, naming the file and the defect. The two must never be
     reported as one — a defective file described to an operator as a
-    deliberate board-only install is a defect nobody is told to repair.
+    deliberate no-agent install is a defect nobody is told to repair.
   - The backend's manual `--review` form also accepts two or more issue
     numbers. It processes that explicit list from left to right under one
     approval lock, stops normally at the first `CHANGES_REQUESTED` verdict,
@@ -809,13 +770,13 @@ existing coordinator error path rather than retrying with another identity.
     budget: it neither measures nor grants any allowance, and a zero reading
     (for example from a fake executable in a test) is no ground to retry, to
     reset a scope budget, or to substitute another route.
-  - The solve readiness gate is a separate, **read-only** invocation that
-    Kanban's Haskell code does not run itself. The solve prompt
-    (`src/Kanban/Solve.hs:251`) explicitly forbids the spawned solving agent
-    from running `--review`/`--rereview` against `approve-issues.py`, its
+  - The solve readiness gate is a separate, **read-only** invocation. The
+    tracked solve workflows (§2.1) explicitly forbid the solving agent from
+    running `--review`/`--rereview` against `approve-issues.py`, its
     `~/work/approve-issues.py` compatibility symlink, or the installed
-    `tools/approve_issues.py` backend ("Kanban's `r` workflow owns that
-    gate"), and instructs it to run only the same backend's `--check` with
+    `tools/approve_issues.py` backend — that publishing action belongs to the
+    issue-review workflows, never to a solve session — and instruct it to run
+    only the same backend's `--check` with
     `--path <repository root> --check <issue> --legacy-policy dual --json`
     itself, via its own shell access, before claiming an issue
     (`tools/approve_issues.py --help`: "`--check ISSUE` Check one issue
@@ -936,9 +897,8 @@ existing coordinator error path rather than retrying with another identity.
   `.git/` for a linked worktree, whose own `.git` is a file — so every
   checkout of one repository contends for it rather than each taking its own. It never holds that lock across issues, and never takes
   it at all for a pass that turns out to be idle or barriered.
-- **Mandatory/optional:** optional at the Kanban-action level (the `r` key),
-  but a solve session refuses to claim an issue that has not passed the
-  read-only gate check.
+- **Mandatory/optional:** optional as a workflow, but a solve session refuses
+  to claim an issue that has not passed the read-only gate check.
 
 #### 2.3.1 Stale-approval reconciliation (`--reconcile-approvals`)
 
@@ -1557,18 +1517,16 @@ reimplement the removal, and `--check` remains read-only.
   global `ntfy_url`, the shared script links, and this repository's own runtime
   state, logs, and open incidents exactly as they were, since an uninstall is
   not an acknowledgement.
-- **Mandatory/optional:** fully optional. The board's `d` key starts or
-  stops it and its `m` key runs one `--pr` merge, and nothing in Kanban's
-  build or normal startup path installs or runs it. With nothing installed,
-  both keys report the installer rather than failing opaquely. A host with no
-  supported service manager cannot install one at all, and says so.
+- **Mandatory/optional:** fully optional. The owner starts and stops it, and
+  runs one `--pr` merge, from the command line, and nothing in Kanban's build
+  or normal startup path installs or runs it. A host with no supported service
+  manager cannot install one at all, and says so.
 
-### 2.5 Workflow setup and the preflight/doctor path
+### 2.5 Workflow setup
 
-- **Owning source:** `tools/setup_workflows.py` (opt-in installer) and
-  `src/Kanban/Preflight.hs` (readiness probing), surfaced by
-  `kanban --doctor` and, per action, by the board itself. Documented for
-  users in [docs/workflow-setup.md](workflow-setup.md).
+- **Owning source:** `tools/setup_workflows.py` (opt-in installer). The
+  application has no readiness report: it neither installs nor probes any
+  component. Documented for users in [docs/workflow-setup.md](workflow-setup.md).
 - **Asset root and target:** `--repo` is the tree tracked assets are read
   from, validated by the files the selected components are installed from
   rather than by Git metadata, so an unpacked release archive is a supported
@@ -1620,21 +1578,13 @@ reimplement the removal, and `--check` remains read-only.
     direction — counting one would plan a repair that could not converge. The
     `claude-plugin` component has no counterpart state: its marketplace
     serves the tracked bundle live from the repository directory.
-  - Preflight resolves `codex`, `claude`, `gh`, and `python3` with
-    `findExecutable`, then runs only status-only probes: `--version`,
-    `codex login status`, `claude auth status`, `gh auth status`, and each
-    provider's `plugin list --json`. It also stats the Kanban-managed
-    backend install path resolved by `canonicalIssueReviewerPath`.
-- **Inputs:** for setup, the selected components, `--scope`, the Kanban
+- **Inputs:** the selected components, `--scope`, the Kanban
   checkout, the target repository for a project-scoped registration, and —
   for the Codex bundle comparison — `CODEX_HOME` and the version the tracked
-  `plugin.json` declares; for preflight, the repository the board is pointed
-  at (provider plugin listings are resolved relative to it).
-- **Outputs:** for setup, a plan (the default) or the performed
+  `plugin.json` declares.
+- **Outputs:** a plan (the default) or the performed
   installation, plus a non-zero exit whenever a component needs user
-  action; for preflight, a per-dependency and per-action readiness report,
-  and the remediation the board substitutes for a generic agent failure.
-  "Needs user action" is `refused`, `unavailable`, `failed`, and a `repair`
+  action. "Needs user action" is `refused`, `unavailable`, `failed`, and a `repair`
   that is still pending — an ordinary fresh-install plan exits 0, and so
   does a `repair` that the same `--apply` run converged.
 - **Failure semantics:** setup never replaces an ordinary user file, a
@@ -1649,49 +1599,17 @@ reimplement the removal, and `--check` remains read-only.
   refresh, setup re-runs the same comparison that planned it: commands that
   exited 0 but left the bundle still diverging are reported as `failed`,
   because a provider's exit status is not evidence that the cache converged.
-  Preflight blocks an action only on a definite local observation; a probe it
-  cannot interpret is reported as unknown and never blocks. Its per-action
-  dependency set is exact and follows what each action spawns: the
-  canonical gate needs both installed backend files, `gh`, and the reviewer
-  the backend itself invokes (the opposite brand from a Claude- or Codex-origin
-  issue, Codex for a Kimi-origin or Google-origin issue, or both when unmarked
-  under the dual policy Kanban passes); a supported revision
-  needs the coordinator whose embedded-review backend this install starts
-  and, where its amendment author is a different brand, that brand's CLI —
-  the Claude one `kanban_run_claude` uses for a Claude-origin issue in dual
-  mode; neither needs a packaged bundle, since both run their providers
-  directly. Kimi-origin and Google-origin issue revision are refused before
-  this dependency boundary because neither is a spawned provider. The embedded
-  coordinator repeats the refusal after reading the live issue, without
-  commenting or mutating labels, so a marker added after the board cached the
-  issue cannot reopen that path. Auto-solve needs both brands, since it
-  reviews its own pull request with the opposite one, and so do `pr-revise`
-  and `repair`: each
-  runs on the PR's own brand and spawns the opposite one for its single
-  nested canonical rereview (§2.2, §2.7), which is a direct provider call
-  and therefore needs that brand's executable and sign-in but not its
-  bundle. Single-agent mode narrows every one of those sets to the provider
-  it loads (issue #589): the routed reviewer, the coordinator, the amendment
-  author, and both sides of each supported handoff are the same brand, so no
-  action is blocked on a CLI this install never spawns. The Kimi and Google
-  revision refusals remain in force. A claude-origin issue or pull request
-  authored through the Claude-on-Copilot bundle is an ordinary Claude one
-  here: its marker names the brand, not the host that ran it. `--doctor` is the exception and
-  stays on the whole dual matrix: it is answered before any configuration is
-  read, so it has no roster to derive a mode from, and dual is the superset.
 - **Required authority:** setup needs write access to the user's own
-  provider configuration and to the Kanban-namespaced install directory.
-  Preflight needs none: it is read-only and non-interactive, never starts an
-  agent session or a login flow, consumes no model quota, and mutates no
-  filesystem, provider-configuration, LaunchAgent, or GitHub state.
+  provider configuration and to the Kanban-namespaced install directory. A
+  plan, the default, needs none: it is read-only and non-interactive.
 - **Durable state:** whatever each provider's own installer records —
   including the bundle copy Codex caches under `CODEX_HOME`, which setup
   reads and refreshes only through `codex plugin remove`/`add` — plus the
   install directory described in §3. Setup owns no state of its own.
 - **Mandatory/optional:** fully optional, and never run by Kanban's build or
   startup path. The PR drainer is deliberately outside both: it keeps its
-  own dedicated installer and status flow (§2.4), and neither the setup
-  command nor preflight installs, starts, or reports on it.
+  own dedicated installer and status flow (§2.4), and the setup command
+  neither installs, starts, nor reports on it.
 
 ### 2.6 Provider executables, GitHub authentication, and host prerequisites
 
@@ -1710,22 +1628,19 @@ reimplement the removal, and `--check` remains read-only.
 
 ### 2.7 Pull-request repair (`$repair` / `/repair`)
 
-- **Owning source:** `src/Kanban/PullRequestFlow.hs` for the invocation, and
-  the packaged workflows themselves
+- **Owning source:** the packaged workflows themselves
   (`codex-plugin/plugins/kanban/skills/repair/SKILL.md`,
-  `claude-plugin/plugins/kanban/commands/repair.md`) for the behavior. Kanban's
-  own `r` spawns it by name since issue #127, so it is pinned by the Haskell
-  name-parity sets in `tools/test_codex_plugin.py` and
-  `tools/test_claude_plugin.py` alongside §2.1-§2.2's workflows. It is not a
-  drafting workflow, and is not part of the declared drafting surface
+  `claude-plugin/plugins/kanban/commands/repair.md`), pinned by
+  `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py` alongside
+  §2.1-§2.2's workflows. It is not a drafting workflow, and is not part of the declared drafting surface
   ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
-- **Invocation:** user-invoked as `$repair <pr>` / `/repair <pr>`, and spawned
-  by Kanban's `r` key on a pull request that is in the Done column *and*
-  reporting a problem status — a merge conflict, a failed check, or a blocking
-  label under a red `blocking_severity` (`src/Kanban/Workflow.hs`
-  `classifyPullRequest` and `pullRequestStatus`, both required). Autosolve's own
-  internal pull-request sessions keep their label-derived review/revise
-  progression and never spawn it. Because it works on the pull request's own
+- **Invocation:** user-invoked as `$repair <pr>` / `/repair <pr>`, typically on
+  a pull request that is in the Done column *and* reporting a problem status —
+  a merge conflict, a failed check, or a blocking label under a red
+  `blocking_severity`, which is the classification the board draws
+  (`src/Kanban/Workflow.hs` `classifyPullRequest` and `pullRequestStatus`).
+  Autosolve's own pull-request rounds keep their label-derived review/revise
+  progression and never invoke it. Because it works on the pull request's own
   code, it runs on the pull request's own origin brand — the same rule as
   `pr-revise` — and therefore hands the verdict off to the opposite brand's
   canonical reviewer rather than reviewing itself (no `--self-review`).
@@ -1734,7 +1649,7 @@ reimplement the removal, and `--check` remains read-only.
   scopes every `gh` call (`-R <owner/name>`) rather than being inferred from
   the local checkout, and both are forwarded to the bundled coordinator through
   its own `--repo` and `--config` options, so a fork checkout or a non-default
-  config path repairs and rereviews the same repository the board displays. It
+  config path repairs and rereviews the same repository the caller named. It
   scopes pull-request *metadata* only: the head branch's fetches and pushes go
   to the head repository instead, which is not the same repository for a
   cross-repository pull request.
@@ -1770,7 +1685,7 @@ reimplement the removal, and `--check` remains read-only.
   stops the run with nothing changed on the remote.
 - **Required authority:** GitHub read on the pull request and write to push to
   its head branch **in the head repository** — which for a fork pull request is
-  not the repository the board is pointed at. It never merges, never closes an
+  not necessarily the repository the pull request was opened against. It never merges, never closes an
   issue or pull request, and never adds or removes a verdict label directly.
 - **Durable state:** the worktree it selects by the pull request's exact head
   branch, confirmed to track the recorded head repository's ref rather than a
@@ -1780,8 +1695,7 @@ reimplement the removal, and `--check` remains read-only.
   `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. It never
   switches the repository's primary checkout.
 - **Mandatory/optional:** optional — like every other AI action, it is only
-  reached by selecting it, and preflight reports its readiness per pull-request
-  origin (§2.5).
+  reached by invoking it.
 
 ### 2.8 Incident/controller capability — the issue approval service
 
@@ -1962,13 +1876,12 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   manager's hold on it, and that one record entry, and deliberately leaves the
   runtime state, logs, and open incidents behind: they are the record of what
   the service did, and an uninstall is not an acknowledgement.
-- **Mandatory/optional:** fully optional. The board's `a` key starts or stops
-  it, `tools/setup_workflows.py` has no component for it by design, and nothing
-  in Kanban's build or normal startup path installs or runs it. Installation
-  loads a stopped job and starts nothing, at install or at login. With nothing
-  installed the key reports the installer rather than failing opaquely, and a
-  host with no supported service manager is reported as its own condition rather
-  than as a missing installation.
+- **Mandatory/optional:** fully optional. The owner starts and stops it from
+  the command line, `tools/setup_workflows.py` has no component for it by
+  design, and nothing in Kanban's build or normal startup path installs or runs
+  it. Installation loads a stopped job and starts nothing, at install or at
+  login. A host with no supported service manager is reported as its own
+  condition rather than as a missing installation.
 
 ### 2.9 Approved-pull-request fix (`$fix` / `/fix`)
 
@@ -1976,10 +1889,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   (`codex-plugin/plugins/kanban/skills/fix/SKILL.md`,
   `claude-plugin/plugins/kanban/commands/fix.md`), both rendered from the one
   authored source `tools/command_sources/fix.md` by
-  `tools/render_command_sources.py`. There is no Haskell invocation: Kanban's
-  own `r` spawns `repair` for a Done-column problem card and never this, so
-  `fix` is deliberately absent from the name-parity sets in
-  `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py`. It is not a
+  `tools/render_command_sources.py`. It is user-invoked only, so `fix` is
+  deliberately absent from the name sets in `tools/test_codex_plugin.py` and
+  `tools/test_claude_plugin.py` that hold the workflows an agent session spawns
+  by name. It is not a
   drafting workflow, and is not part of the declared drafting surface
   ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
   Its behavioral contract is `tools/test_fix_workflow_contract.py`.
@@ -1998,11 +1911,12 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   configuration context when the caller supplies it, scoped and forwarded
   exactly as §2.7 describes for `repair`.
 - **Origin gate:** the pull request's `pr-origin` marker must name the brand of
-  the bundle being invoked, validated by exactly `originFromBody`'s rules in
-  `src/Kanban/PullRequestFlow.hs` — one marker, one kind, as the body's final
-  non-whitespace content. This check exists here and not in §2.7 because
-  Kanban's CLI resolves origin and spawns the matching brand for `repair`,
-  while `fix` is user-invoked and nothing upstream has made that choice. A
+  the bundle being invoked, validated by the rules the bundled coordinators'
+  `origin_from_body` applies (the workflow text still spells them as the
+  retired Haskell `originFromBody`'s) — one marker, one kind, as the body's
+  final non-whitespace content. This check exists here and not in §2.7 because
+  `repair` runs on the pull request's own origin brand by construction, while
+  `fix` is user-invoked and nothing upstream has made that choice. A
   missing, malformed, or opposite-brand marker stops the run with nothing
   changed: the coordinator routes the rereview from that same marker, so a
   session editing a pull request of the other brand's origin would author a
@@ -2010,7 +1924,8 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
 - **Preconditions:** the pull request must be approved under the caller's
   effective `approval_mode` — `label` reads the configured `approval_label`,
   `review` reads GitHub's own `reviewDecision`, `either` reads both — the
-  same decision `approvedPullRequest` makes in `src/Kanban/Workflow.hs`. An
+  same decision `approvedPullRequest` makes in `src/Kanban/Workflow.hs`, which
+  is the one the board draws. An
   unapproved pull request, one carrying the configured
   `changes_requested_label`, and one carrying a configured blocked label are
   each refused with nothing changed; a blocking label is never removed to
@@ -2192,7 +2107,7 @@ state.
   an `APPROVE` followed by a `CHANGES_REQUESTED` as the approval alone and would
   never reach the malformed test at all. The marker's `reviewers=`
   set must also exclude the pull request's own brand, read off the body by
-  exactly `originFromBody`'s rules: an approval published by the brand that
+  exactly the coordinators' `origin_from_body` rules: an approval published by the brand that
   wrote the code is a self-review, which the marker alone cannot reveal because
   it names who reviewed and not who wrote. A body with no marker is the
   unknown-origin route the coordinator reviews with both brands, and there only
@@ -2381,10 +2296,9 @@ commands need.
   content to preserve). A link resolving to any other real file is
   preserved and refused, so an unknown installation is never silently
   replaced — a path-shape test alone could not tell one apart, since any
-  `.../tools/approve_issues.py` satisfies it. `src/Kanban/Review/Canonical.hs`
-  resolves the backend from that stable link
-  (`resolveCanonicalIssueReviewer`) and fails visibly, naming this
-  installer, when it has not been installed yet. The installer treats only
+  `.../tools/approve_issues.py` satisfies it. The packaged workflows and
+  `tools/approve_issues_service.py` resolve the backend from that stable link
+  and fail visibly, naming this installer, when it has not been installed yet. The installer treats only
   that same marker-carrying link as installed, and requires all three
   installed files (`approve_issues.py` imports both `kanban_config.py` and
   `kanban_models.py` at module scope).
@@ -2393,8 +2307,7 @@ commands need.
   reviewer it can start is not an installation.
 - **`~/work/approve-issues.py`** is now a purely optional **compatibility
   launcher** for pre-migration automation that still invokes it directly. It
-  is not Kanban's source of truth and nothing in Kanban's own code resolves
-  it. `tools/install_issue_review.py --migrate-legacy-launcher` replaces it
+  is not Kanban's source of truth and nothing tracked here resolves it. `tools/install_issue_review.py --migrate-legacy-launcher` replaces it
   with a symlink to the Kanban-managed link above, backing up and reporting
   the location of any pre-existing ordinary file there; without that opt-in
   flag, an ordinary file at this path is left untouched and refused, per §5.
@@ -2581,8 +2494,8 @@ only with `approve_issues.py --log-dir`, never with `--install-dir` or
 The six drainer `personal-path` rows are three locations times two platform
 conventions, on exactly the terms the issue-review rows above follow.
 `drainer-install-dir` is the directory the installer links the drainer, the
-controller and the configuration parser into, and the default Kanban resolves
-`drain_prs.py` inside for the board's `m` key; `drainer-install-dir-xdg` is the
+controller and the configuration parser into, and where the drainer's skills
+and controller resolve `drain_prs.py`; `drainer-install-dir-xdg` is the
 same directory as the XDG data directory spells it.
 `drainer-discovery-record` and `drainer-discovery-record-xdg` are the record
 inside each. The install directory is listed separately from the record because
@@ -3792,11 +3705,12 @@ the frontmatter and body of every packaged workflow under `claude-plugin/`,
 `docs/releasing.md` and the safety rules inside them — the recorded
 authorization gate ahead of the tag push, the prohibitions that keep a pushed
 tag immutable, where a release's evidence lives, what the dependency review
-covers, and what the manual upgrade gate claims for `kanban --doctor` beside
-the controller `status` it requires for each managed service — and reads that
-same scope claim in `SUPPORT.md`'s report-what-you-have-installed bullet, so a
-public document crediting `--doctor` with PR drainer or issue approval
-readiness fails `build-test` rather than sending a reporter to cite it, and
+covers, and the controller `status` the manual upgrade gate requires for each
+managed service, with no removed flag and no readiness claim beside it — and
+reads the same rules in `SUPPORT.md`'s report-what-you-have-installed bullet, so
+a public document sending a reporter to a flag that no longer exists, or crediting
+anything but a controller's `status` with a managed service's state, fails
+`build-test`, and
 `tools/test_render_command_sources.py` reads the authored
 command sources under `tools/command_sources/` and byte-compares the Markdown
 rendered from them.
