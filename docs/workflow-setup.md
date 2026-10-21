@@ -1,23 +1,22 @@
-# Workflow setup and preflight
+# Workflow setup
 
 Kanban's board is fully usable with nothing installed beyond `git` and a
-signed-in `gh`. Its optional AI actions — canonical issue review and
-revision (`r`), solve (`S`), auto-solve (`A`), and the PR review, rereview,
-revise, and repair flows (`r` on a pull request) — additionally need workflow
-assets this repository tracks but does not install for you. Each is its own
-preflight action with its own dependency set, so `--doctor` reports repair
-separately, per pull-request origin.
+signed-in `gh`. The owner's workflow skills — canonical issue review, solve,
+auto-solve, and the PR review, rereview, revise, and repair flows — are
+separate: they run in your own Codex or Claude session, and they need workflow
+assets this repository tracks but does not install for you. The board starts
+none of them and checks none of them; each skill has its own dependency set,
+which [the agent-workflow contract](agent-workflow-contract.md) lists.
 
-Two commands cover that whole surface:
+One command covers that whole surface:
 
-- `python3 tools/setup_workflows.py` installs the components you select.
-- `cabal run kanban -- --doctor` reports, read-only, why an action is not
-  ready yet.
+- `python3 tools/setup_workflows.py` installs the components you select, and,
+  without `--apply`, reports what it would do.
 
 This is not a macOS-only procedure. Every location named below under
 `~/Library` gives its Linux counterpart beside it, and the commands are the
 same on both. What has not been done is a live Linux run: no end-to-end
-installation followed by an AI action on a Linux host is recorded anywhere, so
+installation followed by running a skill on a Linux host is recorded anywhere, so
 the Linux paths here are documented rather than exercised.
 
 ## First setup
@@ -41,10 +40,11 @@ setup would run. When it looks right, perform that same plan:
 python3 tools/setup_workflows.py --all --scope user --apply
 ```
 
-Then confirm what the board can actually do:
+Then confirm it converged: the same command without `--apply` reports every
+component you installed as `unchanged`.
 
 ```console
-cabal run kanban -- --doctor
+python3 tools/setup_workflows.py --all --scope user
 ```
 
 Nothing above copies a personal skill, command, or script by hand, and
@@ -58,11 +58,8 @@ A released install has no clone. Unpack the archive as
 same setup commands from the extracted directory — nothing here asks that tree
 for Git metadata, which a `cabal sdist` archive deliberately does not carry.
 
-Two things differ, and neither is optional:
+One thing differs, and it is not optional:
 
-- `cabal run kanban -- --doctor` is a checkout's spelling. From a released
-  install the board is the executable you installed, so read `kanban --doctor`
-  for it wherever this document says the longer form.
 - A project-scoped provider registration needs `--target /path/to/repo`. The
   archive is not a repository, so there is nothing for the default to be — see
   [Asset root and target](#asset-root-and-target). `--scope user` needs no
@@ -78,7 +75,7 @@ four with `--all`.
 
 | Component | What it installs | Needed for |
 | --- | --- | --- |
-| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` and `kanban_models.py` companions) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
+| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` and `kanban_models.py` companions) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Canonical issue review/rereview, the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
@@ -109,13 +106,12 @@ writes the linked backend's absolute path into
 on Linux; an installation that already exists under either convention keeps
 its own record rather than moving. That document's own path `--install-dir`
 cannot move, and
-`src/Kanban/Review/Canonical.hs`, `src/Kanban/Preflight.hs`, both packaged
-`review_pr.py` coordinators, and the packaged `issue-review` and `solve`
-workflows all read it, with the same precedence: a non-empty
+both packaged `review_pr.py` coordinators and the packaged `issue-review`
+and `solve` workflows all read it, with the same precedence: a non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR` first, then the
 recorded path, then — only when the record carries no `backend_path`, which
 is how an installation predating the record reads — the directory the record
-lives in. So an install made with `--install-dir` is found by a dashboard
+lives in. So an install made with `--install-dir` is found by a skill
 launched with no special environment, an older installation keeps working
 until you next re-run setup, and the environment override still wins for
 anyone already relying on it. Re-running setup or
@@ -254,38 +250,17 @@ The `claude-plugin` component has no equivalent state: its marketplace serves
 the tracked bundle live from the repository directory, so there is no cached
 copy to fall behind.
 
-## Preflight and in-app diagnostics
+## What each skill needs
 
-`cabal run kanban -- --doctor` prints readiness per dependency and per AI
-action, and exits non-zero if any action is blocked. It distinguishes:
-
-- an executable that is absent, or older than the release the tracked
-  bundles were verified against;
-- a provider that is not authenticated;
-- a Kanban workflow bundle that is absent, or installed but disabled;
-- a canonical review backend that is not installed;
-- a GitHub CLI that is unavailable or not signed in;
-- a conflicting local installation that needs you to act — for example an
-  ordinary file, a directory, or a link to something that is not Kanban's
-  own backend already occupying an install path. Only a symlink resolving
-  to a file that carries that asset's identity marker counts as installed,
-  because that is the one shape setup creates and the one it will converge
-  on a re-run.
-
-Coverage is per action, not per provider, and follows what each action
-actually spawns:
+There is no readiness report: the board and the application never probe for
+these. What a skill needs follows what it spawns:
 
 - **Canonical review/rereview** needs the backend (all three of its installed
   files — `approve_issues.py` imports `kanban_config.py` and
   `kanban_models.py`), `gh`, and the
   provider the backend itself invokes: the opposite brand from the issue's
-  origin marker, or both for an unmarked issue under the dual policy Kanban
-  passes. No packaged bundle: the backend runs `codex exec` / `claude -p`
-  directly.
-- **Revision** runs Kanban's own prompts through `codex app-server`, so it
-  needs Codex and `gh` but no bundle. A Claude-origin issue also authors
-  its amendment through the Claude CLI, so that revision needs Claude
-  installed and signed in too.
+  origin marker, or both for an unmarked issue under the dual policy. No
+  packaged bundle: the backend runs `codex exec` / `claude -p` directly.
 - **Solve** needs its own brand's CLI and bundle, `gh`, and the backend for
   its read-only readiness gate. **Auto-solve** reviews its own pull request
   with the opposite brand, so it needs both brands.
@@ -301,28 +276,23 @@ actually spawns:
   `--check` gate against the PR's linked issue before publishing any
   verdict.
 
-Every action above also needs `gh`, signed in — the board's GitHub data and
-every write action go through it.
+Every skill above also needs `gh`, signed in.
 
-The doctor path is read-only and non-interactive. It resolves executables,
-reads `--version`, and asks each provider its own status-only questions
-(`codex login status`, `claude auth status`, `gh auth status`, and each
-provider's `plugin list --json`). It never starts an agent session,
-triggers a login flow, consumes model quota, or writes anything. The PR
-drainer is deliberately outside its scope and keeps its dedicated
+A provider that is not installed or signed in, a bundle that is absent or
+installed but disabled, a backend that is not installed, and a conflicting local
+installation — an ordinary file, a directory, or a link to something that is
+not Kanban's own backend already occupying an install path — each show up as
+setup's own `refused`, `unavailable` or `repair` status when you run
+`tools/setup_workflows.py` without `--apply`. Only a symlink resolving to a file
+that carries that asset's identity marker counts as installed, because that is
+the one shape setup creates and the one it will converge on a re-run. The PR
+drainer is deliberately outside setup's scope and keeps its dedicated
 [install and status flow](pr-drainer.md).
-
-The board runs the same preflight for the specific action you press, so a
-missing component is reported as `cannot start` with the command that
-installs it, rather than as an opaque agent failure minutes later. A probe
-that cannot reach a definite conclusion never blocks an action: a
-diagnostic that guessed wrong would break a working setup.
 
 The tracked bundles are the supported source of the `solve`/`pr-review`/
 `pr-rereview`/`pr-revise`/`repair` workflows. If you previously relied on your own
-unpackaged copies of those commands, preflight will report the bundle as
-absent — install it once with `setup_workflows.py`, which neither removes
-nor overrides anything else you have.
+unpackaged copies of those commands, install the bundle once with
+`setup_workflows.py`, which neither removes nor overrides anything else you have.
 
 ## Security and authority
 
@@ -420,7 +390,7 @@ python3 tools/setup_workflows.py --component issue-review
 python3 tools/setup_workflows.py --component issue-review --apply
 ```
 
-Nothing about the record's own location changes, so a board that inherits no
+Nothing about the record's own location changes, so a skill that inherits no
 environment still finds the installation. Pass `--install-dir` again if the
 original install used one.
 
@@ -488,16 +458,16 @@ all.
 ### Confirming the move
 
 ```console
-kanban --doctor
+python3 tools/setup_workflows.py --component issue-review
 codex plugin marketplace list
 claude plugin marketplace list
 ```
 
-`--doctor` reports readiness per AI action and nothing else — not the PR
-drainer, not the issue approval service, not the board, not the usage sidebar.
-What it cannot answer is *which* archive a ready component reads from. Pair it
-with the two marketplace listings, whose registered sources name an archive
-directly, and with `ls -l` over the install directory above, whose three links
+The setup plan reports whether each component has converged, and nothing else —
+not the PR drainer, not the issue approval service, not the board, not the
+usage sidebar. What it cannot answer is *which* archive a ready component reads
+from. Pair it with the two marketplace listings, whose registered sources name
+an archive directly, and with `ls -l` over the install directory above, whose three links
 have to point into the new extracted directory.
 
 `~/work/approve-issues.py` is the one that has to be followed rather than
@@ -543,7 +513,7 @@ that job with no reviewer to run, so uninstall the service first.
 
 ## Verification
 
-Setup and preflight are covered by hermetic fresh-machine tests that run
+Setup is covered by hermetic fresh-machine tests that run
 under the commands CI already runs — temporary homes, temporary checkouts,
 and scriptable fake provider executables on a temporary PATH, with no
 credentials, network access, or model call:
@@ -569,6 +539,3 @@ every component planned and applied from it, the project-scoped refusal when
 no target exists beside the target-free components running anyway, a
 marketplace left registered by a previous archive, and the bundle comparison
 answered without asking the archive a Git question.
-`test/Spec/Agent/Preflight.hs`'s `workflow preflight` group covers the probe
-classifications and the same fresh-machine states end to end, including
-that the doctor path only ever runs status-only probes and changes nothing.

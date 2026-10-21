@@ -3,19 +3,28 @@
 Accepted by the owner on 2026-10-01. It changes only when the owner settles a
 material choice; each change records its date and source beside it.
 
-Kanban is a terminal-native board for one GitHub repository, with optional,
-bounded control over AI agents working that repository. It is three things that
+**Changed 2026-10-20 (owner, through request `kan-strip-20261020`).** Kanban
+was reduced to two things: the board, with its usage panel, and the tracker of
+the owner's skills and scripts. The application's agent control, missions,
+in-app workers and model roster were removed, so the third thing this document
+named is gone, V-5, V-9, V-10 and V-13 are retired below, and V-2, V-3, V-7,
+V-8, V-12 and the state of the direction were edited to stop naming what was
+removed. Nothing else was reworded.
+
+Kanban is a terminal-native board for one GitHub repository, beside which the
+repository tracks the owner's workflow skills and scripts. It is two things that
 share one model of the work:
 
 1. **A board.** A fast, quiet, keyboard-driven view of a repository's issues and
-   pull requests, sorted into workflow columns derived from GitHub. This is what
-   Kanban mainly is.
-2. **A workflow bundle tracker.** The tracked, versioned skill and command
-   bundles (`claude-plugin/`, `codex-plugin/` and the external-origin bundles)
-   that agents execute to draft, solve, review, repair and land work.
-3. **Bounded agent control.** Explicit, recoverable launches of those workflows
-   from the board or a headless mission runner, plus the background services
-   (PR drainer, issue approval, mission runner) that move approved work along.
+   pull requests, sorted into workflow columns derived from GitHub, with the
+   Codex and Claude usage panel beside it. This is what Kanban mainly is.
+2. **A tracker of the owner's skills and scripts.** The tracked, versioned skill
+   and command bundles (`claude-plugin/`, `codex-plugin/` and the
+   external-origin bundles) that agents execute to draft, solve, review, repair
+   and land work, and the scripts under `tools/` (the PR drainer, the issue
+   approval service and the installers) that move approved work along. The
+   application neither runs nor drives either: they are installed and started
+   by their own scripts.
 
 Its first user is the owner, who runs several active repositories through this
 pipeline. Its second audience is anyone who installs a public release; nothing
@@ -51,10 +60,10 @@ record, which is what lets hand-driven and agent-driven work interleave.
 
 Kanban makes no request to GitHub or an AI provider that the user did not ask
 for: no automatic polling, no background refresh, no speculative fetches. The
-network is touched only at startup, on an explicit update, on a rate-limited
-terminal-focus update, and by an action or service the user explicitly started.
-A started service polls only at its own bounded interval, and only while the
-user keeps it running. While nothing changes, the board does no work. There are
+network is touched only at startup, on an explicit update, and on a
+rate-limited terminal-focus update. A service the owner started polls only at
+its own bounded interval, and only while the owner keeps it running. While
+nothing changes, the board does no work. There are
 no performance targets beyond that: the constraint is how much Kanban asks of
 external servers, not how fast it runs.
 
@@ -68,8 +77,8 @@ The board is fully usable with only Git and an authenticated `gh`. AI
 providers, the workflow bundles and every background service are optional
 add-ons, and a missing or failing one degrades only its own feature. One failing
 source never hides valid data from another, and the last good snapshot survives
-a failed refresh. The board is feature complete, so agent work must not regress
-its behavior, responsiveness or quietness.
+a failed refresh. The board is feature complete, so work on the skills and
+scripts must not regress its behavior, responsiveness or quietness.
 
 - Authority: owner, 2026-10-01 (the board is the product and is complete);
   README "Before you start"; agent-workflow-contract.md §1; design.md §2.
@@ -81,21 +90,15 @@ The owner's repositories are test targets, never special cases.
 
 - Authority: design.md §2; owner, 2026-07-26 (see V-8).
 
-## Agent control
+## The skills and scripts
 
-### V-5. Every mutation is explicit and has one owner
+### V-5. Retired 2026-10-20: every mutation is explicit and has one owner
 
-Observation is read-only. GitHub and the repository change only through an
-explicitly started action or an explicitly started service, and each kind of
-mutation has exactly one authority: routing belongs to `PullRequestFlow`,
-readiness to `Preflight`, spawning to `Worker` and merging to the drainer, and
-a provider's agent sessions are built only in `ProviderAdapter`. The action
-registry dispatches through those authorities and adds none of its own.
-
-- Rationale: duplicated authority is how two actors end up disagreeing about the
-  same pull request.
-- Authority: design.md §1, §3 ("Implementing a merge"); CLAUDE.md source layout
-  (`Action`, `ProviderAdapter`); `ProviderAdapterBoundaryTests`.
+Retired by the owner's removal of the application's agent control (request
+`kan-strip-20261020`): the authorities it named — `PullRequestFlow`,
+`Preflight`, `Worker`, `ProviderAdapter` and the action registry — no longer
+exist. What survives of it is stated elsewhere: the board is read-only
+(design.md §1, §3), and merging belongs to the drainer (V-6).
 
 ### V-6. Agents never merge
 
@@ -108,8 +111,7 @@ unknown outcome.
 - This holds until the owner decides otherwise; no feature may assume it will
   change.
 - Authority: owner, 2026-10-01 ("permanent for now"); CLAUDE.md "Pipeline
-  conventions"; agent-workflow-contract.md §2.10; superagent_design.md "Out of
-  scope".
+  conventions"; agent-workflow-contract.md §2.10.
 
 ### V-7. Review comes from another provider when one is available
 
@@ -118,7 +120,8 @@ providers configured, its canonical review comes from the provider that did not
 write it. Unknown or legacy origins are reviewed by both. External-origin
 bundles (Grok, Kimi, Google, Copilot-Claude) are reviewed by Codex and are never
 revised by a spawned provider. With one provider, review routes to that provider
-behind gates that know the mode. With none, Kanban is a board.
+behind gates that know the mode. With none, the review scripts do nothing and Kanban
+is a board.
 
 - Rationale: a model reviewing work from its own provider shares its blind
   spots. The rule serves the user and never blocks a setup the user chose (V-13).
@@ -128,39 +131,30 @@ behind gates that know the mode. With none, Kanban is a board.
 ### V-8. Hand-driven work always takes precedence
 
 A human editing the same checkout, on `master`, with uncommitted work, is the
-normal case, never an error. No service, mission or action may assume it owns
-the working tree, the branch or the merge queue, or refuse to work because a
-human moved something. The drainer, the mission runner and every coordinator
-work around the human; the human never has to work around them.
+normal case, never an error. No service or action may assume it owns the
+working tree, the branch or the merge queue, or refuse to work because a human
+moved something. The drainer and every coordinator work around the human; the
+human never has to work around them.
 
 - Rationale: this is the property the owner values most. It is what made Kanban
   usable in production while every other feature was optional.
 - Authority: owner, 2026-07-26 (compatibility with manual work is "an absolute
-  requirement"); owner, 2026-10-01 (it always takes precedence, and the mission
-  coordinator must work around the owner).
+  requirement"); owner, 2026-10-01 (it always takes precedence, and the
+  automation must work around the owner).
 
-### V-9. Agent work is durable, recoverable and fails closed
+### V-9. Retired 2026-10-20: agent work is durable, recoverable and fails closed
 
-Long-running work outlives the process that started it. Detached workers,
-journals, leases, missions and the runner all survive a dashboard or service
-restart and are reattached rather than restarted. Effects are journaled before
-they are attempted. When state is uncertain (an unverified process, an unknown
-outcome, an unreadable record), the system blocks and surfaces it rather than
-guessing. Process ownership is verified by identity, never by name.
+Retired by the same removal (request `kan-strip-20261020`): the detached
+workers, journals, leases and runner it described are gone with the application's
+agent control. The drainer's and the approval service's own durable state and
+fail-closed behavior are `docs/pr-drainer.md`'s and `docs/issue-approval.md`'s.
 
-- Authority: design.md §15, §16, §19 "Implementation state";
-  mission_runner_design.md; superagent_design.md.
+### V-10. Retired 2026-10-20: autonomy is bounded and capacity is respected
 
-### V-10. Autonomy is bounded and capacity is respected
-
-Unattended progression has explicit limits: bounded review rounds, a
-per-repository agent ceiling, one transition per mission per pass, and waiting
-out a positively identified provider limit rather than failing or retrying
-blindly. Provider usage is visible, so the owner can spend spare capacity
-deliberately before a window resets.
-
-- Authority: agent-workflow-contract.md §2.12; design.md §14 and §19;
-  usage_awareness_design.md.
+Retired by the same removal (request `kan-strip-20261020`): the ceiling, the
+per-pass transition limit and the provider-limit wait it described belonged to
+the removed runner. The usage panel still shows provider usage, so the owner can
+spend spare capacity deliberately before a window resets (design.md §14).
 
 ## Workflow bundles and setup
 
@@ -182,25 +176,18 @@ retired, not maintained alongside.
 The pipeline's conventions (labels, origin markers, review routing, round
 budgets, default models) are defaults, not law. When what the user wants
 conflicts with a convention, the user wins. Kanban adapts through configuration
-and the settings screen instead of requiring the user to adopt the owner's
-workflow. An explicit instruction from the user in the moment overrides a
+instead of requiring the user to adopt the owner's workflow. An explicit instruction from the user in the moment overrides a
 workflow's default behavior, within the hard limits of V-6 and V-8.
 
 - Authority: owner, 2026-10-01 ("the user always wins, and conventions must be
   superseded by what the user wants").
 
-### V-13. Arbitrary provider setups, configured in settings
+### V-13. Retired 2026-10-20: arbitrary provider setups, configured in settings
 
-Codex plus Claude is the owner's setup, not an assumption of the product.
-Kanban supports zero, one or two loaded providers, and any assignment of models
-and effort to pipeline roles, chosen through the settings roster and screen.
-Every mode is a deliberate operating state, not a degraded failure. No component
-may hard-code a provider, model or effort the roster could supply. The schema
-must not rule out a third spawned provider, but adding one is not planned work.
-
-- Authority: owner, 2026-10-01 ("codex and claude are my use case, but kanban
-  should handle arbitrary setups through the settings menu");
-  model_settings_design.md; agent-workflow-contract.md §2.3.
+Retired by the same removal (request `kan-strip-20261020`): the settings roster
+and screen it relied on, and the dual, single-agent and no-agent operating modes
+in the application, are gone. The skills' and scripts' own reading of
+`models.toml` is `docs/designs/model_settings_design.md`'s surviving slice.
 
 ## Engineering and platform
 
@@ -228,18 +215,14 @@ seam, not in scattered conditionals.
 
 ## State of the direction
 
-**Qualified implementation** (built and proven): the board, trackers, usage
-sidebar, PR drainer and issue approval service with dashboard control, durable
-issue review and solve, the settings roster with its dual, single-agent and
-no-agent modes, the action registry, headless missions, and the mission runner
-service with its ceiling, drain and provider-limit waiting. design.md §19
-"Implementation state" is the detailed record.
+**Qualified implementation** (built and proven): the board, trackers and usage
+panel, and, tracked beside them, the PR drainer, the issue approval service and
+the workflow bundles. design.md §19 "Implementation state" is the detailed
+record.
 
 **Planned mechanisms** (accepted, slow-paced, and not a defect for not existing
 yet):
 
-- Mission Control's persistent console and mission navigation, and showing
-  mission-runner state in the dashboard (superagent_design.md, SAG-4 onward).
 - Multi-repository boards, one session with a tab per repository
   (multi_repo_boards_design.md). Overturning the single-repo non-goal was
   approved there as D-4, but design.md §3 and §20 still state the old position
@@ -252,8 +235,6 @@ yet):
 - No drag-and-drop or direct board editing. Label and assignment changes from
   the board are deferred (design.md §20).
 - Non-GitHub forges are deferred.
-- Cross-repository missions wait for the multi-repository board contract.
-- No permanently running model process as a source of truth (Mission Control).
 - Agents merging (V-6).
 
 ## Continuing after a context reset

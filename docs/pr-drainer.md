@@ -15,13 +15,12 @@ remote is not a supported github.com URL cannot have a drainer at all.
 That name comes from the remote the **shared** Kanban configuration
 (`~/.config/kanban/config.toml`, or `$XDG_CONFIG_HOME/kanban/config.toml`)
 names — the same remote Kanban itself resolves the board's repository through.
-A dashboard that resolves a *different* repository, because it was started with
-`kanban --repo OWNER/NAME` or with a `--config` naming another remote, is
-talking about another canonical repository: it reports the drainer as not
-installed for that repository, and the controller refuses its requests rather
-than acting on this checkout's job behind its back. Point both at one
-repository by setting `remote_name` in the shared configuration, which moves
-the dashboard and the drainer together.
+A caller that resolves a *different* repository, because it was given
+`--repo OWNER/NAME` or a `--config` naming another remote, is talking about
+another canonical repository: the controller refuses its requests rather than
+acting on this checkout's job behind its back. Point the board and the drainer
+at one repository by setting `remote_name` in the shared configuration, which
+moves both together.
 
 ### Changing `remote_name` after installing
 
@@ -219,10 +218,11 @@ Two things do not migrate themselves:
 
 ## Start and stop
 
-Press `d` in Kanban to start or stop this repository's drainer.
+Start and stop this repository's drainer with its controller — [Manual
+status](#manual-status) shows how to resolve it. Kanban's board neither starts,
+stops nor reports it.
 
-Drainers for different repositories run independently, and each Kanban window
-reports only its own repository's. Two checkouts of *the same* repository share
+Drainers for different repositories run independently. Two checkouts of *the same* repository share
 one drainer, because they are one repository: whichever starts second is refused,
 and the message names the checkout already running it.
 
@@ -235,17 +235,14 @@ generated LaunchAgent sets `RunAtLoad` and `KeepAlive` to false and carries no
 `StartInterval`; every generated systemd unit sets `Restart=no` and carries no
 `[Install]` section, so nothing enables it. Neither manager ever starts a
 drainer on its own — not at login, not after a run ends, not on a timer. A run
-begins only when something explicitly asks for one: the `d` key in Kanban, or
-the controller's `start`.
+begins only when something explicitly asks for one: the controller's `start`.
 
 Once started, the run outlives whatever asked for it. The managed job
 supervises a polling drainer that keeps sweeping the queue on its own interval
 until it is stopped explicitly or exits unexpectedly — losing the network
 pauses it rather than ending it; see
-[waiting out a network outage](#waiting-out-a-network-outage). Quitting Kanban does not
-stop it — that repository's drainer keeps merging, and the next Kanban window
-opened on that repository reports it as still running. Press `d` again, or run
-the controller's `stop`, to end it.
+[waiting out a network outage](#waiting-out-a-network-outage). Run the
+controller's `stop` to end it.
 
 A run that ends because it was asked to is normal operation, not a fault. The
 service log records it as `PR drainer stopped intentionally; no incident
@@ -316,10 +313,9 @@ counting it against the pull request or the cleanup step it was working on:
 
 Offline is a live, paused service state. `status` reports `state: "offline"`,
 with an `offline` field giving when it began, what failed, and when GitHub was
-last checked, and Kanban's sidebar shows `offline · waiting for network` beside
-any unrelated incident and the cleanup debt, both of which stay visible. The
-drainer still owns the repository: `start` is a no-op, `d` stops it, and the
-direct single-pull-request merge stays refused. The state is read from a marker
+last checked, and any unrelated incident and the cleanup debt stay visible
+beside it. The drainer still owns the repository: `start` is a no-op, `stop`
+stops it, and the direct single-pull-request merge stays refused. The state is read from a marker
 the drainer child writes and believed only while that child is the live child
 of a live runner, so one left by a dead process can never make it look alive;
 reading `status` never runs a check and never starts drain work. A prolonged
@@ -364,10 +360,10 @@ merge conflict, or anything else the queue refuses still holds it back exactly
 as it would during a continuously running service. Waiting between runs delays
 the attempt; it does not pre-authorize it.
 
-Two documented paths drain it without opening Kanban:
+Two documented paths drain it:
 
 - Start the polling service for the whole queue through the installed
-  controller, which performs the same guarded start the `d` key does. This
+  controller, which performs the guarded start. This
   finds the install directory the way the installer does — the environment
   override first, then the XDG location and the `~/Library` one — and honours
   `$XDG_DATA_HOME` only when it is absolute, which is why
@@ -687,13 +683,11 @@ processing read and the final re-read before merging. If either read observes
 a different head, the run refuses with `approved_head_changed`; the later
 `--match-head-commit` guard still protects the merge call itself.
 
-Kanban's `m` key drives exactly this entry point for the selected Done card;
-see [the user guide](user-guide.md). It refuses while *any* open incident
-stands, whatever its kind and whichever pull request it names. A
-merge-conflict, cleanup, or missing-check incident survives an intentional
-stop, so it refuses `m` where being cleared by the stop used to allow the
-merge. Finish the work the incident
-names, or dismiss it with `ack`, before `m` will run.
+It refuses while *any* open incident stands, whatever its kind and whichever
+pull request it names. A merge-conflict, cleanup, or missing-check incident
+survives an intentional stop, so it refuses a `--pr` run where being cleared by
+the stop used to allow the merge. Finish the work the incident names, or
+dismiss it with `ack`, before the run will proceed.
 
 ### Naming the repository
 
@@ -1276,7 +1270,7 @@ and asks instead of guessing.
 When a conflict is detected, the drainer:
 
 - records an open incident naming the pull request and its conflicting files,
-  which Kanban shows in the sidebar next to the drainer state. The files are
+  which `status` reports beside the drainer state. The files are
   read from the pull request's exact head commit, so a fork's head is named
   correctly; a head that cannot be fetched at all is still reported, without
   the file list;
@@ -1340,8 +1334,8 @@ Afterwards the drainer:
   `checks_missing` outcome. It is not a failed attempt: no cooldown, no
   failure count, and nothing merged;
 - records an open `missing-check` incident naming the pull request, its head,
-  and each missing required check, which Kanban shows next to the drainer
-  state, beside merge conflicts. It changes no label;
+  and each missing required check, which `status` reports beside merge
+  conflicts. It changes no label;
 - records nothing new on later polls while that condition persists, so one
   stuck head means one incident. The checks it names are kept current in place.
 
@@ -1385,7 +1379,7 @@ any of them, and drops the record only once every one of them is done.
 - A linked issue is recorded as `owner/name#number`, so a pull request that
   closes an issue in another repository is retried against that repository.
 - Obligations still outstanding after three passes are recorded as an open
-  incident, which Kanban shows in the sidebar. The drainer keeps retrying them
+  incident, which `status` reports. The drainer keeps retrying them
   and keeps draining every other approved pull request; the incident resolves
   itself once the last obligation succeeds — including when the obligation that
   finishes it is discharged by the final pass of a stop. Stopping the drainer
@@ -1432,8 +1426,7 @@ any of them, and drops the record only once every one of them is done.
   `cleanup_obligations` field names every pull request that still owes, its
   remaining steps, how many passes have failed, and the last error — whether or
   not an incident has been raised, and whether or not the drainer is running.
-  Kanban's sidebar summarises the same field as a count beside the drainer
-  state. The field is `null` when the queue state could not be read at all,
+  The field is `null` when the queue state could not be read at all,
   which is not the same answer as the empty list a drainer owing nothing
   reports. Reading it takes no lock and changes nothing.
 - `status` also names the local copies of work the autostash lifecycle left
@@ -1821,7 +1814,7 @@ python3 "$CONTROL" --path /path/to/project --json uninstall
 
 The stop comes first because `uninstall` refuses while the drainer is running —
 a service manager asked to forget a live job would leave a drainer draining
-with nothing able to see or stop it. Pressing `d` in Kanban is the same stop.
+with nothing able to see or stop it.
 
 It removes exactly one repository's job: its service definition, the manager's
 hold on it, and its entry in the discovery record. Every other installed

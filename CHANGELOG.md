@@ -15,6 +15,28 @@ created above it.
 
 ### Unreleased
 
+- Rewrote the contracts around the board, the usage panel and the tracked
+  skills and scripts (epic #794, child 6, #800). The application is now the
+  four-column board and the Codex and Claude usage panel, with `--usage`,
+  `--glyph-test`, `--path`, `--repo`, `--color`, `--border`, `--ascii`,
+  `--no-cache` and `--config` as its whole command line. The in-app agent
+  features removed by the earlier children of the epic — the review, revision,
+  solve and autosolve sessions, the persistent workers, `--doctor`, `--ping`,
+  the mission coordinator and scheduler, the model roster and operating modes,
+  and the dashboard's control and monitoring of the PR drainer and the issue
+  approval service — are now also gone from `docs/design.md`, `CLAUDE.md`,
+  `docs/agent-workflow-contract.md`, `docs/vision.md`, the README, the user
+  guide and the other guides, with one short Retired paragraph in design.md §19
+  naming what was removed. The two scripts the mission runner shipped (its
+  service wrapper and its installer) were removed with it, and
+  `docs/designs/mission_runner_design.md` and `docs/designs/superagent_design.md`
+  are deleted; five other designs carry a dated retirement note naming the
+  slices that survive. The `config.toml` keys the scripts read (`[missions]`,
+  `ping_codex_seconds`, `ping_claude_seconds`, `worker_deadline_seconds`,
+  `coordination_paths`, `direct_publication_paths`) and `models.toml` stay valid
+  for the scripts, and the application ignores them. Python assertions that
+  pinned the removed Haskell or removed documentation were pruned; the scripts
+  and bundles they covered are unchanged.
 - Removed the drainer, approval and incident controls from the board, and made
   the application ignore the configuration keys the scripts own (epic #794,
   child 5, #799). Keys `d`, `a`, `m` and `i` are unbound: the sidebar no longer

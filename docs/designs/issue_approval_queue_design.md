@@ -1,5 +1,14 @@
 # Persistent issue approval service design
 
+> **Retired in part, 2026-10-20 (epic #794, #800; owner, through request
+> `kan-strip-20261020`).** IAQ-4 (the Kanban status and control of the approval
+> service) and IAQ-5 (the `approve_issues.py` sidebar control) are retired: the
+> application no longer reads, shows or controls the service, and its code was
+> removed by #799. IAQ-1, IAQ-2, IAQ-3 and IAQ-6 stand — the backend queue mode,
+> the controller and runtime, the installer, and `docs/issue-approval.md` are
+> scripts and documents, and are unchanged. The processing status below is
+> history and is not rewritten.
+
 Kanban has a canonical one-issue review action and a canonical Python backend,
 but it has no persistent operator-controlled service for walking the open issue
 backlog in order. This design adds that service, makes the oldest unresolved

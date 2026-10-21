@@ -1,5 +1,13 @@
 # Usage awareness design
 
+> **Retired in part, 2026-10-20 (epic #794, #800; owner, through request
+> `kan-strip-20261020`).** USE-3, the deliberate per-brand window-starting
+> ping (`kanban --ping`), is retired: the application submits no model prompt,
+> and the command was removed by #814. USE-1 (`kanban --usage`), USE-2 (the
+> sidebar countdowns and snapshot age) and USE-4 (the burn-planning estimate)
+> stand and are `docs/design.md` §14. The processing status below is history and
+> is not rewritten.
+
 Vincent runs Claude and Codex under rolling quota windows and points spare
 capacity at kanban when synarchy work is blocked. Today the only way to see
 either brand's remaining quota or reset time through Kanban is to launch the

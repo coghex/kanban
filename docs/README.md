@@ -4,8 +4,8 @@
 
 - [Project overview and quickstart](../README.md) — what Kanban is, installing
   it from a release archive, and the platform and component support matrix.
-- [User guide](user-guide.md) — board layout, controls, reviews, and background jobs.
-- [Workflow setup and preflight](workflow-setup.md) — installing the optional AI-action components from a fresh clone, and diagnosing why one is not ready.
+- [User guide](user-guide.md) — board layout and every control.
+- [Workflow setup](workflow-setup.md) — installing the optional skill components from a fresh clone, and removing them.
 - [PR drainer](pr-drainer.md) — installation, configuration, operation, and logs.
 - [Issue approval service](issue-approval.md) — installing, operating, and
   recovering the persistent per-repository issue reviewer.
@@ -28,9 +28,9 @@
 
 ## Workflow contracts
 
-These describe what Kanban's AI actions depend on. Read them when changing or
-operating those workflows, not to install or use the board.
+These describe what the owner's workflow skills and scripts depend on. Read them
+when changing or operating those workflows, not to install or use the board.
 
-- [Agent-workflow contract](agent-workflow-contract.md) — every external workflow Kanban's AI actions depend on, ownership, and the portable-install policy.
+- [Agent-workflow contract](agent-workflow-contract.md) — every external dependency of the owner's skills and scripts, ownership, and the portable-install policy.
 - [Drafting and issue-review workflow contract](drafting-workflow-contract.md) — the packaged issue-drafting and canonical issue-review workflows, their responsibilities, and their boundaries.
 - [Design and report document workflow contract](document-workflow-contract.md) — the packaged design-document and findings-report workflows, their shared status vocabulary, and the five cross-brand pairs that now cover every one of them.

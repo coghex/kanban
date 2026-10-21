@@ -35,9 +35,8 @@ every key, its type, and its default.
 
 The file lets you rename the workflow labels Kanban looks for (approval,
 changes-requested, blocked, tracker), add extra tracker-section headings,
-choose how PR approval is determined, set the blocking-label severity, cap
-GitHub fetch sizes and the card excerpt height, tune provider and `--ping`
-timeouts, and
+choose how PR approval is determined, set the blocking-label severity, set the
+card excerpt height, tune the provider timeouts, and
 override the git remote used to resolve `owner/name`. Repository-specific
 overrides live under `[repositories."owner/name"]` and replace the matching
 global values for that repository only. That key must be a canonical lowercase
@@ -64,7 +63,11 @@ everything else under `[usage]`, they cannot be set per repository.
 
 `tools/approve_issues.py` and `tools/drain_prs.py` read the same file (with
 the same `--config FILE` override) so the canonical issue reviewer and PR
-drainer agree with the dashboard on workflow labels and the remote to use.
+drainer agree with the dashboard on workflow labels and the remote to use. The
+file also carries keys only those scripts read — the `[missions]` tables, the
+`ping_*_seconds` and `worker_deadline_seconds` timeouts, and the `[workflow]`
+`coordination_paths` and `direct_publication_paths` lists. The board ignores
+them: they never produce a warning and have no effect on it.
 
 ## The board
 
@@ -98,19 +101,12 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `F` | Show or hide the card filter |
 | `Enter` | Open details |
 | `w` | Open the selected card's GitHub page in your browser |
-| `f` | Make the open window fullscreen, or put it back — every window except the Codex/Claude solve chooser. It does nothing with no window open |
+| `f` | Make the open window fullscreen, or put it back. It does nothing with no window open |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
 | `u` | Refresh GitHub, Codex usage, and Claude usage — the sidebar's `↻` button does the same thing |
 | `c` | Hide or show the sidebar |
 | `v` | Hide or show the body excerpt on every card |
-| `o` | Change how much agent output is shown |
-| `p` | Open the jobs and processes list |
-| `i` | Open the list of everything needing attention |
-| `x` | Stop the selected running job |
-| `a` | Start or stop the optional issue approval service |
-| `d` | Start or stop the optional PR drainer |
-| `m` | Merge the selected approved pull request in Done |
 | `?` | Open built-in help |
 | `q` / `Ctrl-C` | Quit |
 
@@ -152,20 +148,16 @@ Windows open small, so the board stays visible behind them. Press `f` to grow
 the open one to nearly the whole screen, and `f` again to put it back. The
 application's frame stays around it and the footer's hint line stays visible
 underneath, so you can always see which keys the window answers. Whatever is
-being scrolled — a transcript, the jobs list, the attention list, the model
-roster — shows more of itself in the bigger window, and still scrolls.
+being scrolled — a card's body, the help list — shows more of itself in the
+bigger window, and still scrolls.
 
-`f` works in every window except the Codex/Claude solve chooser, which is small
-by design. In a job window it is a command in normal mode; press `i` first and
-`f` is an ordinary letter typed into your message. Every window opens small
-again, including one you open straight from another — pressing Enter on a row
-of the attention list, for instance — and `Tab` between jobs of the same kind
-keeps the window the size you left it.
+`f` works in the card details window and the help window. Every window opens
+small again.
 
 While a window is fullscreen, an ordinary click outside it does nothing. Every
 other way out is the one that window already had: `f` puts it back, `Esc`
-closes it, `q` hides a job window from its normal mode, and right-clicking a
-details or job window closes it exactly as it does when the window is small.
+closes it, and right-clicking a details window closes it exactly as it does when
+the window is small.
 
 ## Searching a column
 
@@ -175,7 +167,7 @@ character lands, and the heading shows how many cards are left over how many the
 column has.
 
 While the box is open, letters and digits are typed into it rather than being
-shortcuts — so `r`, `S`, and `u` do nothing but add a character. The exceptions
+shortcuts — so `u`, `d`, and `e` do nothing but add a character. The exceptions
 are `s`, which closes the search, an uppercase `F`, which moves you to the filter
 and leaves what you have typed alone, and `q`, which still quits. A lowercase
 `f` is an ordinary character and goes into the query. Chords keep working too:
@@ -270,8 +262,7 @@ cards.
 
 Once the load is done, ticking Closed shows closed issues in Issues and closed
 and merged pull requests in Done, each badged `CLOSED` or `MERGED`. They are
-history: you can read them and open their details, but review, solve, and merge
-decline to act on them.
+history: you can read them and open their details.
 
 ### When a column is empty
 
@@ -281,118 +272,39 @@ An empty column says which of three things happened, so you never have to guess:
 - `No filter matches` — your filter choices admit nothing there.
 - `No items` — the column is simply empty.
 
-## Merging one pull request
-
-Press `m` on a card in Done to merge that pull request without waiting for the
-PR drainer's next polling pass. It works from the board and from an open details
-window, and it hands the work to the drainer itself rather than merging on its
-own: the same checks are re-read immediately beforehand, and the linked issue,
-the worktree, and the branch are cleaned up afterwards.
-
-This needs the drainer to be installed — `python3 tools/install_drainer.py`,
-described in [the PR drainer guide](pr-drainer.md) — but not running. `m` says
-why and does nothing if the drainer is running, is starting or stopping, has an
-unresolved incident, or if the selected card is anything other than an approved
-pull request in Done. If the merge is declined, the message is the drainer's
-own reason, such as a required check that has not finished. The board refreshes
-by itself once a merge lands.
-
 ## Mouse controls
 
 - Click a card to select it.
 - Click the selected card again to open details.
 - Use the mouse wheel to scroll the column under the pointer.
 - Click an epic title to expand or collapse it.
-- Right-click a card to open its active job.
+- Right-click a card to select it. Right-click while a details window is open to
+  close it, at either size.
 - Click outside an open details window to close it, while it is small. A
   fullscreen window ignores an ordinary click outside it — leave it with `f`
-  or `Esc`, or with a right-click, which closes a details or job window at
-  either size.
+  or `Esc`, or with a right-click.
 - Click the `↻` button in the sidebar to refresh, the same as `u`.
 
 Every mouse action has a keyboard equivalent.
 
-## Reviews and issue work
+## Reviews, issue work, and the services
 
-These actions require a working Codex or Claude installation and login, plus
-the Kanban-owned workflow assets those actions call into (the canonical
-issue-review backend and the named `solve`/`pr-review`/`pr-rereview`/
-`pr-revise`/`repair` commands). Provider installation alone does not make them ready;
-install the components you want with `python3 tools/setup_workflows.py`, and
-see [workflow setup and preflight](workflow-setup.md) for the fresh-clone
-path and [the agent-workflow contract](agent-workflow-contract.md) for what
-each action depends on.
+The board does none of this. Kanban only shows what GitHub reports, so a card
+moves between columns when a skill, a script or a person changes the issue, the
+labels or the pull request, and the board picks that up on its next refresh.
 
-If one of these keys reports that the action cannot start, the message names
-the missing component and the command that installs it. To check every
-action at once without starting anything, run `kanban --doctor` (or
-`cabal run kanban -- --doctor` from a source checkout). It is a read-only
-report on AI-action readiness, so a blocked action there does not stop the
-board.
+The workflows that review, solve and repair work are skills you run in your own
+Codex or Claude session; they need a working installation and login for that
+provider plus the Kanban-owned workflow assets, which you install with
+`python3 tools/setup_workflows.py`. See [workflow setup](workflow-setup.md) for
+the fresh-clone path and [the agent-workflow contract](agent-workflow-contract.md)
+for what each one depends on.
 
-- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview. On an approved pull request in Done that has a problem — a merge conflict, a failed check, or a blocking label — the same key repairs it instead, then sends it back for a fresh review. It never merges.
-- Press `S` to work on an issue and open a pull request.
-- Press `A` to work on an issue, review the result, and send requested changes back for another pass.
-- Choose `1` for Codex or `2` for Claude when Kanban asks which service to use.
-
-Agent work runs separately from the board. Press `Esc` to hide its window and `p` to reopen it. If a job asks a question, type the answer in its window and press `Enter`.
-
-Most issue and pull-request jobs continue if Kanban is closed. Opening Kanban again for the same repository reconnects to them. Kanban blocks quitting only when an older review type cannot safely continue on its own.
-
-Use `x` to stop a selected job. Inside an open job window, Ctrl-C interrupts the current turn so you can provide new guidance.
-
-## The issue approval service
-
-Press `a`, or click the `approve_issues.py` control at the foot of the sidebar
-directly above the drainer's, to start or stop the optional issue approval
-service for this repository. It reviews the repository's open issues in
-ascending number order, one issue at a time, publishing the same canonical
-verdicts `r` publishes on a single issue.
-
-**Starting it is not a preview.** A running service posts real review comments
-and moves real `reviewed:approve` and `reviewed:changes` labels, on its own,
-until you stop it. Installation never starts it — see
-[the issue approval guide](issue-approval.md) for installing it with
-`python3 tools/install_issue_approval.py`, and for everything the service writes
-and how to recover it.
-
-The control's own line below the button says what the service is doing:
-
-| Line | What it means |
-| --- | --- |
-| `off` | Installed and stopped. |
-| `starting…` / `stopping…` | Your press is in flight. A second press is refused until an authoritative answer arrives. |
-| `on` | Running: reviewing, or waiting between passes. |
-| `on · unresolved incident · Issue #N requests changes` | **The barrier warning**, in yellow. |
-| `stopped · unresolved incident · Issue #N requests changes` | The same barrier, in red, because a stopped service is not working through it. |
-| `stopped · <what went wrong>` | The run ended on a failure, in red. |
-| anything else, in red | The service could not be read, is not installed for this repository, or this host has no service manager to run it. The line says which. |
-
-The barrier warning is not a fault. The service reviews issues in number order,
-and an issue whose review requested changes stops the queue at that issue rather
-than being skipped: nothing with a higher number is reviewed while it stands.
-The service stays on and healthy, doing only a read-only check of that one
-issue, so **repair the named issue with `r` while the service keeps running**.
-The barrier clears itself once that issue holds a current approval. There is no
-way to dismiss it from the board, and acknowledging it from the controller
-clears only the warning, not the barrier.
-
-While the service has a review actually in flight, starting a competing review
-from a card is refused with a notice telling you to wait for it or stop the
-service — including for the same issue, since the service reviews in order and
-cannot be asked to skip ahead. An enabled but idle service refuses nothing, and
-neither does a barriered one: at a barrier its only child is that read-only
-check, so the barrier issue's own revision and rereview stay available.
-
-## What needs attention
-
-Press `i` for one list of everything waiting on you: every open PR drainer incident, and every Kanban job that failed, was stopped, or is waiting for an answer. Each line says which issue or pull request it is about, what happened, and where it came from.
-
-Move with `j` and `k` or the arrow keys, or click a line. Press `Enter`, or click the selected line again, to close the list and go to that work — the card is selected, and its job window opens if Kanban is running one. If the work is not on the current board, Kanban says so and leaves your place on the board alone.
-
-The list only reads. Nothing in it resolves, retries, or dismisses anything.
-
-If the PR drainer has not answered yet, or could not be asked, the list says so rather than telling you nothing needs attention.
+The two optional services are run from the command line, never from the board:
+[the PR drainer guide](pr-drainer.md) covers merging approved pull requests, and
+[the issue approval guide](issue-approval.md) covers the per-repository issue
+reviewer. Neither is started by installing it, and a running issue approval
+service publishes real review verdicts and moves real labels.
 
 ## Usage sidebar
 
@@ -440,8 +352,7 @@ percentage left ÷ estimated cost per round, rounded down
 So 63% left at 8% per round is `≈7` rounds. A window with less than one round
 left shows `≈0`, which is the answer rather than a missing one.
 
-`kanban --usage` and `kanban --ping` spell it out at the end of each window's
-line:
+`kanban --usage` spells it out at the end of each window's line:
 
 ```console
 $ kanban --usage
@@ -513,63 +424,14 @@ Both services are always present under the lowercase keys `codex` and
 a failing service is reported rather than missing. Times are UTC. Warnings go
 to standard error, so the document is the only thing on standard output.
 
-## Starting a usage window on purpose
-
-Everything else Kanban does with a service only *reads* your usage. `--ping` is
-the one command that deliberately spends a little of it:
-
-```console
-$ kanban --ping codex
-Codex
-  5 hour   99% left · resets in 5h 0m (Thu 17:00)
-  weekly   41% left · resets in 3d 21h (Mon 09:00)
-  snapshot 0s old
-```
-
-It sends one short request to the named service, which starts that service's
-rolling window, then refreshes and prints the window state so you can see when
-it now ends. Use it before stepping away, so a window you want to spend has
-already started.
-
-Name exactly one service. `kanban --ping` on its own, an unknown name, and
-`--ping` given twice — including twice with the same name — are all errors, and
-none of them contacts a service.
-
-Some details worth knowing:
-
-- It runs only when you ask for it. Nothing else starts a ping: not the board,
-  not `u`, not `kanban --usage`, and not `kanban --doctor`. There is no key for
-  it on the board.
-- The request cannot change anything. It runs from a private Kanban directory
-  under `~/.cache/kanban/`, never your repository, and asks for the most
-  restricted permissions the service offers.
-- A failed ping is never retried, because a retry would cost you again. If the
-  ping fails or times out, Kanban still refreshes and prints the window — a
-  request that timed out may already have counted — and still exits non-zero.
-- It needs no repository, so it works from any directory, and it honors
-  `--config`. Pass `--repo owner/name` — which needs no checkout — or run it
-  inside a checkout Kanban can identify, and that repository's timeout
-  overrides apply; otherwise the global ones do.
-- `--no-cache` and a global `cache = false` stop it from reading or writing the
-  stored snapshot. The ping, the refresh, and the printed result happen either
-  way.
-
-The wait for that request is bounded by `ping_codex_seconds` and
-`ping_claude_seconds` in `config.toml`, both 120 seconds by default. They are
-separate from `codex_seconds` and `claude_seconds`, which bound the much
-quicker usage reads, and they can be overridden per repository like any other
-timeout. When the wait runs out, Kanban stops the request and anything it
-started.
-
 ## Local files
 
 Kanban stores local state in the following places:
 
 - Board and usage cache: `~/.cache/kanban/`
-- Agent logs: `~/.cache/kanban/logs/`
-- Background job records: `~/.cache/kanban/workers/`
-- Display settings: `~/.config/kanban/settings.json`
 - Workflow and provider configuration: `~/.config/kanban/config.toml`
+
+Kanban writes nothing else: it keeps no log, no job record and no settings file.
 
 The optional issue approval service keeps its own state outside those, under a
 namespace of its own, and leaves it behind when it is uninstalled:
@@ -593,4 +455,4 @@ down and shows how to resolve an installation's real location. The optional PR
 drainer keeps a separate set of its own; see
 [the PR drainer guide](pr-drainer.md).
 
-Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. It does not disable job logs or settings. A global `cache = false` in `config.toml` has the same effect; `--no-cache` always wins if both are set.
+Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. A global `cache = false` in `config.toml` has the same effect; `--no-cache` always wins if both are set.
