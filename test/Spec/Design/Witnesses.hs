@@ -94,7 +94,6 @@ import Kanban.UI.Types
     IncidentRef (..),
     Name (..),
   )
-import Kanban.Worker (WorkerSpec (..))
 import Spec.Design.Entries
   ( DesignEntry (..),
     designDocumentPath,
@@ -328,17 +327,17 @@ declarations :: [Declaration]
 declarations =
   [ Declaration
       3
-      "A web UI, GUI, Electron application, or permanently resident daemon. An explicitly started agent may use a bounded detached worker so it can survive a dashboard restart."
+      "A web UI, GUI, Electron application, or permanently resident daemon."
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "kanban.cabal declares exactly the components recorded here — the private implementation library, the one `kanban` executable, and the test suite — and the detached worker a started agent may use carries `workerMaxRuntimeSeconds :: WorkerSpec -> Int`, an unconditional bound rather than an optional or absent one.",
+                "kanban.cabal declares exactly the components recorded here — the private implementation library, the one `kanban` executable, and the test suite.",
               factRationale =
-                "A GUI, an Electron shell, or a resident daemon is a program of its own: it would be a second executable or a foreign library in this file, and there is neither. The entry's own exception is what the runtime bound holds — a worker whose spec cannot omit a finite runtime is bounded rather than permanently resident, which is the difference between the exception and the non-goal.",
+                "A GUI, an Electron shell, or a resident daemon is a program of its own: it would be a second executable or a foreign library in this file, and there is neither.",
               factReads = [cabalPath],
               factCheck = do
                 components <- shippedComponents
-                pure (everyFault [components, boundedWorkerSpec])
+                pure (everyFault [components])
             }
       ),
     Declaration
@@ -706,11 +705,6 @@ cabalComponents = do
 
     isPackageCharacter character = character == '-' || character `elem` packageAlphabet
     packageAlphabet = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9']
-
--- | The bound every detached worker's spec carries.
-boundedWorkerSpec :: Maybe Text
-boundedWorkerSpec =
-  pinnedType "a worker spec's runtime bound" workerMaxRuntimeSeconds "WorkerSpec -> Int"
 
 -- | What an idle refresh coordinator plans, at several clock times and after
 -- a generation has already been spent.

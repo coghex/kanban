@@ -1,12 +1,10 @@
--- | One @gh@ record lock per reader process (issue #742), and the arc's proof
--- that a dashboard, an issue-review host, and a worker read one repository
--- together (epic #642, GHR-3).
+-- | One @gh@ record lock per reader process (issue #742), and the proof that
+-- several reader processes read one repository together (epic #642, GHR-3).
 --
 -- Every example here runs its readers as processes of their own, through
--- "Spec.Support.ReaderProbes", because each claim is about a process: three
--- readers that share nothing but the files under the cache root, a refusal
--- that has to outlive one read within the process that took it, and a worker
--- that dies with its @gh@'s group still running.
+-- "Spec.Support.ReaderProbes", because each claim is about a process: readers
+-- that share nothing but the files under the cache root, and a reader that
+-- dies with its @gh@'s group still running.
 module Spec.GitHub.ConcurrentReaders (spec) where
 
 import Control.Exception (IOException, finally, try)
@@ -15,13 +13,10 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
-import qualified Data.Text as Text
 import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordPath, loadGhGroupRecord)
 import Kanban.Domain (Repository (..))
-import Kanban.GitHub (GhCleanupGuard (..))
 import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..))
 import Kanban.UI.Types (BoardRefreshOutcome (..))
-import Kanban.Worker (workerPreconditionRefusal, workerUnverifiedTargetReason)
 import Spec.Support.Board (captureBoardRefresh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
 import Spec.Support.ReaderProbes
@@ -34,18 +29,18 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "one gh record lock per reader process" $ do
-  -- The arc's promised proof. Each reader holds the lock its kind of process
-  -- holds for its whole life, and each one's gh is held until all three have
-  -- started, so the three are provably reading at once: every reclaim any of
-  -- them takes finds the other two's entries on the record, from processes
-  -- that are running and still hold their claims. Those are live work, never
-  -- ghosts, so nothing refuses and nothing is signalled.
-  it "lets a dashboard, an issue-review host, and a worker read one repository at once from separate processes" $
+  -- Each reader holds the lock its kind of process holds for its whole life,
+  -- and each one's gh is held until all three have started, so the three are
+  -- provably reading at once: every reclaim any of them takes finds the other
+  -- two's entries on the record, from processes that are running and still
+  -- hold their claims. Those are live work, never ghosts, so nothing refuses
+  -- and nothing is signalled.
+  it "lets three reader processes read one repository at once" $
     withReaderFixture 3 $ \fixture -> do
       probes <-
         forM
-          [("dashboard", DashboardReader), ("host", WorkerReader), ("worker", WorkerReader)]
-          (\(name, role) -> startIn fixture name role [] [])
+          ["first", "second", "third"]
+          (\name -> startIn fixture name DashboardReader [] [])
       outcomes <- mapM awaitReaderOutcome probes
       forM_ (zip probes outcomes) $ \(probe, outcome) ->
         case outcome.readerOutcomeSteps of
@@ -61,33 +56,16 @@ spec = describe "one gh record lock per reader process" $ do
       -- And every entry left the record with the gh it named.
       recordAfter fixture >>= (`shouldSatisfy` recordHoldsNothing)
 
-  describe "a refusal one read holds back" $ do
-    -- Each of these is one reader process. Its first read runs where its gh
-    -- can neither be recorded nor confirmed gone, which is the production
-    -- path to a verdict only this process's memory holds. Every failure is
-    -- then restored before the later reads, and the last read -- the control
-    -- -- runs in that restored environment under a lock nothing has read
-    -- through and succeeds: so a later read turned away here is turned away
-    -- by this process's lock and by nothing ambient.
-    -- The issue-review host rereads the precondition of every child it
-    -- adopts through its one lock, so a group one child's reread held back
-    -- turns away the next child's -- as the unverified refusal the host
-    -- already routes a failed reread to, not as a target that moved.
-    it "turns away an issue-review host's later precondition rereads after one held a group back" $ do
-      steps <- latchedWithin (LatchSequence ReadPrecondition [ReadPrecondition, ReadPrecondition])
-      forM_ (consumersOf steps) $ \step ->
-        workerPreconditionRefusal step.readerStepDetail `shouldBe` Just workerUnverifiedTargetReason
-
-  -- A worker killed while its gh's group is still running leaves that group
+  -- A reader killed while its gh's group is still running leaves that group
   -- to whoever reads next. What makes a group reclaimable rather than only
   -- watched is a census (design Hazard B: a group recorded while its gh is
-  -- still running is never signalled by anybody), and the worker writes one
-  -- when its gh exits and leaves a process behind in the group. The worker is
+  -- still running is never signalled by anybody), and the reader writes one
+  -- when its gh exits and leaves a process behind in the group. The reader is
   -- killed right after that, while its own cleanup of the survivor is held
   -- on its first process snapshot. The next dashboard refresh finds the entry
   -- of a writer that has exited and reclaims it with the existing verified
   -- escalation: the survivor ignores TERM, so only the KILL empties the group.
-  it "reclaims, on the next dashboard refresh, the group an abandoned worker's gh left running" $
+  it "reclaims, on the next dashboard refresh, the group an abandoned reader's gh left running" $
     withReaderFixture 1 $ \fixture -> do
       let survivorPath = fixture.fixtureRoot </> "survivor.pid"
           heldPath = fixture.fixtureRoot </> "ps-held.pid"
@@ -116,27 +94,27 @@ spec = describe "one gh record lock per reader process" $ do
       heldPs <- newIORef (Nothing :: Maybe Int)
       let killRecorded ref = readIORef ref >>= mapM_ (\pid -> void (try @IOException (signalProcess sigKILL (fromIntegral pid))))
       ( do
-          worker <- startIn fixture "worker" WorkerReader [psBin] [("READER_LEAVE_SURVIVOR", "1")]
-          awaitProbeFile worker "hold its own cleanup of the group its gh left" heldPath
+          abandoned <- startIn fixture "abandoned" DashboardReader [psBin] [("READER_LEAVE_SURVIVOR", "1")]
+          awaitProbeFile abandoned "hold its own cleanup of the group its gh left" heldPath
           readPid heldPath >>= writeIORef heldPs . Just
           survivorPid <- readPid survivorPath
           writeIORef survivor (Just survivorPid)
           -- The staging is what it claims: one censused entry, marked
-          -- pending, written by the worker, naming the group the survivor is
+          -- pending, written by the reader, naming the group the survivor is
           -- still in.
-          workerPid <- fmap fromIntegral <$> getPid worker.readerProbeHandle
+          readerPid <- fmap fromIntegral <$> getPid abandoned.readerProbeHandle
           recorded <- recordAfter fixture
           case recorded of
             GhGroupRecordLoaded [entry] -> do
               entry.ownedProcessGroupCensused `shouldBe` True
               entry.ownedProcessGroupCleanupPending `shouldBe` True
-              fmap (.processIdentityPid) entry.ownedProcessGroupOwner `shouldBe` workerPid
+              fmap (.processIdentityPid) entry.ownedProcessGroupOwner `shouldBe` readerPid
               map (.processIdentityPid) entry.ownedProcessGroupMembers `shouldContain` [survivorPid]
-            other -> expectationFailure ("the worker did not leave one censused entry: " <> show other)
+            other -> expectationFailure ("the reader did not leave one censused entry: " <> show other)
           -- Abandoned: killed outright, so nothing it would have done next
           -- happens, and the snapshot it was held on goes with it.
-          mapM_ (signalProcess sigKILL . fromIntegral) workerPid
-          void (waitForProcess worker.readerProbeHandle)
+          mapM_ (signalProcess sigKILL . fromIntegral) readerPid
+          void (waitForProcess abandoned.readerProbeHandle)
           killRecorded heldPs
           alive survivorPid `shouldReturn` True
           (outcome, _) <-
@@ -157,45 +135,6 @@ spec = describe "one gh record lock per reader process" $ do
 
     readPid :: FilePath -> IO Int
     readPid path = read . filter (`notElem` (" \n" :: String)) <$> readFile path
-
--- | Runs one reader process's latch sequence and asserts what every such
--- sequence owes: the first read failed, every later read was refused before it
--- started a gh -- as the in-memory case, with nothing on the durable record to
--- refuse over -- and the control read in the same environment succeeded. The
--- steps come back for anything an example asserts beyond that.
-latchedWithin :: ReaderRole -> IO [ReaderStep]
-latchedWithin role = withReaderFixture 1 $ \fixture -> do
-  probe <- startIn fixture "latch" role [] []
-  outcome <- awaitReaderOutcome probe
-  let steps = outcome.readerOutcomeSteps
-  -- The first read's own lifecycle is what left the group held back in
-  -- memory, and nothing else: its guard says so once it is over.
-  case steps of
-    source : _ -> (source.readerStepSucceeded, source.readerStepGuard) `shouldBe` (False, Just inMemoryOnly)
-    [] -> expectationFailure "the probe took no reads"
-  -- Every later read was refused before it spawned anything, and refused as
-  -- the in-memory case: its own guard carries 'GuardInMemoryOnly', which is
-  -- what the notice a refused read publishes is chosen from.
-  forM_ (consumersOf steps) $ \step -> do
-    (step.readerStepLabel, step.readerStepSucceeded, step.readerStepSpawned, step.readerStepGuard)
-      `shouldBe` (step.readerStepLabel, False, 0, Just inMemoryOnly)
-    Text.unpack step.readerStepDetail `shouldContain` "refusing to start another until it is"
-  case reverse steps of
-    control : _ -> do
-      (control.readerStepLabel, control.readerStepSucceeded, control.readerStepSpawned, control.readerStepGuard)
-        `shouldBe` (control.readerStepLabel, True, 1, Nothing)
-    [] -> pure ()
-  -- Nothing durable holds the group back: the refusals were this process's
-  -- memory, which is what makes them the in-memory case.
-  outcome.readerOutcomeRecordEmpty `shouldBe` True
-  pure steps
-
-inMemoryOnly :: Text.Text
-inMemoryOnly = Text.pack (show GuardInMemoryOnly)
-
--- | The reads between the first and the control.
-consumersOf :: [ReaderStep] -> [ReaderStep]
-consumersOf steps = drop 1 (take (length steps - 1) steps)
 
 data ReaderFixture = ReaderFixture
   { fixtureRoot :: FilePath,

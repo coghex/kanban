@@ -1741,7 +1741,7 @@ reimplement the removal, and `--check` remains read-only.
 | `gh`, signed in via `gh auth login` | Yes | The board's GitHub data and every write action depend on it. |
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
-| `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
+| `ps` | Yes | Kanban's own process-liveness snapshot (`src/Kanban/Process.hs`) runs it unconditionally. |
 | `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), or the issue approval service's (§2.8); `/usr/bin/plutil` below only reads the jobs it installs. |
 | `/usr/bin/plutil` | No | Only needed to read those two services' LaunchAgent definitions on macOS. |
 | `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control any of those optional services' user units. Kanban reads a unit's own file directly, so Linux needs no reader alongside it. |
@@ -3597,18 +3597,22 @@ runs) parses the manifest in §4 and:
   `proc`/`findExecutable`/`readProcessWithExitCode`, a literal name passed to
   `Kanban.Drainer`'s timed `runProcess` helper, a `findExecutable` argument a
   `case` or `if` binds to string literals, and a location spelled as one
-  literal hung off a `getHomeDirectory` result. Four other modules call one of
+  literal hung off a `getHomeDirectory` result. Five other modules call one of
   those functions and are deliberately out, because none of them writes a name
-  or a path any extractor could recover: `ServiceProcess.hs`,
-  `UsageCommand.hs`, and `Worker.hs` are spawn helpers that pass `proc` an
-  executable *value* their caller computed, and `Ping.hs` resolves
+  or a path any extractor could recover: `ServiceProcess.hs` and
+  `UsageCommand.hs` are spawn helpers that pass `proc` an
+  executable *value* their caller computed; `Ping.hs` resolves
   `findExecutable (pingExecutableName brand)`, whose argument is a
   two-equation top-level function rather than the `case`/`if` binding the
   indirect extractor reads, and builds its scratch directory with
-  `getXdgDirectory` rather than `getHomeDirectory`. Listing any of the four
+  `getXdgDirectory` rather than `getHomeDirectory`; and `Solve.hs` and
+  `PullRequestFlow.hs` (since issue #522) still resolve an executable with
+  `findExecutable`, but the name they resolve is `adapter.adapterExecutable`
+  rather than a literal they spell, so the literal lives in `ProviderAdapter.hs`,
+  which is scanned. Listing any of the five
   would add a member the extractors recover nothing from, which is a surface
   entry that scans nothing rather than coverage; the `codex` and `claude` that
-  `Ping.hs` and `Worker.hs` ultimately run carry `executable` rows grounded in
+  `Ping.hs` ultimately runs carry `executable` rows grounded in
   the scanned modules that do spell them;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files, the
   tracked Claude plugin's packaged `commands/*.md` files, the tracked Grok

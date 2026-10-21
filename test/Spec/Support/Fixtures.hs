@@ -333,7 +333,6 @@ testOptions =
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,
-      optionWorkerSpec = Nothing,
       optionReviewTools = Nothing
     }
 

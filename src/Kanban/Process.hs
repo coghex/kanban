@@ -8,22 +8,16 @@ module Kanban.Process
     ProcessIdentity (..),
     checkGroupMembership,
     checkGroupMembershipWith,
-    checkIdentityPresence,
-    checkIdentityPresenceWith,
     currentProcessIdentity,
     defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
-    interruptThenKillManagedProcess,
     killManagedProcess,
     reapManagedHandle,
     killVerifiedGroup,
     killVerifiedGroupWith,
-    liveProcesses,
-    liveProcessesWith,
     managedProcess,
-    managedProcessGroup,
     managedProcessPid,
     matchingIdentities,
     membersStillInGroup,
@@ -176,9 +170,6 @@ verifyGroupLeader (Just pid) = do
         | identity.processIdentityGroupPid == identity.processIdentityPid -> Nothing
         | otherwise -> Just "process is not the leader of its own process group"
 
-managedProcessGroup :: CPid -> ManagedProcess
-managedProcessGroup = PersistentManagedProcess
-
 managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
 managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
@@ -227,19 +218,6 @@ descendantProcesses roots processes = filter ((`Set.member` descendants) . proce
           unseen = filter (`Set.notMember` known) children
        in expand (foldr Set.insert known unseen) (pending <> unseen)
 
--- | Whether each recorded identity in `known` still survives, as of a fresh
--- snapshot. A `ps` failure is reported as an explicit 'Left' rather than
--- collapsed into an empty survivor list, so a caller gating terminal state or
--- a lease release on "no survivors" never mistakes "could not check" for
--- "confirmed gone". Vacuously succeeds without taking a snapshot when there
--- is nothing recorded to verify.
-liveProcesses :: [ProcessIdentity] -> IO (Either Text [ProcessIdentity])
-liveProcesses = liveProcessesWith readProcessSnapshot
-
-liveProcessesWith :: IO (Either Text [ProcessIdentity]) -> [ProcessIdentity] -> IO (Either Text [ProcessIdentity])
-liveProcessesWith _ [] = pure (Right [])
-liveProcessesWith takeSnapshot known = fmap (`matchingIdentities` known) <$> takeSnapshot
-
 -- | Whether a set of recorded identities still holds its PIDs, as of a fresh
 -- snapshot. A `ps` failure is reported distinctly from a clean snapshot that
 -- simply shows the identities gone, so destructive callers never mistake
@@ -247,10 +225,6 @@ liveProcessesWith takeSnapshot known = fmap (`matchingIdentities` known) <$> tak
 data IdentityPresence = IdentityPresent | IdentityAbsent | IdentitySnapshotFailed Text
   deriving stock (Eq, Show)
 
--- | The retrying snapshot source shared by every default (non-`With`)
--- liveness check in this module, exposed so callers in other modules (e.g.
--- 'Kanban.Worker') can build their own retrying defaults on top of the same
--- source rather than each hard-coding the retry count.
 -- | This process's own entry in a fresh process snapshot.
 --
 -- Read from the same @ps@ census every other identity here comes from, so the
@@ -270,18 +244,6 @@ currentProcessIdentity = do
 defaultProcessSnapshot :: IO (Either Text [ProcessIdentity])
 defaultProcessSnapshot = readProcessSnapshotRetrying snapshotRetryAttempts
 
-checkIdentityPresence :: [ProcessIdentity] -> IO IdentityPresence
-checkIdentityPresence = checkIdentityPresenceWith defaultProcessSnapshot
-
-checkIdentityPresenceWith :: IO (Either Text [ProcessIdentity]) -> [ProcessIdentity] -> IO IdentityPresence
-checkIdentityPresenceWith takeSnapshot expected = do
-  result <- takeSnapshot
-  pure $ case result of
-    Left message -> IdentitySnapshotFailed message
-    Right snapshot
-      | null (matchingIdentities snapshot expected) -> IdentityAbsent
-      | otherwise -> IdentityPresent
-
 -- | Like `matchingIdentities`, but additionally requires the *live* process
 -- (its current snapshot entry, not the possibly-stale recorded one) to still
 -- belong to `groupPid`. A process that kept its PID and start time but moved
@@ -298,8 +260,8 @@ membersStillInGroup groupPid snapshot expected =
   where
     snapshotByPid = Map.fromList [(process.processIdentityPid, process) | process <- snapshot]
 
--- | As 'checkIdentityPresence', but for checks that gate a signal to a
--- specific process group: presence also requires the live snapshot to still
+-- | Whether a set of recorded identities is still present, for checks that
+-- gate a signal to a specific process group: presence requires the live snapshot to still
 -- show the identity as a member of that exact group.
 checkGroupMembership :: Int -> [ProcessIdentity] -> IO IdentityPresence
 checkGroupMembership = checkGroupMembershipWith defaultProcessSnapshot
@@ -389,17 +351,6 @@ isZombieStat = Text.isInfixOf "Z"
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle capturedPid) = signalOwnedGroup sigINT processHandle capturedPid
 interruptManagedProcess (PersistentManagedProcess processId) = ignoreIOException (signalProcessGroup sigINT processId)
-
--- | Ctrl-C's escalation for a still-owned process: SIGINT first, then fall
--- back to 'killManagedProcess's bounded TERM/KILL escalation regardless of
--- whether the process still looks alive after the grace window — signalling
--- an already-gone recorded group is a harmless no-op (ESRCH), and skipping
--- it on a guess would risk leaving a surviving group member unsignalled.
-interruptThenKillManagedProcess :: ManagedProcess -> IO ()
-interruptThenKillManagedProcess process = do
-  interruptManagedProcess process
-  threadDelay terminationGraceMicros
-  killManagedProcess process
 
 -- | Reap a handle for its exit status, or report that there was no child
 -- left to reap.

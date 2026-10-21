@@ -56,9 +56,7 @@ other explicit mutations.
 
 ## 3. Non-goals
 
-- A web UI, GUI, Electron application, or permanently resident daemon. An
-  explicitly started agent may use a bounded detached worker so it can survive
-  a dashboard restart.
+- A web UI, GUI, Electron application, or permanently resident daemon.
 - Automatic network polling.
 - GitHub webhooks or a local HTTP server.
 - Drag-and-drop, hover actions, mouse-driven column navigation, and general

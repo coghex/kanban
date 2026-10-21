@@ -20,12 +20,11 @@ import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.Compatibility as Compatibility
 import qualified Spec.ApprovalService as ApprovalService
-import qualified Spec.Agent.IssueHost as IssueHost
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Ping as Ping
-import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.ClaudeReview as ClaudeReview
+import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
@@ -35,7 +34,6 @@ import qualified Spec.Agent.ToolReentry as ToolReentry
 import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
 import qualified Spec.Agent.UsageMode as UsageMode
-import qualified Spec.Agent.WorkerPrecondition as WorkerPrecondition
 import qualified Spec.Board.Tracker as Tracker
 import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
@@ -47,7 +45,6 @@ import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.History as GitHubHistory
-import qualified Spec.GitHub.Precondition as GitHubPrecondition
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.ConcurrentReaders as ConcurrentReaders
 import qualified Spec.GitHub.RecordLock as RecordLock
@@ -164,7 +161,6 @@ main = do
 suiteGroups :: [SuiteGroup]
 suiteGroups =
   [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
-    SuiteGroup "Spec.Agent.ManagedProcess.Deadline" DeadlineLane ManagedProcess.deadlineSpec, -- 63.1s
     SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
     SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
     -- Beside "Spec.Agent.Supervision" rather than spread for cost: it
@@ -192,14 +188,6 @@ suiteGroups =
     SuiteGroup "Spec.GitHub.BoardRefresh" UsageLane BoardRefresh.spec, -- 38.7s
     SuiteGroup "Spec.GitHub.RefreshCoordinator" PingLane RefreshCoordinator.spec, -- 8.6s
     SuiteGroup "Spec.GitHub.History" DeadlineLane GitHubHistory.spec, -- 7.9s
-    -- A packing decision like the rest of these: one gh spawn per example,
-    -- settled the same way a page's is. It moves the working directory too,
-    -- which is process state -- but a lane is a process of its own running its
-    -- own examples one at a time, so that costs it no colocation.
-    SuiteGroup "Spec.GitHub.Precondition" DeadlineLane GitHubPrecondition.spec, -- 3.4s
-    -- Beside the reader it exercises: one real @gh@ that never answers, held
-    -- until its one-second budget runs out.
-    SuiteGroup "Spec.Agent.WorkerPrecondition" DeadlineLane WorkerPrecondition.spec,
     SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
     SuiteGroup "Spec.Repository.Lease" UsageLane RepositoryLease.spec, -- 1.7s
@@ -214,7 +202,6 @@ suiteGroups =
     -- against that churn. Its own cost is a few seconds of forced cleanup.
     SuiteGroup "Spec.GitHub.ConcurrentReaders" UsageLane ConcurrentReaders.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
-    SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,

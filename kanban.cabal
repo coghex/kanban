@@ -176,7 +176,6 @@ library kanban-internal
     Kanban.Usage
     Kanban.Usage.Render
     Kanban.UsageCommand
-    Kanban.Worker
     Kanban.Workflow
   other-modules:
     Kanban.GitHub.Coordinator
@@ -186,7 +185,6 @@ library kanban-internal
     Kanban.GitHub.Guard
     Kanban.GitHub.History
     Kanban.GitHub.Message
-    Kanban.GitHub.Precondition
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
@@ -205,17 +203,6 @@ library kanban-internal
     Kanban.Solve.Event
     Kanban.Solve.Parse
     Kanban.Solve.Unknown
-    Kanban.Worker.Census
-    Kanban.Worker.Command
-    Kanban.Worker.Discovery
-    Kanban.Worker.Journal
-    Kanban.Worker.Lease
-    Kanban.Worker.IssueHost
-    Kanban.Worker.Monitor
-    Kanban.Worker.Paths
-    Kanban.Worker.Precondition
-    Kanban.Worker.Termination
-    Kanban.Worker.Types
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
@@ -258,10 +245,8 @@ test-suite kanban-test
     Spec.Agent.Adapter
     Spec.Agent.Capture
     Spec.Agent.Compatibility
-    Spec.Agent.IssueHost
     Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess
-    Spec.Agent.ManagedProcess.Deadline
     Spec.Agent.ManagedProcess.Lifecycle
     Spec.Agent.Ping
     Spec.Agent.Preflight
@@ -275,7 +260,6 @@ test-suite kanban-test
     Spec.Agent.Transcript
     Spec.Agent.Usage
     Spec.Agent.UsageMode
-    Spec.Agent.WorkerPrecondition
     Spec.Board.Tracker
     Spec.Board.Workflow
     Spec.Config.Consumers
@@ -290,7 +274,6 @@ test-suite kanban-test
     Spec.GitHub.ConcurrentReaders
     Spec.GitHub.Decoding
     Spec.GitHub.History
-    Spec.GitHub.Precondition
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RecordLock
     Spec.GitHub.RefreshCoordinator

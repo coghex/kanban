@@ -424,11 +424,10 @@ spec = do
       labelAttribute config "blocked" `shouldBe` labelProblemAttr
       labelAttribute config "both" `shouldBe` labelProblemAttr
 
-    -- A worker spec persists a whole WorkflowConfig, and Kanban.Worker's
-    -- manual instance delegates the nested object to this one, so a spec
-    -- written before the styling collections or either workflow-path
-    -- collection existed decodes only if every one defaults rather than
-    -- being required.
+    -- A durable record written by an earlier release persisted a whole
+    -- WorkflowConfig, so one written before the styling collections or either
+    -- workflow-path collection existed decodes only if every one defaults
+    -- rather than being required.
     it "decodes a durable workflow configuration written before the optional workflow collections existed" $ do
       let legacy =
             object

@@ -14,8 +14,6 @@
 --   * the working directory, through @withCurrentDirectory@ in
 --     "Spec.Agent.Ping" and "Spec.Agent.UsageMode";
 --   * the file-creation mask, through 'Spec.Support.Env.withFileCreationMask';
---   * the SIGTERM and SIGINT dispositions a managed worker installs and
---     restores ("Kanban.Worker");
 --   * the process tree itself, which every census, group sweep and
 --     \"leaves no survivor\" assertion reads.
 --
