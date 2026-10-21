@@ -12,19 +12,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, utc)
 import Kanban.Domain
-import Kanban.Drainer
-  ( DirectMergeEffect (..),
-    DrainerActivity (..),
-    DrainerBackend (..),
-    DrainerController (..),
-    DrainerObservation (..),
-    DrainerState (..),
-    DrainerStatus (..),
-  )
 import Kanban.UI.Board (drawFooter)
-import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction)
 import Kanban.UI.Notice
-import Kanban.UI.Drainer (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Reconcile (boardRefreshOutcomeApplied, refreshSuccessNotice, usageRefreshApplied)
 import Kanban.UI.Refresh (historyPausedNotice)
@@ -32,14 +21,12 @@ import Kanban.UI (restoreStartupNotice)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (AppState (..), BoardRefreshOutcome (..), StartupReport (..))
 import Kanban.UI.Util
-  ( directMergeCarryApplied,
-    noticeActivityLive,
+  ( noticeActivityLive,
     noticeCleared,
     noticeExpiryApplied,
     noticeSet,
     noticeSetFor,
-    noticeSetOverDirectMergeResult,
-    outstandingDirectMergeReport,
+    outstandingStartupReport,
     settleNoticeLifecycle,
     shownNotice,
     startupReportApplied,
@@ -59,7 +46,7 @@ spec = describe "notice lifecycle" $ do
   activeSpec
   inventorySpec
   armingSpec
-  directMergeSpec
+  startupReportSpec
   durableSpec
 
 -- | A fresh quiet dashboard state.
@@ -159,10 +146,8 @@ categorySpec = describe "settled categories" $ do
     let producers :: [(String, AppState -> AppState)]
         producers =
           [ ("history paused info", noticeSet (historyPausedNotice utc epoch)),
-            ("incident refusal", applyIncidentsAction ActivateSelectedIncident),
-            ("drainer control error", drainerToggleApplied (Left "the job is not loaded")),
-            ("drainer toggle result", drainerToggleApplied (Right runningObservation)),
-            ("merge result", directMergeResultApplied 42 (DirectMergeEffect "PR #42 was not merged: declined" False))
+            ("usage result", usageRefreshApplied Claude "Claude" [] (UsageSnapshot [] epoch)),
+            ("refresh success", noticeSet (refreshSuccessNotice (RepoSnapshot [] [] epoch) []))
           ]
     sequence_
       [ do
@@ -190,7 +175,7 @@ categorySpec = describe "settled categories" $ do
     launched <- launchedWithDiagnostics
     -- The exact notice sequence 'startApplication' produces, through the
     -- same producers it calls: the composed startup line, the board
-    -- announcement over the (empty) direct-merge carry, one usage
+    -- announcement, one usage
     -- announcement per provider, and then the restore.
     let announced =
           noticeSetFor (UsageRefreshRunning Claude) "Refreshing Claude usage…"
@@ -198,7 +183,7 @@ categorySpec = describe "settled categories" $ do
             . noticeSetFor (UsageRefreshRunning Codex) "Refreshing Codex usage…"
             . (\s -> s {appUsageFreshness = Map.insert Codex Loading s.appUsageFreshness})
             . (\s -> s {appBoardFreshness = Loading})
-            . noticeSetOverDirectMergeResult (ActiveWhile BoardRefreshRunning) "Refreshing GitHub…"
+            . noticeSetFor BoardRefreshRunning "Refreshing GitHub…"
             $ launched
         restored = settleAt 0 (restoreStartupNotice launched.appNotice announced)
     -- The announcements landed on the line, and the restore put the whole
@@ -235,14 +220,14 @@ categorySpec = describe "settled categories" $ do
     let loading = at 20 launched {appBoardFreshness = Loading}
         outcome = BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot [] [] epoch) []))
         successNotice = refreshSuccessNotice (RepoSnapshot [] [] epoch) []
-        published = settleAt 20 (startupReportApplied loading (directMergeCarryApplied loading (boardRefreshOutcomeApplied outcome loading)))
+        published = settleAt 20 (startupReportApplied loading (boardRefreshOutcomeApplied outcome loading))
     shownNotice published `shouldBe` Just (successNotice <> " · " <> startupDiagnostics)
     published.appStartupReport `shouldBe` Nothing
     armed published `shouldBe` Just (shownInstance published, deadlineAt 20)
     shownNotice (expireAt 30 (shownInstance published) published) `shouldBe` Nothing
     -- A second publication finds nothing to compose: the diagnostics rode
     -- exactly one outcome.
-    let again = settleAt 40 (startupReportApplied published (directMergeCarryApplied published (boardRefreshOutcomeApplied outcome (at 40 published))))
+    let again = settleAt 40 (startupReportApplied published (boardRefreshOutcomeApplied outcome (at 40 published)))
     shownNotice again `shouldBe` Just successNotice
 
   it "retires the diagnostics at the first publication once anything else ended their line" $ do
@@ -254,7 +239,7 @@ categorySpec = describe "settled categories" $ do
         replaced = at 20 (noticeSet "Review started" loading)
         outcome = BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot [] [] epoch) []))
         successNotice = refreshSuccessNotice (RepoSnapshot [] [] epoch) []
-        published = settleAt 20 (startupReportApplied replaced (directMergeCarryApplied replaced (boardRefreshOutcomeApplied outcome replaced)))
+        published = settleAt 20 (startupReportApplied replaced (boardRefreshOutcomeApplied outcome replaced))
     shownNotice published `shouldBe` Just successNotice
     published.appStartupReport `shouldBe` Nothing
 
@@ -332,21 +317,6 @@ activeSpec = describe "active notices" $ do
     shownNotice (expireAt 15 (shownInstance shown) resettled) `shouldBe` Just "Refreshing GitHub…"
     shownNotice (expireAt 30 (shownInstance shown) resettled) `shouldBe` Nothing
 
-  it "takes the drainer toggle from active press to settled observation through the real transitions" $ do
-    state <- quietState
-    let installed =
-          state
-            { appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
-              appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [] DrainerLaunchd)
-            }
-        (pressed, _) = drainerTogglePress (at 0 installed)
-        busy = settleAt 0 pressed
-    shownNotice busy `shouldBe` Just "Starting PR drainer…"
-    armed busy `shouldBe` Nothing
-    let landed = settleAt 25 (drainerToggleApplied (Right runningObservation) (at 25 busy))
-    shownNotice landed `shouldBe` Just "PR drainer is on"
-    armed landed `shouldBe` Just (shownInstance landed, deadlineAt 25)
-
 inventorySpec :: Spec
 inventorySpec = describe "the declared activity inventory" $ do
   -- Requirement 7's decidability: each activity is alive on exactly the
@@ -365,13 +335,6 @@ inventorySpec = describe "the declared activity inventory" $ do
     live (UsageRefreshRunning Claude) (\s -> s {appUsageFreshness = Map.singleton Claude Loading}) `shouldBe` True
     live (UsageRefreshRunning Claude) (\s -> s {appUsageFreshness = Map.singleton Codex Loading}) `shouldBe` False
     live (UsageRefreshRunning Claude) id `shouldBe` False
-    live DrainerToggleRunning (\s -> s {appDrainerBusy = True}) `shouldBe` True
-    live DrainerToggleRunning id `shouldBe` False
-    live ApprovalToggleRunning (\s -> s {appApprovalBusy = True}) `shouldBe` True
-    live ApprovalToggleRunning id `shouldBe` False
-    live (DirectMergeRunning 42) (\s -> s {appDirectMergePending = Just 42}) `shouldBe` True
-    live (DirectMergeRunning 42) (\s -> s {appDirectMergePending = Just 41}) `shouldBe` False
-    live (DirectMergeRunning 42) id `shouldBe` False
     live QuitSettling (\s -> s {appQuitPending = True}) `shouldBe` True
     live QuitSettling id `shouldBe` False
 
@@ -397,83 +360,33 @@ armingSpec = describe "the one-shot timer decision" $ do
     noticeExpiryToArm loading.appNotice shown.appNotice `shouldBe` Nothing
     noticeExpiryToArm shown.appNotice settled.appNotice `shouldBe` Just (shownInstance settled)
 
-directMergeSpec :: Spec
-directMergeSpec = describe "the direct-merge carry" $ do
-  let mergedEffect = DirectMergeEffect "PR #42 merged." True
-
-  it "stays protected across the refresh it requires, then expires once settled" $ do
-    state <- quietState
-    -- The merge lands and its required refresh starts in the same breath, so
-    -- the composed line reports an active fetch and outlives ten seconds.
-    let reported = directMergeResultApplied 42 mergedEffect (at 0 state)
-        composed =
-          settleAt 0 $
-            noticeSetOverDirectMergeResult
-              (ActiveWhile BoardRefreshRunning)
-              "Refreshing GitHub…"
-              reported {appBoardFreshness = Loading}
-    shownNotice composed `shouldBe` Just "PR #42 merged. · Refreshing GitHub…"
-    armed composed `shouldBe` Nothing
-    shownNotice (settleAt 15 composed) `shouldBe` Just "PR #42 merged. · Refreshing GitHub…"
-    -- The refresh publishes: the carry re-fronts the result over the success
-    -- notice, the refresh has run so the report is retired, and the settled
-    -- line takes its ten seconds.
-    let published = settleAt 20 (directMergeCarryApplied (at 20 composed) (noticeSet "Fetched 12 issues" (at 20 composed) {appBoardFreshness = Fresh epoch}))
-    shownNotice published `shouldBe` Just "PR #42 merged. · Fetched 12 issues"
-    published.appDirectMergeResult `shouldBe` Nothing
-    armed published `shouldBe` Just (shownInstance published, deadlineAt 20)
-    shownNotice (expireAt 30 (shownInstance published) published) `shouldBe` Nothing
-
-  it "retires the carried result in the same step an expiry clears its notice" $ do
-    state <- quietState
-    -- The refresh could only be queued, so the plain settled result is on
-    -- screen with its report still carried behind it.
-    let reported = settleAt 0 (directMergeResultApplied 42 mergedEffect (at 0 state))
-        expired = expireAt 10 (shownInstance reported) reported
-    reported.appDirectMergeResult `shouldSatisfy` (/= Nothing)
-    shownNotice expired `shouldBe` Nothing
-    expired.appDirectMergeResult `shouldBe` Nothing
-    -- And the refresh that later publishes cannot recreate it: timed
-    -- dismissal ended the result exactly as Esc would have.
-    let afterRefresh = directMergeCarryApplied expired (noticeSet "Fetched 12 issues" expired)
-    shownNotice afterRefresh `shouldBe` Just "Fetched 12 issues"
-    afterRefresh.appDirectMergeResult `shouldBe` Nothing
-
+startupReportSpec :: Spec
+startupReportSpec = describe "the startup report's instance identity" $ do
   it "never lets a later notice with identical text adopt a retired report" $ do
-    state <- quietState
-    let reported = directMergeResultApplied 42 mergedEffect (at 0 state)
-        report = reported.appDirectMergeResult
-        -- The result's own instance is outstanding …
-        stillShown = outstandingDirectMergeReport (currentNoticeInstance reported.appNotice) report
-        -- … but a replacement repeating the words is a different instance.
-        repeated = noticeSet "PR #42 merged." reported
+    launched <- launchedWithDiagnostics
+    let report = launched.appStartupReport
+        -- The report's own instance is outstanding ...
+        stillShown = outstandingStartupReport (currentNoticeInstance launched.appNotice) report
+        -- ... but a replacement repeating the words is a different instance.
+        repeated = noticeSet startupComposed launched
     stillShown `shouldBe` report
-    outstandingDirectMergeReport (currentNoticeInstance repeated.appNotice) report `shouldBe` Nothing
+    outstandingStartupReport (currentNoticeInstance repeated.appNotice) report `shouldBe` Nothing
 
-  it "leaves an expiry belonging to a bystander notice with no claim on the report" $ do
-    state <- quietState
-    -- The report's notice was already replaced; the replacement expires. The
-    -- stale report is not the expiring notice's to retire.
-    let reported = directMergeResultApplied 42 mergedEffect (at 0 state)
-        replaced = settleAt 2 (noticeSet "Review started" (at 2 reported))
-        expired = expireAt 12 (shownInstance replaced) replaced
-    shownNotice expired `shouldBe` Nothing
-    expired.appDirectMergeResult `shouldBe` reported.appDirectMergeResult
+  it "retires the report when a dismissal ends its line" $ do
+    launched <- launchedWithDiagnostics
+    let dismissed = noticeCleared launched
+    outstandingStartupReport (currentNoticeInstance dismissed.appNotice) launched.appStartupReport `shouldBe` Nothing
 
 durableSpec :: Spec
 durableSpec = describe "durable state" $ do
-  -- Requirement 9: expiry touches the transient line and the report behind
-  -- it, and nothing else the footer, sidebar, or panels report through their
-  -- own surfaces.
+  -- Requirement 9: expiry touches the transient line, and nothing else the
+  -- footer, sidebar, or panels report through their own surfaces.
   it "changes nothing durable when a notice expires" $ do
     state <- quietState
     let populated =
           (at 0 state)
             { appBoardFreshness = Fresh epoch,
               appUsageFreshness = Map.singleton Claude (Fresh epoch),
-              appDrainerStatus = DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing,
-              appDrainerIncidents = Just [],
-              appDirectMergePending = Just 7,
               appQuitPending = False
             }
         settled = settleAt 0 (noticeSet "Claude usage refreshed" populated)
@@ -481,12 +394,5 @@ durableSpec = describe "durable state" $ do
     shownNotice expired `shouldBe` Nothing
     expired.appBoardFreshness `shouldBe` settled.appBoardFreshness
     expired.appUsageFreshness `shouldBe` settled.appUsageFreshness
-    expired.appDrainerStatus `shouldBe` settled.appDrainerStatus
-    expired.appDrainerIncidents `shouldBe` settled.appDrainerIncidents
-    expired.appDirectMergePending `shouldBe` settled.appDirectMergePending
     expired.appCompletedStatus `shouldBe` settled.appCompletedStatus
     expired.appLastSuccessfulFetch `shouldBe` settled.appLastSuccessfulFetch
-
-runningObservation :: DrainerObservation
-runningObservation =
-  DrainerObservation (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing) (Just [])

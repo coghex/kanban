@@ -1,12 +1,10 @@
 module Kanban.UI.Overlay
   ( InteriorExtent (..),
     OverlayGeometry (..),
-    drawIncidents,
     drawOverlay,
     fullscreenOverlayBox,
     fullscreenSideMargin,
     helpLines,
-    interiorViewport,
     mouseHelpEntries,
     overlayGeometryFor,
     windowedOverlayBox,
@@ -19,9 +17,6 @@ import Brick.Widgets.Border (borderWithLabel)
 import Brick.Widgets.Center (centerLayer, hCenterLayer)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.CLI (Options (..))
-import Kanban.Card (boundedLines, elide, wrappedLines)
-import Kanban.Text (sanitizeText)
 import Kanban.UI.Keys
   ( HelpEntry (..),
     bindingHelpEntry,
@@ -32,7 +27,6 @@ import Kanban.UI.Keys
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
-import Kanban.UI.Incidents
 import Kanban.UI.Details
 import Kanban.UI.Board
 
@@ -40,28 +34,14 @@ import Kanban.UI.Board
 -- is drawn in, which is the whole of what fullscreen means to a panel.
 data InteriorExtent
   = -- | A windowed box: the interior keeps the fixed number of rows that
-    -- panel has always bounded its list or transcript to. Those numbers were
-    -- chosen against the 32-row windowed box and are still exactly right for
-    -- it.
+    -- panel has always bounded its content to. Those numbers were chosen
+    -- against the 32-row windowed box and are still exactly right for it.
     BoundedInterior
   | -- | A fullscreen box: the interior takes every row the chrome around it
-    -- leaves. That is what makes a taller box show more of the incident list,
-    -- rather than the same fixed number of rows with a gap underneath — and it keeps the
-    -- rows below the interior, a rule and an input line, pinned to the bottom
-    -- of the box where they belong.
+    -- leaves. That is what makes a taller box show more of its content, rather
+    -- than the same fixed number of rows with a gap underneath.
     GreedyInterior
   deriving stock (Eq, Show)
-
--- | One panel's scrolling interior at the extent the box is drawn at.
---
--- @windowed@ stays that panel's own decision about how much of a windowed box
--- it spends on the thing being scrolled rather than on the chrome around it;
--- fullscreen replaces the decision rather than adding to it, because the
--- chrome is what is fixed and the interior is what should absorb a change in
--- the box.
-interiorViewport :: InteriorExtent -> Int -> Widget Name -> Widget Name
-interiorViewport BoundedInterior windowed = vLimit windowed
-interiorViewport GreedyInterior _ = id
 
 -- | The box an overlay is drawn at, and how its interior fills it.
 data OverlayGeometry = OverlayGeometry
@@ -86,7 +66,6 @@ windowedOverlayBox overlay = (overlayWidth, overlayHeight)
     -- dimensions are measured from. Taken once here rather than twice below.
     rows = helpLines
     overlayWidth = case overlay of
-      IncidentsOverlay -> 100
       -- Wide enough for the list it draws, for the same reason its height is:
       -- a description added to the table has to widen the box rather than be
       -- silently cut off inside it. A terminal narrower than this still clips
@@ -166,30 +145,22 @@ drawOverlayBox state overlay geometry =
     . fillBox
     $ case overlay of
       HelpOverlay -> drawHelp
-      IncidentsOverlay -> drawIncidents interior state
       DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
   where
     interior = geometry.overlayGeometryInterior
     -- Windowed, the box is centered and 'vLimit' only caps it, so a panel
-    -- whose rows are all fixed draws a border tight around them -- which is
-    -- how every incident box has always looked. Fullscreen the height is measured against the footer instead,
-    -- so a box that stopped at its content would leave a strip of board
-    -- between its bottom border and the hint row rather than running down to
-    -- it.
-    --
-    -- 'GreedyInterior' already fills the box for every panel that has a
-    -- scrolling interior at all. The fill covers the one that does not: the
-    -- help overlay, whose rows are the whole panel.
+    -- whose rows are all fixed draws a border tight around them. Fullscreen
+    -- the height is measured against the footer instead, so a box that
+    -- stopped at its content would leave a strip of board between its bottom
+    -- border and the hint row rather than running down to it.
     (place, fillBox) = case interior of
       BoundedInterior -> (centerLayer, id)
       GreedyInterior -> (hCenterLayer, padBottom Max)
     panelExtent = case overlay of
       HelpOverlay -> id
-      IncidentsOverlay -> clickable IncidentsPanel
       DetailsOverlay _ -> clickable DetailsPanel
     overlayTitle = case overlay of
       HelpOverlay -> " HELP "
-      IncidentsOverlay -> " NEEDS ATTENTION "
       DetailsOverlay item -> " " <> itemHeading item <> " "
 
 drawHelp :: Widget Name
@@ -222,128 +193,3 @@ mouseHelpEntries =
     gestureHelpEntry "right click" "close card details, windowed or fullscreen",
     gestureHelpEntry "outside click" "close card details, while it is windowed"
   ]
-
-drawIncidents :: InteriorExtent -> AppState -> Widget Name
-drawIncidents interior state =
-  vBox
-    [ withAttr (drainerSourceAttr source) (txtWrap (drainerSourceSummary source)),
-      txt "",
-      interiorViewport interior incidentsViewportHeight
-        . viewport IncidentsViewport Vertical
-        $ if null entries
-          then withAttr dimAttr (txtWrap (emptyStateText source))
-          else vBox (zipWith drawEntry [0 :: Int ..] entries)
-    ]
-  where
-    entries = incidentEntries state
-    source = drainerSourceState state.appDrainerStatus state.appDrainerIncidents
-    selectedIndex = (resolveIncidentSelection entries state.appIncidentSelection).incidentSelectionRow
-    glyph = if state.appOptions.optionAscii then "!" else "×"
-    drawEntry index entry =
-      let selected = index == selectedIndex
-          attribute = if selected then selectedAttr else problemAttr
-          line =
-            glyph
-              <> " "
-              <> entry.incidentEntrySubject
-              <> " · "
-              <> entry.incidentEntryDetail
-              <> " · "
-              <> incidentSourceLabel entry.incidentEntrySource
-          note = maybe [] (noteLines state) entry.incidentEntryNote
-          widget =
-            clickable
-              (IncidentTarget entry.incidentEntryRef)
-              (vBox (withAttr attribute (elidedLine line) : note))
-       in if selected then visible widget else widget
-
--- | An entry's note as the continuation lines drawn under its row.
---
--- Wrapped rather than elided: the note exists because the text is worth
--- reading whole, and a row that has already spent the panel's width on its
--- subject and summary would elide it away before its first word. The
--- continuation is indented and marked so it reads as belonging to the row
--- above rather than as an entry of its own, and it is part of the same
--- clickable widget, so clicking it selects the incident it belongs to.
---
--- Bounded in height as well as width. A note is one incident's detail while
--- the panel's rows are shared, so it may take at most 'incidentNoteLines'.
--- What is dropped to fit is the /middle/: a drainer's recorded failure opens
--- by restating what failed and closes with the blocker, the remedy and the
--- paths to act on, so trimming the tail would keep only the part the row
--- already said. The first line and the last are kept, and the gap between
--- them is marked.
-noteLines :: AppState -> Text -> [Widget Name]
-noteLines state note = [withAttr dimAttr (Widget Fixed Fixed draw)]
-  where
-    marker = if state.appOptions.optionAscii then "-> " else "↳ "
-    indent = "    "
-    -- The marker sits on the first line only; later lines align under its
-    -- text rather than repeating it.
-    continuation = Text.replicate (Text.length marker) " "
-    draw = do
-      context <- getContext
-      let body = max 1 (availWidth context - Text.length indent - Text.length marker)
-          rows = keepEnds body (wrappedLines body note)
-      render (vBox [txt (indent <> prefix <> row) | (prefix, row) <- zip (marker : repeat continuation) rows])
-    keepEnds body rows
-      | length rows <= incidentNoteLines = rows
-      | otherwise = case rows of
-          first : _ -> elide body first : drop (length rows - (incidentNoteLines - 1)) rows
-          [] -> []
-
--- | How many continuation lines one note may take. A note belongs to a
--- single incident while the panel's height is shared, so three lines is the
--- whole allowance.
-incidentNoteLines :: Int
-incidentNoteLines = 3
-
--- | One row's text, elided to the width the panel actually gives it.
---
--- The panel is a fixed-width overlay, so a row longer than it is cropped by
--- the viewport. Cropping alone is silent: it takes the tail of the line away
--- with nothing to say it did, which reads as a row that simply ends there.
--- Measuring at render time instead keeps the §11 promise that an ellipsis
--- appears wherever text was dropped, and it is the width the panel really
--- has rather than a constant restated here.
---
--- Still exactly one row: 'boundedLines' at one line either returns the whole
--- line or its elided head, and an empty line yields no row rather than a
--- blank one.
-elidedLine :: Text -> Widget Name
-elidedLine line = Widget Fixed Fixed $ do
-  context <- getContext
-  render (txt (Text.concat (boundedLines (availWidth context) 1 line)))
-
--- | The overall "nothing needs attention" claim is only ever made from a
--- drainer observation that reported no incidents. With the source still
--- being checked or unavailable the panel has nothing else to speak for, so it
--- says only what is true of the drainer.
-emptyStateText :: DrainerSourceState -> Text
-emptyStateText source = case source of
-  DrainerSourceReported _ -> "Nothing needs attention."
-  DrainerSourceChecking -> "The PR drainer has not answered yet."
-  DrainerSourceUnavailable _ -> "The PR drainer's open incidents are unavailable."
-
--- | Says which of the source's states produced the list above, so an empty
--- panel is never read as a verdict the drainer did not give. The detail is
--- the status's own, which is a remediation when the controller could not be
--- reached and simply names its state when the controller answered without
--- reporting a set at all — hence "open incidents unavailable" rather than a
--- bare "unavailable", which would contradict a drainer plainly reported on.
-drainerSourceSummary :: DrainerSourceState -> Text
-drainerSourceSummary source = case source of
-  DrainerSourceReported incidents ->
-    "PR drainer: "
-      <> showText (length incidents)
-      <> " open incident"
-      <> (if length incidents == 1 then "" else "s")
-  DrainerSourceChecking -> "PR drainer: checking for open incidents…"
-  DrainerSourceUnavailable detail -> "PR drainer: open incidents unavailable · " <> sanitizeText detail
-
--- | The rows the incidents panel's bounded interior viewport is given inside a
--- /windowed/ box: its share of the 32 rows the box has, after the summary line
--- above it. 'interiorViewport' is what retires it in a box that is not that
--- shape.
-incidentsViewportHeight :: Int
-incidentsViewportHeight = 23

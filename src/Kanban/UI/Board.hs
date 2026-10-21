@@ -1,7 +1,6 @@
 module Kanban.UI.Board
   ( BoardMarks (..),
     CardEnv (..),
-    approvalControlLabel,
     baseFooterRows,
     boardFooterHintLine,
     boardHintLine,
@@ -20,7 +19,6 @@ module Kanban.UI.Board
     refreshColumnWindows,
     completedLoadingHeading,
     completedUnavailableHeading,
-    drainerLabel,
     drawBase,
     drawCardFrame,
     drawFooter,
@@ -71,9 +69,6 @@ import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import Text.Wrap (defaultWrapSettings, wrapTextToLines)
 import Kanban.CLI (Options (..))
-import Kanban.ApprovalService
-  ( ApprovalStatus (..)
-    )
 import Kanban.Card
   ( CardChip (..),
     boundedLines,
@@ -85,9 +80,6 @@ import Kanban.Card
   )
 import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), usageSolveRoundEstimate )
 import Kanban.Domain
-import Kanban.Drainer
-  ( DrainerStatus (..)
-    )
 import Kanban.Filter
   ( FilterBox,
     FilterGroup,
@@ -104,7 +96,6 @@ import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, or
 import Kanban.UI.Types
 import Kanban.Usage (usageProviders)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, excerptFooterHint, footerHint, footerHintRow, scopeBindings)
-import Kanban.UI.Incidents (incidentsFooterHints)
 import Kanban.UI.Util
 import Kanban.UI.Theme
 import Kanban.UI.Search
@@ -171,15 +162,13 @@ drawUsage state
     -- started from rather than from a pair written here, so the sidebar can
     -- never show a window for an account
     -- 'Kanban.UI.Refresh.startUsageRefreshes' never probes.
+    --
+    -- Padded to the box's full height, so the sidebar keeps running down beside
+    -- the board whatever its contents take.
     usageContents =
-      vBox
+      padBottom Max . vBox $
         [ vBox (intersperse (txt "") (map (drawProvider state) usageProviders)),
-          drawUpdateButton state,
-          -- One padded stack rather than two, so the pair stays together at
-          -- the sidebar's foot: padding each separately would push the
-          -- approval control up to the update button and leave the gap
-          -- between two service controls that belong beside each other.
-          padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
+          drawUpdateButton state
         ]
 
 -- | One nested sidebar control, drawn under §10's convention: its own box out
@@ -207,46 +196,6 @@ sidebarControl state name attribute label =
         <> Text.replicate (displayWidth label) (Text.singleton boxStyle.bsHorizontal)
         <> Text.singleton rightCorner
 
-drawDrainerButton :: AppState -> Widget Name
-drawDrainerButton state =
-  vBox
-    [ sidebarControl state DrainerButton (drainerStatusAttr status) drainerLabel,
-      withAttr (drainerStatusAttr status) (txtWrap status.drainerDetail)
-    ]
-  where
-    status = state.appDrainerStatus
-
--- | The drainer control's interior row, padded so the control keeps its
--- sixteen-column footprint.
-drainerLabel :: Text
-drainerLabel = " drain_prs.py "
-
--- | The issue approval service's control, drawn exactly as the drainer's is
--- and directly above it.
---
--- The detail line is 'approvalDetail' verbatim. Every wording it can carry --
--- @checking…@ before the first poll answers, the transition text a press
--- writes, and the steady, barrier, and error compositions the controller's
--- document decodes into -- is already composed in
--- "Kanban.ApprovalService" and "Kanban.UI.Approval", so composing anything
--- here would be a second place the operator's text could be decided.
-drawApprovalButton :: AppState -> Widget Name
-drawApprovalButton state =
-  vBox
-    [ sidebarControl state ApprovalButton (approvalStatusAttr status) approvalControlLabel,
-      withAttr (approvalStatusAttr status) (txtWrap status.approvalDetail)
-    ]
-  where
-    status = state.appApprovalStatus
-
--- | The approval control's interior row, padded the way the drainer's is.
---
--- Nineteen cells of label make a twenty-one-cell box, which is what has to
--- fit: 'usageSidebarInterior' is 24, so the widest sidebar control still
--- clears the interior it is drawn in without wrapping.
-approvalControlLabel :: Text
-approvalControlLabel = " approve_issues.py "
-
 -- | The update control: the board-and-usage update @u@ performs, made
 -- clickable. It carries no status or detail line of its own, because the
 -- update it starts already reports itself through the provider blocks above
@@ -256,7 +205,7 @@ drawUpdateButton :: AppState -> Widget Name
 drawUpdateButton state = sidebarControl state UpdateButton neutralAttr updateLabel
 
 -- | The update control's interior row: the single glyph §6 fixes, with the
--- one-space padding the drainer control's label carries.
+-- one-space padding of a control label.
 --
 -- @↻@ (U+21BB) is not a matter of taste. It is one terminal cell wide and is
 -- carried by the DejaVu Sans Mono build @tools/render_board_screenshot.py@
@@ -1577,23 +1526,18 @@ overlayHintLine = footerHintRow . overlayHintChips
 --
 -- This module writes none of that text. The details and help overlays are
 -- scopes of the table in "Kanban.UI.Keys" and project from it exactly as the
--- board's line does; the incidents panel declares its chips beside its own
--- decoder. What is here is the routing and nothing else -- the same reason the
--- help overlay's rows are assembled rather than transcribed.
---
--- The two scopes of the base table project exactly as the board's own line
--- does.
+-- board's line does. What is here is the routing and nothing else -- the same
+-- reason the help overlay's rows are assembled rather than transcribed.
 overlayHintChips :: Overlay -> [Text]
 overlayHintChips = \case
   HelpOverlay -> map footerHint (scopeBindings HelpScope)
   DetailsOverlay _ -> map footerHint (scopeBindings DetailsScope)
-  IncidentsOverlay -> incidentsFooterHints
 
 -- | The hint line a focused filter panel shows in place of the board's.
 --
 -- Written here rather than projected from the table in "Kanban.UI.Keys" for
 -- the same reason search's is: none of these keys is a binding while the panel
--- has focus. @d@ restores the defaults rather than toggling the drainer, and
+-- has focus. @d@ restores the defaults, and
 -- the arrows move between checkboxes rather than between columns, so the
 -- board's line would state both of them wrongly.
 filterFooterHintLine :: Text
@@ -1613,8 +1557,8 @@ filterFooterHintLine =
 -- The line is a single row and 'txt' clips it at the terminal width, which is
 -- the policy it has always had: even the shorter hand-written line this
 -- replaced lost its tail on the 164-cell four-column minimum §6 names. What
--- changed is that the content is now complete — @g@, @G@, @Esc@, @Ctrl-L@,
--- and @m@ were all missing from it — so at narrow widths more of the tail is
+-- changed is that the content is now complete — @g@, @G@, @Esc@, and
+-- @Ctrl-L@ were all missing from it — so at narrow widths more of the tail is
 -- clipped. The help overlay behind @?@ is, as before, the complete list, and
 -- is the one that has to stay readable.
 --

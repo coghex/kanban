@@ -10,25 +10,16 @@ module Spec.Support.App
 where
 
 import Brick.BChan (newBChan)
-import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
-import Kanban.ApprovalService
-  ( ApprovalActivity (..),
-    ApprovalState (..),
-    ApprovalStatus (..),
-    ApprovalUnavailable (..),
-  )
-import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.UI.Notice (emptyNoticeState)
 import Kanban.UI.Types
   ( AppState (..),
     CompletedHistoryStatus (..),
-    IncidentSelection (..),
   )
 import Kanban.UI.Board (defaultExcerptsVisible, unmeasuredLayoutInputs)
 import Spec.Support.Board (inertRefreshCoordinator)
@@ -39,7 +30,6 @@ testAppState board = do
   eventChannel <- newBChan 16
   refreshCoordinator <- inertRefreshCoordinator
   historyTraversal <- newHistoryTraversal
-  approvalEpoch <- newIORef 0
   pure
     AppState
       { appRepository = Repository "/tmp/example-project" "example" "project",
@@ -68,7 +58,6 @@ testAppState board = do
         appSearch = Nothing,
         appSidebarVisible = True,
         appExcerptsVisible = defaultExcerptsVisible,
-        appIncidentSelection = IncidentSelection Nothing 0,
         appOverlay = Nothing,
         appOverlayFullscreen = False,
         appNotice = emptyNoticeState,
@@ -84,19 +73,6 @@ testAppState board = do
         -- Nothing is in flight, so no criteria set is blocked on a traversal:
         -- a test about the completed blocker says so by naming this field.
         appCompletedStatus = CompletedHistoryCurrent,
-        appDrainerController = Left "no drainer in tests",
-        appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
-        appDrainerIncidents = Just [],
-        appDrainerBusy = False,
-        appApprovalController = Left (ApprovalUndiscoverable "no issue approval service in tests"),
-        appApprovalStatus = ApprovalStatus ApprovalOff "off" ApprovalServiceStopped Nothing Nothing,
-        appApprovalIncidents = Just [],
-        appApprovalBusy = False,
-        appApprovalTransition = 0,
-        appApprovalEpoch = approvalEpoch,
-        appApprovalResult = Nothing,
-        appDirectMergePending = Nothing,
-        appDirectMergeResult = Nothing,
         appStartupReport = Nothing,
         appBoardRefreshQueued = False,
         appRefreshCoordinator = refreshCoordinator,

@@ -5,10 +5,6 @@ module Kanban.Config
     TimeoutsConfig (..),
     UsageCommandConfig (..),
     UsageConfig (..),
-    MissionNotificationCommand (..),
-    MissionNotificationConfig (..),
-    MissionsConfig (..),
-    MissionAgentCeiling (..),
     WorkflowOverride (..),
     LimitsOverride (..),
     TimeoutsOverride (..),
@@ -17,15 +13,7 @@ module Kanban.Config
     ResolvedConfig (..),
     defaultLimitsConfig,
     defaultTimeoutsConfig,
-    defaultWorkerDeadlineSeconds,
-    maximumWorkerDeadlineSeconds,
     defaultUsageConfig,
-    defaultMissionsConfig,
-    defaultMissionNotificationConfig,
-    missionNotificationRefusal,
-    defaultMissionAgentCeiling,
-    missionAgentCeilingValue,
-    missionAgentCeilingRefusal,
     defaultRawConfig,
     emptyWorkflowOverride,
     emptyLimitsOverride,
@@ -47,7 +35,7 @@ module Kanban.Config
 where
 
 import Control.Exception (IOException, try)
-import Control.Monad (join)
+import Control.Monad (join, void)
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit, toLower)
 import Data.List (intercalate)
 import Data.Map.Strict (Map)
@@ -107,29 +95,17 @@ defaultLimitsConfig =
     { limitsExcerptLines = 3
     }
 
--- | Bounds in whole seconds: the four provider timeouts, and the deadline one
--- action worker's launch records.
+-- | Bounds in whole seconds on the three requests this process makes: the
+-- GitHub fetch, and the two provider account-status reads.
 --
--- The ping fields are separate from 'timeoutsCodexSeconds' and
--- 'timeoutsClaudeSeconds' on purpose: those two bound an account-status read,
--- which is a different and much shorter operation than the model round trip a
--- deliberate ping submits (§14).
---
--- 'timeoutsWorkerDeadlineSeconds' is the odd one, and it is here because it is
--- the same kind of value read from the same table rather than because it
--- bounds a provider call. The four above bound one request this process makes
--- and are consulted at the moment it is made; this one is resolved once at a
--- launch and was recorded in that worker's own specification, so a later run
--- read the bound the launch recorded and never this setting (issue #595,
--- requirement 15). No worker reads it now; the setting still parses until the
--- configuration trim.
+-- @ping_codex_seconds@, @ping_claude_seconds@ and @worker_deadline_seconds@
+-- are keys @tools\/kanban_config.py@ owns. The application accepts them in
+-- the same positions and drops them ('timeoutsOverrideParser'), so a file
+-- written for the scripts still loads here.
 data TimeoutsConfig = TimeoutsConfig
   { timeoutsGithubSeconds :: Int,
     timeoutsCodexSeconds :: Int,
-    timeoutsClaudeSeconds :: Int,
-    timeoutsPingCodexSeconds :: Int,
-    timeoutsPingClaudeSeconds :: Int,
-    timeoutsWorkerDeadlineSeconds :: Int
+    timeoutsClaudeSeconds :: Int
   }
   deriving stock (Eq, Show)
 
@@ -138,30 +114,8 @@ defaultTimeoutsConfig =
   TimeoutsConfig
     { timeoutsGithubSeconds = 30,
       timeoutsCodexSeconds = 10,
-      timeoutsClaudeSeconds = 45,
-      timeoutsPingCodexSeconds = 120,
-      timeoutsPingClaudeSeconds = 120,
-      timeoutsWorkerDeadlineSeconds = defaultWorkerDeadlineSeconds
+      timeoutsClaudeSeconds = 45
     }
-
--- | The four hours every action worker was bounded at before the bound became
--- configurable, and still the value an omitted @worker_deadline_seconds@
--- resolves to.
-defaultWorkerDeadlineSeconds :: Int
-defaultWorkerDeadlineSeconds = 4 * 60 * 60
-
--- | The one documented ceiling @worker_deadline_seconds@ is validated
--- against: seven days.
---
--- Named once rather than bounded per call site, because a worker
--- specification recorded the resolved value as an unconditional finite 'Int'
--- and every launch path therefore had to be able to point at the same
--- maximum. A finite ceiling is also what makes "resolved to a finite
--- number of seconds" provable rather than merely usual: without one, a
--- configuration file could name a bound no watchdog would ever reach, which
--- is a permanently resident worker written as a number (§3).
-maximumWorkerDeadlineSeconds :: Int
-maximumWorkerDeadlineSeconds = 7 * 24 * 60 * 60
 
 -- | An external usage-provider command: executable followed by literal
 -- arguments, launched directly without a shell. Parsed and validated now;
@@ -208,105 +162,6 @@ usageSolveRoundEstimates usage =
       Just estimate <- [usageSolveRoundEstimate usage provider]
     ]
 
--- | The command an operator configured to be told that a mission needs them:
--- executable followed by literal arguments, launched directly without a shell,
--- exactly as a usage command is.
-newtype MissionNotificationCommand = MissionNotificationCommand {missionNotificationArgv :: [Text]}
-  deriving stock (Eq, Show)
-
--- | @[missions.notifications]@: whether Kanban tells anybody that a mission is
--- waiting on a person, and what it runs to do so.
---
--- Off by default and deliberately so: an unattended scheduler that launched an
--- unconfigured command on the first waiting mission would be a surprise, and
--- there is no command a desktop can be assumed to have. The two keys are
--- siblings rather than nested, so a command can be written down and left
--- switched off, which is how an operator tries one out.
-data MissionNotificationConfig = MissionNotificationConfig
-  { missionNotificationEnabled :: Bool,
-    missionNotificationCommand :: Maybe MissionNotificationCommand
-  }
-  deriving stock (Eq, Show)
-
--- | @[missions]@ and what hangs off it.
---
--- One table rather than a bare @[missions.notifications]@ so that the mission
--- runner's later settings have somewhere to go without moving this one.
-data MissionsConfig = MissionsConfig
-  { missionsNotifications :: MissionNotificationConfig,
-    -- | @agent_ceiling@: how many mission-dispatched agents may be live at
-    -- once for one repository (D-4, as amended).
-    missionsAgentCeiling :: MissionAgentCeiling
-  }
-  deriving stock (Eq, Show)
-
--- | @[missions] agent_ceiling@, as the file spelled it.
---
--- Kept as written rather than refused while the file is read, for the reason
--- 'missionNotificationRefusal' gives: a dashboard and a usage query read this
--- file too and consult nothing here, so a ceiling of zero must not take the
--- repository away from them. 'missionAgentCeilingRefusal' refuses it by name
--- where a mission would start an agent under it.
-data MissionAgentCeiling
-  = -- | A positive whole number.
-    MissionAgentCeiling Int
-  | -- | Anything else, with the value as the file wrote it.
-    MissionAgentCeilingInvalid Text
-  deriving stock (Eq, Show)
-
--- | Two, the ceiling D-4 decided and the one an absent key means.
-defaultMissionAgentCeiling :: Int
-defaultMissionAgentCeiling = 2
-
--- | The configured ceiling, or why there is none to apply.
-missionAgentCeilingValue :: MissionsConfig -> Either Text Int
-missionAgentCeilingValue missions = case missions.missionsAgentCeiling of
-  MissionAgentCeiling configured -> Right configured
-  MissionAgentCeilingInvalid written ->
-    Left
-      ( "missions.agent_ceiling must be a positive whole number, and it is "
-          <> written
-          <> ", so no mission may start an agent under it"
-      )
-
--- | 'missionAgentCeilingValue''s refusal, for a caller that only needs to know
--- whether there is one.
-missionAgentCeilingRefusal :: MissionsConfig -> Maybe Text
-missionAgentCeilingRefusal = either Just (const Nothing) . missionAgentCeilingValue
-
-defaultMissionNotificationConfig :: MissionNotificationConfig
-defaultMissionNotificationConfig =
-  MissionNotificationConfig
-    { missionNotificationEnabled = False,
-      missionNotificationCommand = Nothing
-    }
-
-defaultMissionsConfig :: MissionsConfig
-defaultMissionsConfig =
-  MissionsConfig
-    { missionsNotifications = defaultMissionNotificationConfig,
-      missionsAgentCeiling = MissionAgentCeiling defaultMissionAgentCeiling
-    }
-
--- | Why this notification configuration cannot be acted on, if it cannot.
---
--- Enabling notifications with nothing to run is the one combination that is
--- neither \"off\" nor usable, and it is reported as itself rather than being
--- read as off: an operator who switched notifications on and then lost the
--- command line to an edit is owed the difference between a scheduler that is
--- staying quiet on purpose and one that cannot speak.
---
--- Not a load-time error, because it is not one for every invocation: a
--- dashboard, a usage query and a named mission run all read this file and none
--- of them notifies, so refusing the whole configuration would take the
--- repository away over a setting only the scheduler consults.
-missionNotificationRefusal :: MissionNotificationConfig -> Maybe Text
-missionNotificationRefusal notifications
-  | not notifications.missionNotificationEnabled = Nothing
-  | Nothing <- notifications.missionNotificationCommand =
-      Just "missions.notifications.enabled is true and missions.notifications.command is not set, so there is nothing to run"
-  | otherwise = Nothing
-
 -- | Per-field overrides for '[workflow]', decoded identically at the global
 -- and per-repository level. Global values apply defaults for any field left
 -- 'Nothing'; a repository override only replaces the fields it sets.
@@ -319,9 +174,7 @@ data WorkflowOverride = WorkflowOverride
     overrideApprovalMode :: Maybe ApprovalMode,
     overrideBlockingSeverity :: Maybe BlockingSeverity,
     overrideProblemStyleLabels :: Maybe (Set Text),
-    overrideUiStyleLabels :: Maybe (Set Text),
-    overrideCoordinationPaths :: Maybe (Set Text),
-    overrideDirectPublicationPaths :: Maybe (Set Text)
+    overrideUiStyleLabels :: Maybe (Set Text)
   }
   deriving stock (Eq, Show)
 
@@ -336,9 +189,7 @@ emptyWorkflowOverride =
       overrideApprovalMode = Nothing,
       overrideBlockingSeverity = Nothing,
       overrideProblemStyleLabels = Nothing,
-      overrideUiStyleLabels = Nothing,
-      overrideCoordinationPaths = Nothing,
-      overrideDirectPublicationPaths = Nothing
+      overrideUiStyleLabels = Nothing
     }
 
 newtype LimitsOverride = LimitsOverride
@@ -355,10 +206,7 @@ emptyLimitsOverride =
 data TimeoutsOverride = TimeoutsOverride
   { overrideGithubSeconds :: Maybe Int,
     overrideCodexSeconds :: Maybe Int,
-    overrideClaudeSeconds :: Maybe Int,
-    overridePingCodexSeconds :: Maybe Int,
-    overridePingClaudeSeconds :: Maybe Int,
-    overrideWorkerDeadlineSeconds :: Maybe Int
+    overrideClaudeSeconds :: Maybe Int
   }
   deriving stock (Eq, Show)
 
@@ -367,10 +215,7 @@ emptyTimeoutsOverride =
   TimeoutsOverride
     { overrideGithubSeconds = Nothing,
       overrideCodexSeconds = Nothing,
-      overrideClaudeSeconds = Nothing,
-      overridePingCodexSeconds = Nothing,
-      overridePingClaudeSeconds = Nothing,
-      overrideWorkerDeadlineSeconds = Nothing
+      overrideClaudeSeconds = Nothing
     }
 
 -- | A single '[repositories."owner/name"]' table. Only workflow, limits, and
@@ -405,7 +250,6 @@ data RawConfig = RawConfig
     rawLimits :: LimitsConfig,
     rawTimeouts :: TimeoutsConfig,
     rawUsage :: UsageConfig,
-    rawMissions :: MissionsConfig,
     rawRepositories :: Map Text RepositoryOverride
   }
   deriving stock (Eq, Show)
@@ -419,7 +263,6 @@ defaultRawConfig =
       rawLimits = defaultLimitsConfig,
       rawTimeouts = defaultTimeoutsConfig,
       rawUsage = defaultUsageConfig,
-      rawMissions = defaultMissionsConfig,
       rawRepositories = Map.empty
     }
 
@@ -431,10 +274,7 @@ data ResolvedConfig = ResolvedConfig
     resolvedWorkflow :: WorkflowConfig,
     resolvedLimits :: LimitsConfig,
     resolvedTimeouts :: TimeoutsConfig,
-    resolvedUsage :: UsageConfig,
-    -- | Global like 'resolvedUsage': the scheduler is repository-scoped but
-    -- the command it would run is the operator's, not one repository's.
-    resolvedMissions :: MissionsConfig
+    resolvedUsage :: UsageConfig
   }
   deriving stock (Eq, Show)
 
@@ -495,8 +335,7 @@ resolveGlobalConfig raw =
       resolvedWorkflow = raw.rawWorkflow,
       resolvedLimits = raw.rawLimits,
       resolvedTimeouts = raw.rawTimeouts,
-      resolvedUsage = raw.rawUsage,
-      resolvedMissions = raw.rawMissions
+      resolvedUsage = raw.rawUsage
     }
 
 resolveConfig :: Text -> RawConfig -> ResolvedConfig
@@ -507,8 +346,7 @@ resolveConfig ownerName raw =
       resolvedWorkflow = applyWorkflowOverride raw.rawWorkflow override.repositoryOverrideWorkflow,
       resolvedLimits = applyLimitsOverride raw.rawLimits override.repositoryOverrideLimits,
       resolvedTimeouts = applyTimeoutsOverride raw.rawTimeouts override.repositoryOverrideTimeouts,
-      resolvedUsage = raw.rawUsage,
-      resolvedMissions = raw.rawMissions
+      resolvedUsage = raw.rawUsage
     }
   where
     -- Override keys are canonical lowercase, so the lookup is the one place
@@ -528,10 +366,7 @@ applyWorkflowOverride base override =
       approvalMode = fromMaybe base.approvalMode override.overrideApprovalMode,
       blockingSeverity = fromMaybe base.blockingSeverity override.overrideBlockingSeverity,
       problemStyleLabels = fromMaybe base.problemStyleLabels override.overrideProblemStyleLabels,
-      uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels,
-      coordinationPaths = fromMaybe base.coordinationPaths override.overrideCoordinationPaths,
-      directPublicationPaths =
-        fromMaybe base.directPublicationPaths override.overrideDirectPublicationPaths
+      uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels
     }
 
 applyLimitsOverride :: LimitsConfig -> LimitsOverride -> LimitsConfig
@@ -545,10 +380,7 @@ applyTimeoutsOverride base override =
   base
     { timeoutsGithubSeconds = fromMaybe base.timeoutsGithubSeconds override.overrideGithubSeconds,
       timeoutsCodexSeconds = fromMaybe base.timeoutsCodexSeconds override.overrideCodexSeconds,
-      timeoutsClaudeSeconds = fromMaybe base.timeoutsClaudeSeconds override.overrideClaudeSeconds,
-      timeoutsPingCodexSeconds = fromMaybe base.timeoutsPingCodexSeconds override.overridePingCodexSeconds,
-      timeoutsPingClaudeSeconds = fromMaybe base.timeoutsPingClaudeSeconds override.overridePingClaudeSeconds,
-      timeoutsWorkerDeadlineSeconds = fromMaybe base.timeoutsWorkerDeadlineSeconds override.overrideWorkerDeadlineSeconds
+      timeoutsClaudeSeconds = fromMaybe base.timeoutsClaudeSeconds override.overrideClaudeSeconds
     }
 
 --------------------------------------------------------------------------------
@@ -645,7 +477,7 @@ rawConfigParser = do
   limitsOverride <- optKeyOf "limits" (parseTableFromValue limitsOverrideParser)
   timeoutsOverride <- optKeyOf "timeouts" (parseTableFromValue timeoutsOverrideParser)
   usage <- optKeyOf "usage" (parseTableFromValue usageConfigParser)
-  missions <- optKeyOf "missions" (parseTableFromValue missionsConfigParser)
+  ignoreScriptOwnedKey "missions"
   repositories <- optKeyOf "repositories" parseRepositories
   pure
     RawConfig
@@ -655,7 +487,6 @@ rawConfigParser = do
         rawLimits = applyLimitsOverride defaultLimitsConfig (fromMaybe emptyLimitsOverride limitsOverride),
         rawTimeouts = applyTimeoutsOverride defaultTimeoutsConfig (fromMaybe emptyTimeoutsOverride timeoutsOverride),
         rawUsage = fromMaybe defaultUsageConfig usage,
-        rawMissions = fromMaybe defaultMissionsConfig missions,
         rawRepositories = fromMaybe Map.empty repositories
       }
 
@@ -670,8 +501,8 @@ workflowOverrideParser = do
   blockingSeverityValue <- optKeyOf "blocking_severity" parseBlockingSeverity
   problemStyleLabelsValue <- optKeyOf "problem_style_labels" parseLabelSet
   uiStyleLabelsValue <- optKeyOf "ui_style_labels" parseLabelSet
-  coordinationPathsValue <- optKeyOf "coordination_paths" parseNonEmptyTextSet
-  directPublicationPathsValue <- optKeyOf "direct_publication_paths" parseNonEmptyTextSet
+  ignoreScriptOwnedKey "coordination_paths"
+  ignoreScriptOwnedKey "direct_publication_paths"
   pure
     WorkflowOverride
       { overrideApprovalLabel = approvalLabelValue,
@@ -682,9 +513,7 @@ workflowOverrideParser = do
         overrideApprovalMode = approvalModeValue,
         overrideBlockingSeverity = blockingSeverityValue,
         overrideProblemStyleLabels = problemStyleLabelsValue,
-        overrideUiStyleLabels = uiStyleLabelsValue,
-        overrideCoordinationPaths = coordinationPathsValue,
-        overrideDirectPublicationPaths = directPublicationPathsValue
+        overrideUiStyleLabels = uiStyleLabelsValue
       }
 
 limitsOverrideParser :: ParseTable Position LimitsOverride
@@ -700,17 +529,14 @@ timeoutsOverrideParser = do
   githubSecondsValue <- optKeyOf "github_seconds" parsePositiveTimeoutSeconds
   codexSecondsValue <- optKeyOf "codex_seconds" parsePositiveTimeoutSeconds
   claudeSecondsValue <- optKeyOf "claude_seconds" parsePositiveTimeoutSeconds
-  pingCodexSecondsValue <- optKeyOf "ping_codex_seconds" parsePositiveTimeoutSeconds
-  pingClaudeSecondsValue <- optKeyOf "ping_claude_seconds" parsePositiveTimeoutSeconds
-  workerDeadlineSecondsValue <- optKeyOf "worker_deadline_seconds" parseWorkerDeadlineSeconds
+  ignoreScriptOwnedKey "ping_codex_seconds"
+  ignoreScriptOwnedKey "ping_claude_seconds"
+  ignoreScriptOwnedKey "worker_deadline_seconds"
   pure
     TimeoutsOverride
       { overrideGithubSeconds = githubSecondsValue,
         overrideCodexSeconds = codexSecondsValue,
-        overrideClaudeSeconds = claudeSecondsValue,
-        overridePingCodexSeconds = pingCodexSecondsValue,
-        overridePingClaudeSeconds = pingClaudeSecondsValue,
-        overrideWorkerDeadlineSeconds = workerDeadlineSecondsValue
+        overrideClaudeSeconds = claudeSecondsValue
       }
 
 usageConfigParser :: ParseTable Position UsageConfig
@@ -733,52 +559,6 @@ usageProviderTableParser = do
   command <- optKeyOf "command" parseCommandArgv
   estimate <- optKeyOf "estimated_percent_per_solve_round" parseSolveRoundPercent
   pure (command, estimate)
-
-missionsConfigParser :: ParseTable Position MissionsConfig
-missionsConfigParser = do
-  notifications <- optKeyOf "notifications" (parseTableFromValue missionNotificationParser)
-  agentCeiling <- optKeyOf "agent_ceiling" parseAgentCeiling
-  pure
-    MissionsConfig
-      { missionsNotifications = fromMaybe defaultMissionNotificationConfig notifications,
-        missionsAgentCeiling = fromMaybe (MissionAgentCeiling defaultMissionAgentCeiling) agentCeiling
-      }
-
--- | @agent_ceiling@, classified rather than refused.
---
--- Every value parses, because the refusal belongs where the ceiling is
--- applied ('missionAgentCeilingRefusal'). A positive integer is a ceiling;
--- zero, a negative number, a fraction, and anything that is not a number at
--- all are recorded as written, so the refusal can name exactly what the file
--- says.
-parseAgentCeiling :: Value' l -> Matcher l MissionAgentCeiling
-parseAgentCeiling value = pure $ case value of
-  Integer' _ number
-    | number > 0 && number <= toInteger (maxBound :: Int) -> MissionAgentCeiling (fromInteger number)
-    | otherwise -> MissionAgentCeilingInvalid (Text.pack (show number))
-  Double' _ number -> MissionAgentCeilingInvalid (Text.pack (show number))
-  Text' _ text -> MissionAgentCeilingInvalid (Text.pack (show text))
-  Bool' _ flag -> MissionAgentCeilingInvalid (if flag then "true" else "false")
-  _ -> MissionAgentCeilingInvalid "not a number"
-
--- | Both keys of @[missions.notifications]@, each optional. A command with no
--- @enabled@ stays off, which is what lets one be written down and tried later;
--- an @enabled@ with no command is refused by 'missionNotificationRefusal' where
--- it is acted on rather than here, because only the scheduler reads it.
-missionNotificationParser :: ParseTable Position MissionNotificationConfig
-missionNotificationParser = do
-  enabled <- optKey "enabled"
-  command <- optKeyOf "command" parseNotificationArgv
-  pure
-    MissionNotificationConfig
-      { missionNotificationEnabled = fromMaybe False enabled,
-        missionNotificationCommand = command
-      }
-
-parseNotificationArgv :: Value' l -> Matcher l MissionNotificationCommand
-parseNotificationArgv value = do
-  UsageCommandConfig argv <- parseCommandArgv value
-  pure (MissionNotificationCommand argv)
 
 parseRepositories :: Value' Position -> Matcher Position (Map Text RepositoryOverride)
 parseRepositories = mapOf parseRepositoryKey (\_ value -> parseTableFromValue repositoryOverrideParser value)
@@ -826,7 +606,8 @@ repositoryOverrideParser = do
   limitsOverride <- optKeyOf "limits" (parseTableFromValue limitsOverrideParser)
   timeoutsOverride <- optKeyOf "timeouts" (parseTableFromValue timeoutsOverrideParser)
   checkoutPath <- optKeyOf "path" parseCheckoutPath
-  mapM_ forbidRepositoryKey ["cache", "remote_name", "usage", "missions"]
+  mapM_ forbidRepositoryKey ["cache", "remote_name", "usage"]
+  ignoreScriptOwnedKey "missions"
   pure
     RepositoryOverride
       { repositoryOverrideWorkflow = fromMaybe emptyWorkflowOverride workflowOverride,
@@ -865,6 +646,15 @@ forbidRepositoryKey key = do
 
 --------------------------------------------------------------------------------
 -- Value-level validation
+
+-- | A key @tools\/kanban_config.py@ owns and this application never reads.
+--
+-- Claimed without looking at its value, so the file loads exactly as it does
+-- for the scripts: whatever the value is, however the scripts would judge it,
+-- and wherever the key was documented, there is no refusal and no
+-- unknown-key warning. The key is dropped.
+ignoreScriptOwnedKey :: Text -> ParseTable Position ()
+ignoreScriptOwnedKey key = void (optKeyOf key (\_ -> pure ()))
 
 parseNonEmptyText :: Value' l -> Matcher l Text
 parseNonEmptyText value = do
@@ -920,24 +710,6 @@ parsePositiveTimeoutSeconds value = do
     else pure number
   where
     microsecondsPerSecond = 1000000 :: Int
-
--- | The bound one action worker's launch records, in whole seconds.
---
--- Validated against 'maximumWorkerDeadlineSeconds' rather than against the
--- microsecond conversion the provider timeouts are bounded by: this value is
--- never converted to microseconds, and a bound a watchdog would take years to
--- reach is not a bound. Zero and negative values are rejected by
--- 'parsePositiveBoundedInt' before the ceiling is asked about, so each of the
--- three ways of being invalid names itself.
-parseWorkerDeadlineSeconds :: Value' l -> Matcher l Int
-parseWorkerDeadlineSeconds value = do
-  number <- parsePositiveBoundedInt value
-  if number > maximumWorkerDeadlineSeconds
-    then
-      failAt
-        (valueAnn value)
-        ("must not exceed " <> show maximumWorkerDeadlineSeconds <> " seconds")
-    else pure number
 
 -- | The estimated percentage one solve round consumes: a whole percentage of
 -- a window, so anything outside 1 through 100 is a configuration error rather

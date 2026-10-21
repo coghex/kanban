@@ -33,16 +33,16 @@
                                 ▸ #701  Input routing             │ #833 Improve notification │                                       │ envelope in the snapshot… │
                                 hardening  0/1 complete           │ category defaults         │                                       │  reviewed:approve         │
                                 STANDALONE                        │  code-health              │                                       │  feature                  │
- ┏━━━━━━━━━━━━━━━━━━━┓          ╭───────────────────────────╮     │ @claude-agent · updated   │                                       │ #901 · agent-name →       │
- ┃ approve_issues.py ┃          │ #756 Define the           │     │ 4h ago                    │                                       │ master · updated 3h ago   │
- ┗━━━━━━━━━━━━━━━━━━━┛          │ persistence contract      │     │ Make the fresh-install    │                                       │ Reads the cache through   │
- off                            │  architecture             │     │ behavior explicit and     │                                       │ the versioned envelope    │
- ┏━━━━━━━━━━━━━━┓               │ unassigned · updated 4h   │     │ keep local state outside… │                                       │ and reports a truncated…  │
- ┃ drain_prs.py ┃               │ ago                       │     ╰───────────────────────────╯                                       │ ◐ CI 9/12 · behind        │
- ┗━━━━━━━━━━━━━━┛               │ Document root owners,     │                                                                         ╰───────────────────────────╯
- off                            │ snapshot barriers, and    │
+                                ╭───────────────────────────╮     │ @claude-agent · updated   │                                       │ #901 · agent-name →       │
+                                │ #756 Define the           │     │ 4h ago                    │                                       │ master · updated 3h ago   │
+                                │ persistence contract      │     │ Make the fresh-install    │                                       │ Reads the cache through   │
+                                │  architecture             │     │ behavior explicit and     │                                       │ the versioned envelope    │
+                                │ unassigned · updated 4h   │     │ keep local state outside… │                                       │ and reports a truncated…  │
+                                │ ago                       │     ╰───────────────────────────╯                                       │ ◐ CI 9/12 · behind        │
+                                │ Document root owners,     │                                                                         ╰───────────────────────────╯
+                                │ snapshot barriers, and    │
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  i attention  u update
+ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  u update  c sidebar  v
  board: updated 3h ago · history: current
  Cached GitHub snapshot loaded · press u to update
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

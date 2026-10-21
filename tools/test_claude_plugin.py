@@ -121,7 +121,6 @@ CODEX_ROSTER_READER = (
 )
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, which the coordinator's probe is held to.
-MANAGED_PATHS_HS = REPO_ROOT / "src" / "Kanban" / "ManagedPaths.hs"
 
 # The workflows Kanban's own dashboard used to spawn by name, kept as the
 # partition between them and the user- or daemon-invoked rest of the bundle.
@@ -540,26 +539,11 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
     -- and never a personal ~/work/approve-issues.py default."""
 
     def test_review_pr_matches_the_managed_record_resolution(self):
-        # Both sides read one document rather than each rebuilding a default,
-        # so what has to match is the record's location and the field in it.
-        managed_paths_source = MANAGED_PATHS_HS.read_text(encoding="utf-8")
-        self.assertIn(
-            "Library/Application Support/kanban/issue-review/config.json",
-            managed_paths_source,
-        )
-        # The default install directory is Python's to own; Haskell derives it
-        # from the record's own path instead of respelling it.
-        self.assertNotIn(
-            "Library/Application Support/kanban/issue-review/approve_issues.py",
-            managed_paths_source,
-        )
-        self.assertIn(
-            "/.local/share/kanban/issue-review/config.json", managed_paths_source
-        )
-
-        # Since issue #445 the coordinator probes both locations too, in the
-        # same order the managed-paths module does, so both spellings must be
-        # present in it.
+        # The coordinator reads the installer's document rather than rebuilding
+        # a default, so what has to match is the record's location and the
+        # field in it. Since issue #445 it probes both locations, in the same
+        # order tools/kanban_config.py does, so both spellings must be present
+        # in it.
         # Asserting only the macOS one would pass against a coordinator that
         # had lost half the probe, which is the half-blind gate that issue's
         # requirement 10 forbids.

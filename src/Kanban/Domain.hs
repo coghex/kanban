@@ -47,7 +47,6 @@ module Kanban.Domain
     itemId,
     itemLabelOverflow,
     itemLabels,
-    itemTitle,
     itemUpdatedAt,
     openWithoutHistory,
   )
@@ -499,30 +498,16 @@ data WorkflowConfig = WorkflowConfig
     -- that configures nothing gets ordinary chips rather than an invisible
     -- built-in set of names.
     problemStyleLabels :: Set Text,
-    uiStyleLabels :: Set Text,
-    -- | Case-sensitive, repository-relative coordination declarations — an
-    -- exact file path, or a directory ending in @/@ covering every descendant
-    -- by whole path component, never by glob or string prefix — whose content
-    -- is coordination rather than code: the PR drainer may merge a candidate
-    -- whose only distance from the default branch is a change to covered
-    -- paths. Nothing in the dashboard reads them, and they default to empty,
-    -- so a repository that configures nothing keeps today's behavior.
-    coordinationPaths :: Set Text,
-    -- | The separate direct-publication declaration carried by the shared
-    -- configuration schema. The dashboard does not publish documents, but it
-    -- must accept and preserve this key so every Haskell and Python consumer
-    -- resolves the same configuration without spurious unknown-key warnings.
-    -- It has the same path grammar and empty default as 'coordinationPaths',
-    -- but grants no drainer base-advance exception.
-    directPublicationPaths :: Set Text
+    uiStyleLabels :: Set Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable record written before the display-only
--- styling collections or either workflow-path collection existed still
--- decodes: a worker spec persisted a whole 'WorkflowConfig', and a legacy one
--- simply has no opinion about either, which is exactly the empty default.
+-- styling collections existed still decodes: a legacy one simply has no
+-- opinion about either, which is exactly the empty default. A record that
+-- still carries the workflow-path collections the scripts own decodes too,
+-- because the keys it has no field for are ignored.
 instance FromJSON WorkflowConfig where
   parseJSON = withObject "WorkflowConfig" $ \object ->
     WorkflowConfig
@@ -535,8 +520,6 @@ instance FromJSON WorkflowConfig where
       <*> object .: "blockingSeverity"
       <*> object .:? "problemStyleLabels" .!= Set.empty
       <*> object .:? "uiStyleLabels" .!= Set.empty
-      <*> object .:? "coordinationPaths" .!= Set.empty
-      <*> object .:? "directPublicationPaths" .!= Set.empty
 
 defaultWorkflowConfig :: WorkflowConfig
 defaultWorkflowConfig =
@@ -549,18 +532,12 @@ defaultWorkflowConfig =
       approvalMode = ApprovalByLabel,
       blockingSeverity = SeverityRed,
       problemStyleLabels = Set.empty,
-      uiStyleLabels = Set.empty,
-      coordinationPaths = Set.empty,
-      directPublicationPaths = Set.empty
+      uiStyleLabels = Set.empty
     }
 
 itemId :: BoardItem -> ItemId
 itemId (IssueItem issue) = IssueId issue.issueNumber
 itemId (PullRequestItem pullRequest) = PullRequestId pullRequest.pullRequestNumber
-
-itemTitle :: BoardItem -> Text
-itemTitle (IssueItem issue) = issue.issueTitle
-itemTitle (PullRequestItem pullRequest) = pullRequest.pullRequestTitle
 
 itemLabels :: BoardItem -> [Label]
 itemLabels (IssueItem issue) = issue.issueLabels

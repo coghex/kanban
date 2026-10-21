@@ -16,9 +16,6 @@ The dashboard combines:
   assignees, linked work, mergeability, and CI state.
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
-- Local status and start/stop control for the service-managed PR drainer, plus
-  a direct merge of one approved pull request through that drainer's own
-  single-pull-request path.
 - Hideable issue-review sessions backed by the canonical v2 reviewer, with
   interactive specification revision backed by Codex app-server.
 - Hideable, resumable issue-solve sessions backed by the selected canonical
@@ -30,9 +27,6 @@ the existing solve workflow, which may claim an issue and create a worktree,
 branch, and PR. Autosolve invokes the same ordinary solve workflow, then Kanban
 owns the bounded review/revision/rereview state machine and its label handoffs.
 Ordinary navigation and updates never mutate GitHub.
-Starting or stopping the configured PR drainer, and merging one approved
-pull request through that drainer's own single-pull-request path, are the
-other explicit mutations.
 
 ## 2. Goals
 
@@ -44,7 +38,7 @@ other explicit mutations.
   usable 256-color fallback.
 - Remain fully keyboard-operable; mouse support is limited to card selection,
   live-session opening, details dismissal, panel/column scrolling, and the
-  sidebar's update, issue approval, and PR drainer buttons.
+  sidebar's update button.
 - Perform one asynchronous unified board-and-usage update at startup, then block
   on terminal events while idle and redraw only after input, resize, provider
   completion, or an active review event.
@@ -64,10 +58,9 @@ other explicit mutations.
 - Drag-and-drop workflow mutation.
 - Direct board editing and drag/drop mutation. Review and solve workflows may
   perform their explicitly documented GitHub mutations.
-- Implementing a merge. Kanban decides only whether to invoke the PR drainer's
-  own single-pull-request path (`tools/drain_prs.py --pr`), which owns every
-  gate, the merge itself, and the post-merge cleanup; Kanban holds no second
-  copy of any of that, and merges nothing that path would refuse.
+- Implementing a merge. Kanban merges nothing: no board action starts a merge
+  and every GitHub request it makes is a read; the PR drainer under `tools/`
+  runs outside the application.
 - Multi-repository aggregation in one running board. Each invocation represents
   one repository selected by its path.
 - Concurrent dashboard processes for one GitHub repository. Dashboard mode holds
@@ -560,34 +553,17 @@ scrollable four-column board.
 ║ ┏━━━┓                    ║              ║              ║              ║              ║
 ║ ┃ ↻ ┃                    ║              ║              ║              ║              ║
 ║ ┗━━━┛                    ║              ║              ║              ║              ║
-║                          ║              ║              ║              ║              ║
-║ ┏━━━━━━━━━━━━━━━━━━━┓    ║              ║              ║              ║              ║
-║ ┃ approve_issues.py ┃    ║              ║              ║              ║              ║
-║ ┗━━━━━━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
-║ ┏━━━━━━━━━━━━━━┓         ║              ║              ║              ║              ║
-║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
-║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
 ╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  s search  F filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  a approvals  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/Down next  k/Up previous  x kill  h/l column  s search  F filter  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
-The two service controls sit at the foot of the sidebar as one stack, the
-issue approval service above the PR drainer, each drawing its own status detail
-line immediately beneath its box. In the no-agent operating mode the approval
-control is not drawn at all — `approve_issues.py` resolves `issue_gate` models
-and can do nothing with no provider loaded — leaving the drainer's control
-alone at the foot, and leaving no click target where the approval control's
-box would have been.
+The sidebar's foot holds one control, the `↻` update button, which starts the
+same update `u` does.
 
 Responsive behavior:
 
 - The sidebar is 28 columns by default and toggles with `c`. It draws one
-  provider block per loaded provider, so a single-agent install shows the one
-  it loads and no block for the account it never probes. In the no-agent
-  operating mode it keeps that width, its box, its ` USAGE ` heading, and both
-  the `↻` update and `drain_prs.py` controls with their click behavior
-  unchanged; the provider blocks and the `approve_issues.py` control are the
-  only things it drops.
+  provider block for each of Codex and Claude, then the `↻` update button.
 - Board columns have a readable minimum width rather than being compressed
   until their contents become useless. The initial minimum is 32 cells per
   column.
@@ -618,8 +594,8 @@ Responsive behavior:
   the keyboard answers, so it is the dashboard's one context-aware hotkey row
   rather than a fixed list of the board's keys.
 - While a search or the filter panel has the keyboard, the board's line is
-  replaced by that surface's own, because the board's line names `h`/`l`, `d`,
-  and the arrows for meanings neither surface gives them:
+  replaced by that surface's own, because the board's line names `h`/`l` and
+  the arrows for meanings neither surface gives them:
 
   ```text
   h/l/any letter type  backspace delete  ←/→ move search  ↑/↓ select  enter details  s/esc close
@@ -632,8 +608,7 @@ Responsive behavior:
 - An open overlay replaces it in the same way, and outranks a filter box or a
   search still focused underneath it. A card's details overlay and the help
   overlay name the bindings section 7 gives their scope; the settings,
-  process, incident, and solve-chooser overlays name the keys each answers
-  itself; and a live-agent overlay names what its focused session answers in
+  process, and solve-chooser overlays name the keys each answers itself; and a live-agent overlay names what its focused session answers in
   the mode that session is effectively in — insert or normal — so the row
   changes with the mode badge beside it. No overlay repeats those keys inside
   its own box: the row along the bottom of the terminal is where they are
@@ -647,8 +622,7 @@ Responsive behavior:
   notice occupied, exactly as an `Esc` dismissal does, with no other input or
   background event needed. A notice explicitly reporting an operation the
   application still tracks in progress — the startup load, a running board or
-  usage refresh, a PR-drainer or approval-service start or stop, a direct
-  merge, a quit settling its cleanup — stays for as long as that operation
+  usage refresh, a quit settling its cleanup — stays for as long as that operation
   does, and takes the ordinary ten seconds from the moment it settles; a
   composed notice is active while any of its fragments names such an
   operation. The startup line's diagnostics — an invalid cache, a settings
@@ -677,7 +651,7 @@ Responsive behavior:
   across several rows reserves all of them. On a terminal narrower or shorter
   than the windowed box, the fullscreen dimension is the windowed one, and a
   terminal too small for an overlay clips it exactly as it always has. Each
-  panel's one scrolling interior — a transcript, the process or incident list,
+  panel's one scrolling interior — a transcript, the process list,
   the settings roster — takes the rows the chrome around it leaves rather than
   a fixed count, so a taller box shows more of what is being scrolled and still
   scrolls the rest. Every overlay opens windowed, and the Codex/Claude solve
@@ -702,31 +676,12 @@ Initial bindings:
 | `w` | Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL |
 | `f` | Toggle the open overlay between its windowed box and fullscreen; with no overlay open the key does nothing |
 | `Esc` | Close an overlay or dismiss any notice early, ahead of its ten-second lifetime |
-| `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` or click | Update GitHub board data and both usage providers |
-| `a` or click | Start or stop the service-managed issue approval service |
-| `d` or click | Start or stop the service-managed PR drainer |
-| `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
 | `v` | Show or hide the body excerpt on every card, reflowing the columns and keeping the selection in view; titles, label chips, metadata, tracker context, diagnostics and pull-request status are unchanged, a card's details overlay still shows the whole body, and every launch starts at the configured `excerpt_lines` height |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
 | `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay |
-
-In the no-agent operating mode — a `models.toml` whose `agents` list loads no
-provider, and equally one that will not load at all — the binding that needs a
-provider leaves the screen: `a` is absent from the footer hint line, from a
-card's details overlay footer, and from the help overlay. It is still
-dispatched. Pressing it produces a notice naming the mode and the `agents` list
-that selects it, and nothing else happens: no overlay opens, no process is
-spawned, and the approval service is neither started nor stopped. That refusal
-is given ahead of the settled-history and completed-history answers below, so
-the reason on screen is the one that is actually true of the board. `u` still
-updates GitHub board data in this mode and spawns no usage provider — not at
-startup, not on the key, and not from the sidebar's `↻` — and every other
-binding in the table above behaves exactly as it does in the other two modes.
-The rows themselves are unchanged: this paragraph is what the mode changes,
-not the table.
 
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
@@ -767,21 +722,15 @@ Mouse interaction is intentionally complete but narrow:
   overlay already had: `f` puts the box back to windowed, `Esc` closes it, and
   the right click above still closes a card's details overlay. `q` from a
   card's details overlay or the help overlay still quits the dashboard exactly
-  as the table above states, and the incidents overlay answers no `q` and no
-  right click in either extent. The windowed outside-click gesture keeps the
+  as the table above states. The windowed outside-click gesture keeps the
   meaning stated above.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
-- The PR drainer button remains directly clickable.
-- Left-clicking the sidebar's `approve_issues.py` button, directly above the
-  drainer's, starts or stops the issue approval service exactly as `a` does.
-- Each of the three sidebar controls answers a plain left click and nothing
-  else: a middle, right, wheel, or modifier-carrying press over one is claimed
-  by nothing, and a live card search never retargets a press that lands on one.
 - Left-clicking the sidebar's `↻` update button starts the same update `u`
   does, and is inert when the sidebar is collapsed because no control is drawn.
-  The same collapse makes the other two controls unclickable for the same
-  reason.
+- The update button answers a plain left click and nothing else: a middle,
+  right, wheel, or modifier-carrying press over it is claimed by nothing, and a
+  live card search never retargets a press that lands on it.
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
@@ -913,10 +862,10 @@ column, clamped rather than wrapped like the ordinary board's column movement,
 so a press at the leftmost or rightmost column changes nothing at all: the query
 survives, the selection survives, and no notice is raised. The wheel never
 moves a search — over any column, searched or not, it scrolls that column and
-does nothing else — and the middle button keeps its existing no-op. The drainer
-button is not a column target at all: a left click on it starts or stops the
-drainer exactly as it does with no search open, moving neither the search nor
-the query.
+does nothing else — and the middle button keeps its existing no-op. The
+sidebar's update button is not a column target at all: a left click on it
+starts the update exactly as it does with no search open, moving neither the
+search nor the query.
 
 A move empties the query and draws the box at the top of the new target, which
 therefore shows all of its entries, and both headings return to the ordinary
@@ -1009,7 +958,7 @@ settled does an unfinished open generation put its own panel up.
 
 While either completed panel is up, every card key and every stale card, epic,
 or column mouse target resolves to no work at all, and the filter panel, the
-footer, help, options, refresh, the drainer, `Esc`, `q`, and `Ctrl-C` stay
+footer, help, options, refresh, `Esc`, `q`, and `Ctrl-C` stay
 exactly as usable as they were. The panel keeps the keyboard while it is up: no
 column is drawn, so a live search is unreachable and a panel that had handed
 focus to one takes it back — the box that put the blocker up is always the box
@@ -1214,9 +1163,8 @@ Kanban-reviewed issues. Kanban does not reconstruct where that backend was
 installed: it reads the absolute path out of the record the installer writes,
 whose own location `--install-dir` cannot move, so an installation made
 anywhere is found by a dashboard launched with no special environment. Which
-location that record is at is `Kanban.ManagedPaths`'s answer, the Haskell
-counterpart of `tools/kanban_config.py` and the one place either managed
-record's path is written down on this side: the XDG location
+location that record is at is `tools/kanban_config.py`'s answer, the one place a
+managed record's path is written down: the XDG location
 (`$XDG_DATA_HOME/kanban/issue-review`, `~/.local/share` when that variable is
 unset or empty) first and
 `~/Library/Application Support/kanban/issue-review` second, on both
@@ -1569,70 +1517,11 @@ The default is label-only, matching label-driven review workflows.
 
 ### Completed cards are read-only
 
-Every mutating action refuses a completed card with a read-only-history notice
-and launches nothing: review, solve, autosolve, rereview, merge, direct merge,
-and killing a working process. The refusal outranks the wrong-kind, approval,
-drainer-state, structural, reusable-session, and process-presence errors those
-actions would otherwise report, and is re-checked at each action's own launch
-or termination boundary, so a chooser, details overlay, or session opened
-before a refresh cannot act after the item completes. Details and the item URL
-remain readable, and `w` still opens that URL: it reaches the card without
-acting on the work behind it.
-
-Every route reaching those actions is covered, not only the board's own keys:
-a session overlay's Enter, numbered choice and Ctrl-C, and every row of the
-processes overlay — which is keyed by session rather than by card, and resolves
-a persistent worker's subject through the task it was created for. Termination
-is refused on the same terms as launch. An agent still running against work
-that settled underneath it is therefore stopped the way any other stray agent
-process is, rather than through a card that is now history.
-
-Live workflow behavior never observes completed data at all. The autosolve
-baseline and worker and session item resolution read the open generation
-whatever the criteria say, so checking `Closed` changes nothing about any of
-them.
-
-Explicit GitHub closing-issue relationships connect issue and PR cards for
-tracker inheritance, but never collapse the two cards into one. Title and
-branch-name guessing are not used.
-
-## 9. Pull-request readiness and outline colors
-
-Done cards enter the column with a yellow outline. They become green only when
-the current head is cleanly mergeable with the current base and CI has
-succeeded.
-
-Priority from strongest to weakest:
-
-1. Red: merge conflict.
-2. Red: failed, timed-out, cancelled, action-required, or startup-failed CI.
-3. Red or amber: explicit blocking state such as `reviewed:changes`; exact
-   severity is configurable, with red as the default.
-4. Yellow: approval exists but checks are pending, queued, or in progress.
-5. Yellow: approval exists but the branch is behind, non-mergeably blocked, or
-   GitHub is still calculating mergeability.
-6. Green: approval exists, the PR is cleanly mergeable/current (including a
-   `MERGEABLE` head reported `BLOCKED` only by repository policy and handled by
-   the configured admin drainer), and the latest unique checks are successful.
-   The latest unique checks are the rollup after §13's selection: checks from
-   a GitHub Actions workflow run that a newer run of the same workflow and
-   event replaced on the head do not count, and the rest are deduplicated to
-   their newest rerun. A cancelled check in a replaced run is not priority 2's
-   cancelled CI; one in the newest run is.
-7. Green: approval exists and the PR is cleanly mergeable/current when the
-   repository has no checks configured.
-
-The implementation uses GitHub's `mergeable`, `mergeStateStatus`, and
-`statusCheckRollup` fields. A `CONFLICTING` mergeability result is always red.
-`MERGEABLE` plus `BLOCKED` is rendered `protected`, distinguishing an
-admin-drainer-ready policy block from a conflict. An `UNKNOWN` result remains
-yellow until a later user-requested refresh; the application does not poll for
-GitHub's background mergeability calculation.
-
-An open PR without a linked issue remains in Reviewing or Done but receives an
-amber `UNLINKED` warning.
-
-## 10. Visual language
+The board has no action that acts on the work a card stands for, so a
+completed card is read-only by construction: it can be selected, searched, and
+opened, its details and item URL remain readable, and `w` still opens that URL.
+Nothing on the board launches, merges, or edits the work behind any card,
+settled or live.
 
 ### Borders
 
@@ -1890,141 +1779,14 @@ included — keeps resolving against the board the overlay was opened from, so a
 completed card's presentation still matches the view it was drawn in.
 
 The overlay presents this content without editing any of it. The board actions
-that reach the selected card — `r`, `S`, `A`, `x`, `m`, and `w` — dispatch from
-it as well, against the item it is showing.
+that reach the selected card — `w` — dispatch from it as well, against the
+item it is showing.
 
 ### Incidents panel
 
-`i` opens a panel answering one question — what needs me? — from every source
-that can raise it, and takes the user to the work. `Esc` closes it. It is
-scrollable, keyboard-navigable, and mouse-selectable in the style of the
-processes overlay, and it is read-only: opening or activating an entry never
-resolves, dismisses, acknowledges, retries, or otherwise mutates an incident,
-a session, or GitHub state.
-
-Two sources contribute initially, and the list is written against a set of
-sources rather than against those two, so a later one is added by contributing
-rows and a label:
-
-- every repository-scoped open incident the PR drainer reports;
-- Kanban's own live agent sessions in the phases that need a human. Those are
-  exactly `SolveAttention`, `SolveFailedPhase`, `SolveKilledPhase`, and
-  `SolveOrphanedPhase` for solve and pull-request sessions, and `ReviewWaiting`,
-  `ReviewNeedsChanges`, and `ReviewFailed` for review sessions. Every other
-  phase is excluded, including the active and completed ones,
-  `ReviewRevised`, and `ReviewInterrupted`. These lists are the contract:
-  they are not derived from the narrower sets `reviewPhaseActive` and
-  `agentSessionProblem` express, which answer different questions.
-
-Source availability is represented separately from an empty result, so
-"nothing needs attention" is never said out of this side's ignorance:
-
-- Only a successful drainer observation reporting no open incidents is a
-  verified-empty source.
-- The initial checking state, a controller discovery failure, a query or
-  decode failure, and a start or stop in flight all leave the source
-  unanswered. The panel then says it is being checked or is unavailable, and
-  the overall empty state is withheld.
-- Session rows stay visible whichever of those the drainer source is in.
-- The overall empty state appears only when the drainer has successfully
-  reported no incidents and no session qualifies.
-
-The controller's status response therefore reports the complete
-repository-scoped set of open incidents alongside the existing newest-only
-`open_incident` projection, which the sidebar keeps using unchanged. A
-response carrying no set at all is an unanswered source, not an empty one.
-
-Each row states what it concerns — the issue or pull-request number, with its
-title where the board knows it — what happened, and which source it came
-from. Every title, summary, activity, source label, and recorded failure
-passes through the external-text sanitization contract above before it is
-rendered or reported.
-
-A drainer row states what happened from the fields its kind is defined to
-carry, and from those only:
-
-- a supervisor crash adds the last activity it recorded and the last pull
-  request its log mentioned, marked as diagnostic rather than a navigation
-  target;
-- a post-merge cleanup incident adds the failure the drainer recorded on the
-  pass that last kept the cleanup from finishing — the blocker, and the action
-  that clears it wherever the recorded refusal names one — so the panel says
-  why the step is stuck and not only which step it is. The text comes from the
-  incident document the status response already carries, at no extra
-  controller invocation or polling cost.
-
-A recorded failure is stated on its own continuation lines beneath the row,
-not on the row itself. A cleanup summary already fills the panel's width
-alone, so on the row this text would be elided away before its first word,
-and a blocker and a remedy the operator can never read are not stated at all.
-The continuation is sanitized, collapsed to one logical line, then wrapped to
-the width the panel has, indented and marked so it reads as belonging to the
-row above. It is part of that row's clickable region, so clicking it selects
-the incident it belongs to, and selection and activation still resolve by
-incident identity rather than by any line count.
-
-It is bounded in height as well as width — the panel's rows are shared, so a
-runaway failure cannot push other incidents out of the panel. What a bound
-gives up is the *middle*, never the tail: the recorded value opens by
-restating the failing step around the checkout's absolute path and closes
-with the blocker, the remedy, and the paths to act on, so trimming the end
-would discard exactly what the operator needs and would do so more surely the
-deeper the checkout. Both ends are kept and the gap between them carries a
-visible ellipsis. A
-recorded failure that is absent, empty, whitespace-only, or emptied by
-sanitization adds nothing — no line, no separator, no placeholder — and a row
-of any other kind is unchanged whatever its document carries.
-
-A row is measured against the width the overlay gives it rather than the
-terminal's. Windowed that is the panel's own fixed box, and fullscreen
-(section 6) it is the terminal less the frame column on each side, so the same
-row can be elided in one extent and whole in the other. A row longer than the
-panel it is drawn in is elided with a visible ellipsis at whichever of those
-two widths applies, never cropped silently: §11's promise that an ellipsis
-appears wherever text was dropped holds for a row whatever made it long — a
-recorded failure, a long title, or a summary that already overran the panel on
-its own.
-
-The one notification the drainer publishes when it opens a cleanup incident
-carries that same recorded failure, and says the incident clears once any
-operator action the failure calls for is done and every outstanding step
-succeeds. Later passes refresh the open incident's recorded failure in place
-without publishing a second notification.
-
-Rows carry stable source-qualified identities: the service-provided incident
-ID for a drainer row, the existing agent session reference for a session row.
-Selection and activation resolve those identities against the current list, so
-a refresh that inserts, removes, or reorders rows cannot redirect a keyboard
-or mouse action to a different incident. A row whose identity disappears
-before activation activates nothing: the highlight may clamp onto a neighbour
-so the panel stays usable, but that neighbour is never acted on in its place.
-
-Activating a row closes the panel and:
-
-- selects its connected board work when the entry names authoritative issue or
-  pull-request work present on the current board;
-- additionally opens that work's session overlay when Kanban holds a session
-  for it;
-- when the numbered work is absent from the board — closed since, or never on
-  it — leaves the current column, row, and tracker expansion unchanged, reports
-  that the work is not on the board, and still opens the referenced session
-  overlay if there is one.
-
-Number-based selection recognizes every shape the board holds work in:
-ordinary issue and pull-request entries; a childless tracker, whose header
-entry is its issue; a tracker represented by grouped children, which has no
-card of its own and is targeted through its group's header row; and a child
-beneath a collapsed tracker, which is selected with its tracker expanded so
-the selected work is visible.
-
-A supervisor-crash incident is cardless: it carries no authoritative
-`pull_request` field. Its `last_pr` is inferred from a log line and is
-diagnostic only, never a navigation target. Activating one reports its
-summary and leaves board selection and tracker expansion unchanged. Its row
-is rendered from the diagnostic fields the service really records — which are
-not just an exit code and a command, but also the last activity, log
-metadata, and that non-navigable `last_pr` — so a cardless row still says
-enough to act on.
+The dashboard has no incidents panel and no `i` binding. The PR drainer and the
+issue approval service are run, watched, and stopped from the command line, and
+the board neither polls them nor lists what they report.
 
 ## 12. Epic and tracker grouping
 
@@ -3274,41 +3036,31 @@ above are unchanged, and persistence the user switched off is not a failure.
   `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
   unset, empty, or not absolute) on every other platform, resolved for every
   Python component by one module and probed XDG-first so an installation made
-  under either spelling is found where it already is. The dashboard resolves
-  it the same way, through `Kanban.ManagedPaths`, which is that module's
-  Haskell counterpart and probes the same two locations in the same order for
-  both managed records, so a Linux host discovers an XDG-installed drainer
-  from the board exactly as the controller does. Its
+  under either spelling is found where it already is. Its
   `repositories` table holds one entry per installed repository naming the
   backend that wrote it, that job's identifier, the definition's absolute path,
-  and the installed checkout.
-  Kanban derives none of those: it selects the entry by its own normalized
-  repository identity, reads the definition's path from that entry, and reads
-  the controller command from the definition — `ProgramArguments` from a plist,
-  `ExecStart` from a unit file — which stays authoritative for what the service
-  manager
-  runs. That entry is a discriminated union on its `backend`, and an entry
-  naming none is the shape written before that field existed, so it is read as
-  launchd and a macOS drainer installed before this keeps working with no
-  reinstall and no manual edit. Each way that lookup can fail — a host with no
-  supported service manager, no document,
-  no entry for this repository, an entry that does not name a job, an entry
-  whose backend is unknown or whose keys mix the two, an entry describing the
-  manager this host does not have, or a definition
-  that cannot be read — is reported as its own status naming the remediation,
-  never as a raw exception. Discovery then reads its
-  wrapper's JSON status every ten seconds, and never contacts a network. Start
-  and stop operations run asynchronously and expose transitional UI state.
-  Every controller call includes both the dashboard's resolved repository root
-  and its repository identity; the controller resolves the checkout's own
-  remote and refuses any identity but that one — including another remote of
-  the same checkout, since a fork's upstream is a different canonical
-  repository. Neither `--repo OWNER/NAME` nor a `--config` naming another
-  remote can therefore select or create another repository's drainer, or make
-  the dashboard act on this checkout's job while reporting a different
-  repository. The refusal names the shared configuration's `remote_name`, and
-  re-running the installer, as what moves the dashboard and the drainer
-  together.
+  and the installed checkout. The controller selects the entry by the
+  repository's normalized identity, reads the definition's path from that
+  entry, and reads the controller command from the definition —
+  `ProgramArguments` from a plist, `ExecStart` from a unit file — which stays
+  authoritative for what the service manager runs. That entry is a
+  discriminated union on its `backend`, and an entry naming none is the shape
+  written before that field existed, so it is read as launchd and a macOS
+  drainer installed before this keeps working with no reinstall and no manual
+  edit. Each way that lookup can fail — a host with no supported service
+  manager, no document, no entry for this repository, an entry that does not
+  name a job, an entry whose backend is unknown or whose keys mix the two, an
+  entry describing the manager this host does not have, or a definition that
+  cannot be read — is reported as its own status naming the remediation, never
+  as a raw exception. Every controller call includes both a repository root
+  and a repository identity; the controller resolves the checkout's own remote
+  and refuses any identity but that one — including another remote of the same
+  checkout, since a fork's upstream is a different canonical repository.
+  Neither `--repo OWNER/NAME` nor a `--config` naming another remote can
+  therefore select or create another repository's drainer. The refusal names
+  the shared configuration's `remote_name`, and re-running the installer, as
+  what moves the caller and the drainer together. The application itself
+  neither discovers nor drives the job.
 - The installed definition records the identity its identifier was derived
   from, and the
   managed runner is held to it by the same check. A definition outlives the
@@ -3414,22 +3166,16 @@ above are unchanged, and persistence the user switched off is not a failure.
   enumerated or parsed, with one collection's failure leaving the other and
   every other status field intact. Reading both is strictly read-only and
   cannot fail a status call: no ref, stash entry, stash ordering, queue state,
-  or sweep behavior changes, and neither does what any caller of status —
-  including the polling a start or stop does — goes on to report.
-- The sidebar folds that projection into its single drainer detail line as a
-  clause counting the pull requests that owe, on every state that can carry
-  debt. Unknown renders nothing, so a controller predating the projection looks
-  exactly as it did. Debt alone changes neither the drainer's color nor the
-  incidents panel: obligations under retry are ordinary behavior, and
-  escalating them stays the open incident's job.
+  or sweep behavior changes, and neither does what any caller of status goes
+  on to report.
 - An intentional stop discharges what it can of that debt before it completes.
   The drainer holds the repository run lock for its whole lifetime, so the stop
   is the last moment anything can work these obligations before the next start,
   and it spends a bounded slice of its shutdown doing so — only obligations
   already recorded, never a new merge, branch update, rereview, or
   pull-request read. The budget is small enough that the whole transition —
-  signal, final pass, and confirmed exit — still fits inside the timeout `d`
-  gives a controller invocation, and an obligation that wedges is left
+  signal, final pass, and confirmed exit — still fits inside the timeout a
+  controller invocation is given, and an obligation that wedges is left
   outstanding rather than holding the stop open past it. What the pass does not
   discharge stays recorded, stays in the projection above, and stays under
   whatever incident it raised; what the pass finishes resolves that incident on
@@ -3455,99 +3201,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   meets anything other than an outage — authentication, permission, a
   certificate, a malformed answer — ends the wait for the ordinary failure
   handling. The controller reports the state as `offline` only while the live
-  drainer child is the one that said so, and the sidebar renders it as its own
-  state, `offline · waiting for network`, in the pending color, beside any
-  incident and the debt clause. Offline is running for `d`, so the toggle
-  stops it and a start is a no-op; a stop while offline skips the final
-  cleanup pass above, since every obligation needs the network, and leaves the
-  debt recorded for a connected run. An outage raises no incident.
-- A controller invocation runs as its own process group, and ownership of that
-  group is established while the controller is known alive rather than at
-  cleanup time, so a timeout can terminate what the controller started even
-  after the controller itself has exited. Structured status on standard output
-  is decoded even when the controller exits nonzero, so a state reported
-  through a failing exit keeps its incident detail. An invocation that outlives
-  its timeout is terminated as a group and confirmed gone before anything is
-  reported; a start or stop killed mid-transition is reported as an unknown
-  outcome the next status poll reconciles, and a termination that could not be
-  confirmed is reported as such instead.
-- A start is issued only from a settled stopped state. A transition already in
-  flight — this dashboard's own, or a `starting` state reported by the status
-  poll — makes `d` and the drainer button report the transition rather than
-  command a second one.
-- `m`, on the board and on the details overlay alike, merges the selected
-  approved pull request by running the drainer's own single-pull-request path
-  (`tools/drain_prs.py --pr`) once. Kanban contains no second implementation of
-  the merge, its gates, or its cleanup: the invoked path re-reads every gate
-  immediately before merging, matches the head against the approved head,
-  performs the admin merge and its post-merge audit, and closes the linked
-  issue, removes the worktree, deletes the head branch, and fast-forwards the
-  default branch. The invocation carries the dashboard's own resolved checkout,
-  its repository identity as `--repo OWNER/NAME`, the selected pull-request
-  number, and the active absolute `--config` when one is set; the drainer
-  compares that identity against the checkout's remote and refuses a mismatch,
-  so neither a `kanban --repo` nor a `kanban --config` override can merge
-  another repository's pull request.
-- That script is resolved from the Kanban-managed drainer install directory:
-  `KANBAN_DRAINER_INSTALL_DIR` first, then the directory the discovered service
-  definition runs its controller from — which is what keeps an install made
-  with `--install-dir` usable by a dashboard that inherited no environment from
-  the installer — and otherwise the directory holding the discovery record. A
-  source that is present but resolves to no directory, such as a relative
-  override or a definition that does not name its controller absolutely, fails
-  there
-  rather than falling through to the next: falling through would merge with an
-  installation other than the configured one and report nothing unusual. A
-  missing installation reports a remediation naming
-  `tools/install_drainer.py` and the directory that was actually consulted.
-- The decision `m` makes is total in the selection and the last reported
-  drainer state, and is taken in a fixed order. A selection that is not an
-  approved pull request in Done — `classifyPullRequest`'s own verdict, not a
-  second reading of the same labels — is refused first, naming what was
-  selected. A direct merge this dashboard already started is refused next,
-  naming the pull request still running, so a repeated key press starts no
-  second process. An unresolved incident then outranks every service state and
-  is refused with its summary. Only a service *known* to be stopped may launch:
-  running, offline, starting, stopping, a drainer running outside the service manager
-  the controller reported, a checkout
-  stopped part-way through a git operation, and a state that could not be
-  established at all — including one no status was ever obtained for — all
-  refuse without invoking anything.
-- A result is believed only once it is established to be the promised
-  document for the pull request that was asked about: the `drain-prs-single-pr`
-  schema, a version this Kanban reads, that pull-request number, a known
-  outcome, and an outcome that does not contradict the merge flag or a dry run.
-  Anything else — including a document carrying the outcome fields under
-  another schema or version — is refused with a remediation naming the
-  installer, because the resolver runs whatever is installed at the selected
-  path and a merge is both reported to the user and acted on by refetching the
-  board.
-- The run is asynchronous and unbounded, since its work is irreversible partway
-  through and a deadline that killed it would abandon a merge already committed
-  on GitHub. Its result updates only that action's notice and pending state,
-  never the drainer status area, which reflects the service this ran instead
-  of. The reason the run reported is presented as it wrote it, after the
-  external-text sanitization in section 11, rather than replaced by a generic
-  message; a merge that landed and then failed its audit or left cleanup
-  outstanding is reported as merged *and* as unfinished. Any result that says
-  the pull request merged requires a GitHub refresh that begins after that
-  result: when a fetch is already in flight the request is queued rather than
-  dropped, because that fetch may have read GitHub before the merge landed.
-- A landed merge's result stays in front of the user across that refresh
-  rather than being replaced by it. The result is the only report an
-  irreversible action gets — and the merged-but-unfinished case is reported
-  nowhere else — so the refresh the same result requires must not be what
-  removes it from the screen. It is carried in front of the refresh's own
-  notices and dropped once the required refresh has actually published, not
-  once whichever fetch happened to be in flight did. While the composed line
-  reports that refresh as running it is an active notice and does not expire;
-  once the refresh settles, the settled result receives the ordinary
-  ten-second lifetime. The carry is keyed to the notice instance it last
-  wrote — never to the text, which a later notice could repeat — so every way
-  a notice ends — `Esc`, an overlay opening, a moved selection, another
-  action reporting, or the ten-second expiry — also ends the result behind
-  it, and a dismissed or expired merge report can never be recreated by the
-  refresh it required.
+  drainer child is the one that said so. Offline is running, so a start is a
+  no-op; a stop while offline skips the final cleanup pass above, since every
+  obligation needs the network, and leaves the debt recorded for a connected
+  run. An outage raises no incident.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links in
   that same resolved directory — unless `--install-dir` or
@@ -3721,144 +3378,6 @@ above are unchanged, and persistence the user switched off is not a failure.
   its definition deleted, and its one entry dropped from the discovery record,
   leaving every other repository's install, the shared links, and this
   repository's own runtime state, logs and incidents untouched.
-- Kanban also discovers, monitors, and controls the persistent per-repository
-  issue approval service. It is a separate job from the PR drainer, with its own
-  installer, its own `issue-approval` namespace, its own discovery record at
-  `~/Library/Application Support/kanban/issue-approval/config.json`, its own
-  locks, and its own status and incident types. The two share no state: each
-  service's last observation, incident set, and in-flight transition are held
-  separately, so neither can overwrite the other's, and neither controller owns
-  the other's process. What they do share is the bounded, process-grouped
-  invocation both drive their controllers through.
-- That record's `repositories` table is a discriminated union on `backend` in
-  the shape the drainer's is, but an entry naming no backend is refused rather
-  than read as launchd: this service's installer has written the discriminator
-  since its first release, so an entry without one was not written by it. Kanban
-  selects the entry by its own case-folded repository identity, reads the
-  definition's path from it, and reads the controller command from the
-  definition itself — `ProgramArguments` from a plist, `ExecStart` from a unit
-  file — dropping the definition's own `run` subcommand and any `--path` or
-  `--repo` it carries, then rebinding both to this dashboard's checkout and
-  identity. Which hosts have a service at all is decided by probing capability
-  rather than by reading a platform name — macOS with `launchctl`, otherwise a
-  `systemctl` whose `--user` manager answers a version read — the same question
-  the installer's own backend selection asks, so a Linux container or a
-  logged-out session with no reachable user manager is refused by both. Such a
-  host is reported as its own condition, unsupported and offering no control,
-  rather than as a missing installation or as a stopped service; every other
-  failure names `tools/install_issue_approval.py` as the repair.
-- The controller's status document is decoded against a pinned schema and
-  version and against the board's own repository identity. Each state it
-  publishes — checking/starting, healthy running, ordered barrier, intentional
-  stop, child failure, and controller failure — decodes to its own distinct
-  value, and an absent, unreadable, wrongly versioned, foreign, or unrecognized
-  document decodes to an explicit unknown naming what was wrong. Unknown is
-  never "off": nothing that may act only against a settled stop acts on it.
-- The ordered barrier is read from the controller's durable barrier record
-  rather than from its live state, so it survives an intentional stop and a
-  restart, and a `running` document that still names one is reported as
-  barriered. It is warning severity naming its issue —
-  `on · unresolved incident · Issue #N requests changes` while the service is
-  on, and the drainer's red `stopped · unresolved incident · <summary>`
-  composition once it is stopped — rather than a process failure. The stopped
-  activity and the open warning are both kept; neither is flattened into the
-  other, and a barrier whose warning was acknowledged is still reported from
-  the record.
-- The approval service is polled on the same ten-second cadence as the drainer,
-  which doubles the idle controller-poll cost recorded above on a machine where
-  both are installed. Start and stop are controller operations run
-  asynchronously, with an optimistic `starting…`/`stopping…` state held only
-  until an authoritative observation returns and a busy flag that refuses a
-  second concurrent toggle. Every invocation is bounded by a timeout and runs as
-  the leader of its own process group, which is terminated and confirmed empty
-  when that timeout expires. An authoritative poll or completion clears the busy
-  flag and supersedes the optimistic state; a failed poll during a transition
-  changes nothing; and a failed transition clears the busy flag, so control can
-  never stay permanently refused. A completion applies only while the optimistic
-  transition it belongs to still stands: another press supersedes it by starting
-  a newer transition, and an authoritative poll supersedes it by settling the
-  one it belongs to. Either way it is discarded rather than partly applied,
-  because the busy flag it would have cleared is already clear and the status it
-  would have written is older than the one it would replace — which is how a
-  newly polled barrier would otherwise be overwritten by the answer the
-  transition itself returned.
-- Ordering between the two is established rather than assumed, in two steps,
-  because neither alone is enough. Each poll carries the transition count read
-  immediately before its controller query was issued, and a poll stamped with an
-  older count is discarded: its query began before a press, so it describes the
-  service as it was beforehand. That establishes only that a poll began after
-  the press, though, not that it began after the *command* the press handed off
-  — which runs in its own thread and takes time to have any effect. So the
-  content decides the rest: while a transition is in flight, a start is settled
-  only by an observation of a service that is up and a stop only by one of a
-  service that is down. Anything else leaves the optimistic state standing.
-  Without both, a poll issued in the gap between the press and the service
-  moving would clear the busy flag on a reading of the state the press is about
-  to change, and the real completion would then be discarded as late — leaving
-  the board reporting off while the service runs. The completion arrives whether
-  the command succeeded or failed, so nothing here can leave control refused
-  forever.
-- An observation this dashboard cannot vouch for is forgotten rather than kept.
-  A failed poll outside a transition, and a failed transition, both drop the
-  cached observation along with the status, because the canonical-review
-  interlock reads that observation: a last reading that happened to carry a live
-  backend pass would otherwise go on refusing card reviews indefinitely on the
-  strength of something this side has just disowned.
-- While the service owns a live canonical review, a competing canonical stage
-  started from a card is refused with a notice to wait for it or stop the
-  service — including for the same issue, since the service reviews in numeric
-  order and cannot be asked to skip to one. "Owns a live review" is the live
-  backend child, not the service being switched on: the controller sleeps
-  between passes with no child at all, so an enabled but idle service refuses
-  nothing. A barriered service refuses nothing either, even while it does have a
-  child, because at a barrier that child is the read-only gate check, so the
-  selected card's revision and the rereview after it stay available. A revision
-  is never refused at all, since it runs the interactive coordinator and
-  performs no canonical backend review.
-- That refusal is asked three times, and the third is the one that matters. The
-  press and the spawn decision both read the board's newest observation, which
-  is up to a whole poll interval old. The launch then asks the controller
-  directly, from the thread that would start the competing child — and it asks
-  *after* that launch's preflight rather than before it, because the preflight
-  runs several probes and the service can take the backend's lock while they do.
-  Directly before the spawn is the only position a reading of live state cannot
-  go stale before the thing it guards. All three fail open on a service that
-  cannot be read or is not installed, since none of them is what makes
-  concurrent work safe: the backend's own approval lock remains the
-  cross-process authority, and these exist so an operator is told to wait rather
-  than watching a review queue behind one they cannot see.
-- A service result that may have changed GitHub requires a board refresh, queued
-  behind a fetch already in flight rather than dropped. The result is identified
-  by the controller's own count of the passes that may have changed GitHub,
-  published in the status document beside the identity of the run that counted
-  them — the run's own identity, not its start stamp, because that stamp is
-  second-granular and a controller that died and restarted inside one second
-  would publish the same one, making two runs that each mutated once look like
-  a single run that mutated once. That count
-  is the only trace of a mutation a poller can rely on. Every other one is
-  transient: the last outcome is overwritten by the pass after it, the child PID
-  is cleared when that child exits, and the stamp resolves only to a second — so
-  an advancing pass followed promptly by an idle one leaves a document saying
-  nothing happened, however often the dashboard looks. A count that only rises
-  survives any sampling rate, any difference in it is exactly the mutations
-  still owed a refresh, and several mutations observed at once collapse into the
-  one fetch that sees all of them. A fresh run starts the count again, which is
-  why the run is carried beside it.
-- Two states are read ahead of that count rather than through it, because both
-  are durable and neither is something a count summarises: entering the ordered
-  barrier, and entering a failure. A poll cannot miss either however coarsely it
-  samples, and each is entered once.
-- A controller that publishes no count — one predating it — falls back to
-  reading those transient fields, which is the best a reader can do alone: it
-  catches a mutating pass while the pass after it is still running, and a stop
-  that landed on top of one. That fallback is why the count is additive rather
-  than required. The dashboard's very first observation is
-  judged by those same rules rather than taken as a silent baseline: the startup
-  fetch and the first poll are started concurrently, so a review published after
-  that fetch read GitHub and before the first poll answered falls between them,
-  and no later observation repairs it once the documents stop changing. The
-  refresh never disturbs the service's own status: the durable warning or error
-  it reported is what still stands after it.
 - The unattended mission runner is the third managed service, installed the same
   way and discovered on the same terms, and read on them too — but with none of
   the dashboard *lifecycle* above: no optimistic transition state, no busy
@@ -3971,11 +3490,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   neither is occupied. Occupied means anything at all at that path, a directory
   or a link that cannot be followed included, and a record this installer cannot
   safely write is refused by name rather than replaced or resolved to the other
-  location. `Kanban.ManagedPaths` answers that question for the dashboard in the
-  same order, under the same absolute-only rule, and off the same account home —
-  the passwd database's rather than `$HOME`'s, which among the three managed
-  components is this one's alone — and that is what keeps the two
-  halves of a host from disagreeing about which installation it has. The
+  location. The
   per-repository log directories are under `~/Library/Logs/kanban/mission-runner`
   on macOS and `$XDG_STATE_HOME/kanban/mission-runner` (`~/.local/state` on the
   same terms) elsewhere. `--install-dir` and
@@ -3992,13 +3507,10 @@ above are unchanged, and persistence the user switched off is not a failure.
 - The UI redraws after a key event, terminal focus event, resize, provider
   result, active review event/spinner tick, notice expiry, or explicit terminal
   repaint.
-- There are no periodic network or Git polls. The only recurring timers are
-  the two ten-second local service status checks — the PR drainer's and the
-  issue approval service's — plus one local one-shot timer per settled
+- There are no periodic network or Git polls, and the dashboard polls no local
+  service either. The only timer is one local one-shot timer per settled
   notice, which delivers that notice's ten-second expiry (section 6) as an
   ordinary application event and triggers the redraw that reclaims its rows.
-  The mission runner is the third managed service and adds no third check: its
-  reader is driven by whoever calls it and owns no cadence of its own.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,
@@ -4626,54 +4138,37 @@ Configurable repository semantics include:
 - Blocked labels, default including `blocked`.
 - Tracker labels, default including `epic`.
 - Problem-styled and UI-styled label-chip names, both default empty.
-- Coordination paths, default empty. Case-sensitive, repository-relative
-  declarations — an exact file path, or a directory ending in `/` that covers
-  every descendant by whole path component, never by glob or string prefix,
-  with a rename counting both of its endpoints — whose content coordinates the
-  pipeline rather than building it. The PR drainer reads them, and only to
-  decide whether a default-branch advance that touches nothing else has to be
-  merged into a candidate before that candidate's own gates are evaluated
-  (`docs/pr-drainer.md`). Nothing in the dashboard reads them, and the empty
-  default leaves every repository behaving as it did before the key existed.
 - Additional tracker-section headings.
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.
 - Card excerpt line count, default 3.
-- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s, and the
-  deliberate-ping bounds `ping_codex_seconds` and `ping_claude_seconds`, both
-  120 s (section 14). The GitHub timeout bounds one page of a traversal — open
-  or completed — rather than the whole of either (section 13). Each of those
-  five is a positive whole number of seconds, small enough to convert to
-  microseconds without overflowing, because each of them is consulted at the
-  moment the request it bounds is made, and each inherits globally or per
-  repository on the same terms.
-- The action-worker deadline `worker_deadline_seconds`, default 14400 (four
-  hours), in the same `[timeouts]` table and inheriting on those same terms.
-  Unlike the five above it bounds no request this process makes: it is
-  resolved once at a launch and recorded in that worker's own durable
-  specification, so every action worker — solve, pull-request, issue-host,
-  issue-action, and every registry-dispatched worker — carries the value its
-  launch was configured with. Its accepted range is therefore not the
-  microsecond ceiling but 1 through one documented maximum of 604800 seconds
-  (seven days); zero, a negative value, and anything above that maximum are
-  configuration errors naming the full key path, since a bound no watchdog
-  would reach is not a bound. A worker already running is never re-resolved:
-  recovery and reattachment read the value its specification recorded,
-  whatever the configuration says by then.
+- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, and Claude 45 s. The
+  GitHub timeout bounds one page of a traversal — open or completed — rather
+  than the whole of either (section 13). Each of those three is a positive
+  whole number of seconds, small enough to convert to microseconds without
+  overflowing, because each of them is consulted at the moment the request it
+  bounds is made, and each inherits globally or per repository on the same
+  terms.
 - External usage provider commands (section 14).
 - The per-provider solve-round estimate `estimated_percent_per_solve_round`
   (section 14), a whole percentage from 1 through 100 with no default. It is a
   sibling of that provider's `command` rather than part of it, and like the
   rest of `[usage]` it is global only — a repository table cannot override it.
-- The mission agent ceiling `[missions] agent_ceiling`, default 2: how many
-  mission-dispatched agents may be live at once for one repository (section
-  5's `--mission-scheduler`). Like the rest of `[missions]` it is global only.
-  Every value is read, and one that is not a positive whole number — zero, a
-  negative number, a fraction, text, a boolean — is refused by name where it
-  is applied rather than while the file is read: the scheduler refuses the
-  pass, and a mission step refuses to start an agent. A dashboard and a usage
-  query read the same file and consult nothing here, so a load-time error would
-  take the repository away from them over a setting only missions use.
+- Keys the scripts own. `tools/kanban_config.py` reads keys the application
+  does not: the `[missions]` tables (`agent_ceiling` and `[missions.notifications]`),
+  the deliberate-ping bounds `ping_codex_seconds` and `ping_claude_seconds`, the
+  action-worker deadline `worker_deadline_seconds`, and the PR drainer's
+  `coordination_paths` and `direct_publication_paths`. The application accepts
+  each in every position it was documented — `missions` at the top level and
+  inside a `[repositories."owner/name"]` table, the three timeouts in
+  `[timeouts]` globally and per repository, and the two path keys in
+  `[workflow]` globally and per repository — whatever its value, including a
+  value the scripts would refuse and a value of another type, and drops it: no
+  refusal, no unknown-key warning, and no effect on any setting the
+  application does read. Only the key names are claimed; a misspelling of one
+  is still reported as an unknown key, malformed TOML is still an error, and
+  the application's own keys keep their validation. `models.toml` is not read
+  by the application at all.
 
 ## 17. Error presentation
 
@@ -4909,16 +4404,14 @@ and uncapped on every refresh, with no display limit and no repository snapshot
 on disk. Checklist-based tracker hierarchy, inherited PR membership, tracker
 progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
-valid membership and standalone fallbacks. The sidebar also controls and
-monitors the local service-managed PR drainer, which runs as a launchd job on
-macOS and a systemd user unit on Linux, and which now waits out a network
+valid membership and standalone fallbacks. The dashboard no longer controls or
+monitors the PR drainer or the issue approval service: their sidebar controls, the `i`, `a`, `d`, and `m` bindings,
+the incidents panel, and the direct merge were removed, and the application
+ignores the configuration keys those scripts own (section 16). Both services
+are installed, started, and stopped from `tools/`; the drainer runs as a
+launchd job on macOS and a systemd user unit on Linux, and waits out a network
 outage in a live `offline` state — one connectivity check a minute, no drain
-work, no incident — instead of exiting on it. The persistent per-repository issue
-approval service now has the same dashboard lifecycle — discovery, status and
-incident decoding, the durable ordered barrier, the start/stop seam, the
-canonical-review interlock, and the board refresh a result requires — and the
-sidebar reaches that seam through an `approve_issues.py` control drawn directly
-above the drainer's, which `a` and a plain left click both press. Native GitHub
+work, no incident — instead of exiting on it. Native GitHub
 sub-issue membership, canonical v2 issue-review sessions, embedded revision
 questions, and the first resumable issue-solve flow are implemented. Issue
 review, rereview, and revision are now durable as well: each runs as an
@@ -4941,7 +4434,7 @@ publishes a versioned status document and opens an incident on a failed pass,
 and refuses a second wrapper for the same repository. That wrapper is now a
 managed job as well: its installer script installs one stopped job
 per canonical GitHub repository in a `mission-runner` namespace of its own,
-writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
+writes the discovery record, and starts nothing.
 `Kanban.MissionRunnerService` discovers that job, decodes its status document
 and incidents, starts and stops it, and replays a mission's durable events from
 a cursor. The runner's own chain now survives its own failures: each pass is
@@ -5122,20 +4615,11 @@ identity, on both supported service managers.
   to it,
   so a configuration change after installation stops that job instead of
   re-pointing it at another repository.
-- Decode the managed wrapper's structured status and incident data, including
-  the complete repository-scoped set of open incidents the incidents panel
-  lists alongside the newest-only summary the sidebar renders, and the
-  outstanding post-merge cleanup obligations that same response projects out of
-  the drainer's queue state.
-- Refresh local status every ten seconds without network traffic.
-- Render the bottom-left drainer control with the active border style and
-  off/on/warning/error colors.
-- Support both click and `d` start/stop actions with transition states.
-- Merge one selected Done card with `m`, from the board or the details
-  overlay, by running that drainer's own single-pull-request path — resolved
-  from the Kanban-managed install directory — and refuse without invoking
-  anything for an ineligible card, a merge already in flight, an unresolved
-  incident, or any service state that is not a settled stop.
+
+The dashboard side of this milestone — decoding the controller's status and
+incidents, the sidebar control and its status colours, the `d` and `m`
+bindings, the incidents panel, and the status polling — was removed. The
+scripts above are unchanged and are run from `tools/`.
 
 ### Milestone 7 — Embedded issue reviews
 

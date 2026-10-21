@@ -10,21 +10,16 @@ module Spec.Support.Process
     identityForProcess,
     shouldRecordASweptProcess,
     shouldNotHaveSwept,
-    readRecordedPid,
-    fakeController,
-    fakeApprovalController
+    readRecordedPid
   )
 where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (void)
-import qualified Data.ByteString.Char8 as ByteString
 import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import qualified Data.Text
-import Kanban.ApprovalService (ApprovalBackend (..), ApprovalController (..))
-import Kanban.Drainer (DrainerBackend (..), DrainerController (..))
 import Kanban.Process
   ( ManagedProcess,
     ProcessIdentity (..),
@@ -36,8 +31,6 @@ import Kanban.Process
   )
 import Spec.Support.Env (ignoringIOException)
 import Spec.Support.Expect (requireJust)
-import System.FilePath ((</>))
-import System.Posix.Files (setFileMode)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
@@ -198,27 +191,6 @@ identityForProcess process = do
     Right identities -> case identityForPid pid identities of
       Just identity -> pure identity
       Nothing -> fail "spawned process was not present in a process snapshot"
-
--- | A 'DrainerController' pointing at a shell script, so the invocation path
--- can be driven with a chosen exit code, streams, and staying power. The
--- controller's own arguments are dropped on the floor by the script; what is
--- under test is how the invocation reads what comes back, not the wire.
-fakeController :: FilePath -> [ByteString.ByteString] -> IO DrainerController
-fakeController temporaryRoot scriptLines = do
-  let scriptPath = temporaryRoot </> "drain-prs-controller"
-  ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
-  setFileMode scriptPath 0o700
-  pure (DrainerController scriptPath [] DrainerLaunchd)
-
--- | The same fixture for the issue approval service. Each managed service's
--- fixture writes to a file of its own, so a test may stand one of each up in
--- one temporary directory without any of them overwriting another.
-fakeApprovalController :: FilePath -> [ByteString.ByteString] -> IO ApprovalController
-fakeApprovalController temporaryRoot scriptLines = do
-  let scriptPath = temporaryRoot </> "approve-issues-controller"
-  ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
-  setFileMode scriptPath 0o700
-  pure (ApprovalController scriptPath [] ApprovalLaunchd)
 
 -- | The PID a fixture recorded for itself. Read only after the invocation
 -- under test has returned, by which point the shell has long since written

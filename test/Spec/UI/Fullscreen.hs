@@ -4,9 +4,8 @@
 -- Nothing here needs a terminal or an @EventM@. The lifecycle rule is
 -- 'settleOverlayFullscreen', which is the total decision @handleEvent@ applies
 -- after every event, and each transition below hands it the very overlay pair
--- the real arm writes -- 'applyIncidentsAction' for the incidents jump,
--- and 'refreshOverlay' for reconciliation --
--- rather than a hand-written pair that could agree with the rule by accident.
+-- the real arm writes -- 'refreshOverlay' for reconciliation -- rather than a
+-- hand-written pair that could agree with the rule by accident.
 -- The geometry is measured off real frames drawn through
 -- 'Kanban.UI.drawApplication', because the height a fullscreen box stops at is
 -- the footer's actual rendered height and nothing else can answer that.
@@ -18,11 +17,8 @@ import qualified Data.Text
 import Kanban.Domain
 import Kanban.UI (drawApplication)
 import Kanban.UI.Events
-  ( IncidentsAction (..),
-    OverlayExtent (..),
+  ( OverlayExtent (..),
     OverlayMouseAction (..),
-    applyIncidentsAction,
-    incidentsAction,
     overlayMouseAction,
   )
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
@@ -39,14 +35,12 @@ import Kanban.UI.State (settleOverlayFullscreen, toggleOverlayFullscreen)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
 import Kanban.UI.Util (noticeCleared, noticeSet)
-import Kanban.Drainer (DrainerIncident (..))
 import qualified Graphics.Vty as Vty
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures
   ( baseIssue,
     fixtureBoard,
     fixtureStandaloneEntry,
-    showText,
   )
 import Spec.Support.Render (frameRowText, renderFrameCells)
 import Test.Hspec
@@ -75,21 +69,13 @@ spec = do
       state <- boardState
       (toggleOverlayFullscreen state).appOverlayFullscreen `shouldBe` False
 
-    -- Activating a row leaves the panel without going through 'closeOverlay',
-    -- so the reset has to come from the settle that compares the overlay
-    -- before and after rather than from the close.
-    it "resets when activating a row closes the incidents panel" $ do
-      panel <- incidentsPanelOverDrainerIncident
-      let fullscreenPanel = toggleOverlayFullscreen panel
-          activated = applyIncidentsAction ActivateSelectedIncident fullscreenPanel
-      fullscreenPanel.appOverlayFullscreen `shouldBe` True
-      activated.appOverlay `shouldBe` Nothing
-      (settleOverlayFullscreen fullscreenPanel.appOverlay activated).appOverlayFullscreen `shouldBe` False
-
+    -- A close leaves the overlay without a replacement, so the reset has to
+    -- come from the settle that compares the overlay before and after.
     it "resets when the overlay closes" $ do
-      panel <- incidentsPanelOverDrainerIncident
-      let fullscreenPanel = toggleOverlayFullscreen panel
-          closed = applyIncidentsAction CloseIncidentsPanel fullscreenPanel
+      state <- boardState
+      let fullscreenPanel = toggleOverlayFullscreen (opened HelpOverlay state)
+          closed = noticeCleared fullscreenPanel {appOverlay = Nothing}
+      fullscreenPanel.appOverlayFullscreen `shouldBe` True
       closed.appOverlay `shouldBe` Nothing
       (settleOverlayFullscreen fullscreenPanel.appOverlay closed).appOverlayFullscreen `shouldBe` False
 
@@ -191,17 +177,6 @@ spec = do
       boxRow `shouldSatisfy` all ((`elem` outerFrameGlyphs) . (`Data.Text.index` 0))
       boxRow `shouldSatisfy` all ((`elem` outerFrameGlyphs) . Data.Text.last)
 
-  -- Requirement 5: the growth has to reach the thing each panel scrolls, or a
-  -- fullscreen frame is a bigger border around the same nineteen rows.
-  describe "what a fullscreen box gives its interior" $ do
-    it "shows more of the incident list" $ do
-      state <- longListState
-      let showing = opened IncidentsOverlay state
-          visible frame = length (filter (Data.Text.isInfixOf "PR #") frame)
-          windowed = visible (windowedFrame 200 48 showing)
-          full = visible (fullscreenFrame 200 48 showing)
-      full `shouldSatisfy` (> windowed)
-
   -- What section 7 says a fullscreen overlay's ways out are, held against what
   -- each overlay's decoder actually answers. Withdrawing the outside click is
   -- the whole of what fullscreen changes here, so an exit named in the
@@ -211,7 +186,6 @@ spec = do
     it "closes each overlay on Esc, through that overlay's own decoder" $ do
       boardAction DetailsScope escape `shouldBe` Just DismissOrClose
       boardAction HelpScope escape `shouldBe` Just DismissOrClose
-      incidentsAction (Just IncidentsOverlay) (VtyEvent escape) `shouldBe` Just CloseIncidentsPanel
 
     -- `q` is not a general overlay close and never was: in an overlay it is
     -- either the dashboard's own quit or nothing at all. Pinned here because
@@ -220,18 +194,14 @@ spec = do
     it "answers q only where section 7 already gave it a meaning" $ do
       boardAction DetailsScope (key 'q') `shouldBe` Just QuitDashboard
       boardAction HelpScope (key 'q') `shouldBe` Just QuitDashboard
-      incidentsAction (Just IncidentsOverlay) (VtyEvent (key 'q')) `shouldBe` Just IgnoreIncidentsEvent
 
     -- The same for the right click, which the help overlay's mouse rows and
     -- section 7's mouse policy both describe: it closes the overlays that
-    -- route through the shared policy, at either extent, and the incidents
-    -- panel answers it with nothing in either.
-    it "closes on a right click only through the shared mouse policy" $
-      for_ bothExtents $ \(extentLabel, extent) -> do
+    -- route through the shared policy, at either extent.
+    it "closes on a right click through the shared mouse policy" $
+      for_ bothExtents $ \(extentLabel, extent) ->
         (extentLabel, overlayMouseAction extent DetailsPanel (MouseDown DetailsPanel Vty.BRight [] origin))
           `shouldBe` (extentLabel, Just OverlayMouseClose)
-        (extentLabel, incidentsAction (Just IncidentsOverlay) (MouseDown IncidentsPanel Vty.BRight [] origin))
-          `shouldBe` (extentLabel, Just IgnoreIncidentsEvent)
 
   -- @f@ is answered by one arm shared by every overlay, so the thing worth
   -- pinning is that the table reaches it from the scope that arm resolves in,
@@ -253,12 +223,11 @@ key character = Vty.EvKey (Vty.KChar character) []
 origin :: Location
 origin = Location (0, 0)
 
--- | The three overlays, one of each surface, so a decision total in
+-- | The two overlays, one of each surface, so a decision total in
 -- 'OverlaySurface' is exercised at every arm.
 everyOverlay :: [Overlay]
 everyOverlay =
   [ HelpOverlay,
-    IncidentsOverlay,
     DetailsOverlay (IssueItem (baseIssue 10 []))
   ]
 
@@ -291,14 +260,6 @@ detailsItem = IssueItem (baseIssue fixtureIssueNumber [])
 fixtureIssueNumber :: Int
 fixtureIssueNumber = 10
 
--- | The incidents panel open over a board whose drainer has reported one
--- incident, so Enter on its first row activates that row -- the transition
--- that leaves the panel without passing through 'closeOverlay'.
-incidentsPanelOverDrainerIncident :: IO AppState
-incidentsPanelOverDrainerIncident = do
-  state <- boardState
-  pure (applyIncidentsAction OpenIncidentsPanel state {appDrainerIncidents = Just [conflictIncident 10]})
-
 -- | The outer frame's own border glyphs, which is what a fullscreen box has
 -- to leave showing on each side. Both spellings, because the theme draws a
 -- double border and the corner rows draw the box's own.
@@ -309,9 +270,6 @@ outerFrameGlyphs = "║╔╗╚╝═"
 frameAt :: Int -> Int -> AppState -> [Text]
 frameAt width height state =
   map frameRowText (renderFrameCells (themeFor state.appOptions) (width, height) (drawApplication state))
-
-windowedFrame :: Int -> Int -> AppState -> [Text]
-windowedFrame width height state = frameAt width height state {appOverlayFullscreen = False}
 
 fullscreenFrame :: Int -> Int -> AppState -> [Text]
 fullscreenFrame width height state = frameAt width height state {appOverlayFullscreen = True}
@@ -324,22 +282,3 @@ boxRows :: [Text] -> Int
 boxRows = length . takeWhile boxRow
   where
     boxRow row = Data.Text.length row > 1 && Data.Text.index row 1 `elem` ("┏┃┗" :: String)
-
--- | A board carrying more drainer incidents than the panel can show at once,
--- so the list is clipped windowed and less clipped fullscreen.
-longListState :: IO AppState
-longListState = do
-  state <- boardState
-  pure state {appDrainerIncidents = Just [conflictIncident number | number <- [200 .. 240]]}
-
-conflictIncident :: Int -> DrainerIncident
-conflictIncident number =
-  DrainerIncident
-    { incidentId = "incident-conflict-" <> showText number,
-      incidentKind = "merge-conflict",
-      incidentSummary = Just ("PR #" <> showText number <> " has a merge conflict in README."),
-      incidentPullRequest = Just number,
-      incidentLastPullRequest = Nothing,
-      incidentActivity = Nothing,
-      incidentError = Nothing
-    }

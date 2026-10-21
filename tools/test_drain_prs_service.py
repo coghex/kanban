@@ -5567,22 +5567,13 @@ class SourceAdvisoryRunTests(RedirectedControllerTestCase):
 
 class StopBudgetFitsTheTransitionTests(unittest.TestCase):
     """Issue #216 requirement 5: signal, final cleanup pass, and confirmed exit
-    all have to fit inside the timeout Kanban gives a drainer transition, so
-    pressing `d` never reports a timeout for a stop whose pass ran.
+    all have to fit inside the stop timeout, so a stop whose pass ran is never
+    reported as a timeout.
 
-    Three separately-declared numbers, in two languages, that only hold
-    together as a chain. These pin the chain rather than any one of them.
+    The timeout a caller gave a transition used to be declared a third time on
+    the Haskell side and compared here; that dashboard is gone, so what is left
+    is the chain's two Python numbers.
     """
-
-    def _kanban_transition_timeout(self):
-        source = (
-            Path(__file__).resolve().parent.parent / "src" / "Kanban" / "Drainer.hs"
-        ).read_text(encoding="utf-8")
-        match = re.search(
-            r"^transitionTimeoutSeconds\s*=\s*(\d+)$", source, re.MULTILINE
-        )
-        self.assertIsNotNone(match, "Drainer.hs no longer declares this literally")
-        return int(match.group(1))
 
     def test_the_pass_leaves_the_stop_room_to_confirm_the_exit(self):
         # The pass is only part of the stop: the signal still has to reach the
@@ -5591,11 +5582,6 @@ class StopBudgetFitsTheTransitionTests(unittest.TestCase):
         self.assertLess(
             drain_prs.SHUTDOWN_CLEANUP_BUDGET_SECONDS,
             drain_prs_service.STOP_TIMEOUT_SECONDS / 2,
-        )
-
-    def test_the_whole_stop_fits_the_timeout_kanban_gives_a_transition(self):
-        self.assertLess(
-            drain_prs_service.STOP_TIMEOUT_SECONDS, self._kanban_transition_timeout()
         )
 
 

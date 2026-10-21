@@ -50,14 +50,14 @@
 ║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃                          ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┃                          ┃┃  │  feature                            │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ Load the last good GitHub snapshot  │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ at startup and replace it           │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ off                      ┃┃  │ atomically after a successful…      │ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ Load the last good GitHub snapshot  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ at startup and replace it           │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ atomically after a successful…      │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                                                              ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║

@@ -11,17 +11,10 @@ module Kanban.UI.Types
     columnItemRow,
     CompletedGeneration,
     CompletedHistoryStatus (..),
-    DirectMergeReport (..),
-    DrainerSourceState (..),
     FacetCount (..),
     FacetCounts (..),
     FacetKey (..),
     FilterPanel (..),
-    IncidentClickOutcome (..),
-    IncidentEntry (..),
-    IncidentRef (..),
-    IncidentSelection (..),
-    IncidentSource (..),
     Name (..),
     OpenDataView (..),
     OpenGeneration,
@@ -35,7 +28,6 @@ where
 
 
 import Brick.BChan (BChan )
-import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -46,21 +38,6 @@ import Kanban.Browser (OpenFailure)
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.ApprovalService
-  ( ApprovalController,
-    ApprovalIncident (..),
-    ApprovalObservation (..),
-    ApprovalResult,
-    ApprovalStatus (..),
-    ApprovalUnavailable,
-  )
-import Kanban.Drainer
-  ( DirectMergeOutcome,
-    DrainerController,
-    DrainerIncident (..),
-    DrainerObservation (..),
-    DrainerStatus (..)
-    )
 import Kanban.Filter (FilterBox, FilterCriteria)
 import Kanban.GitHub
   ( CompletedGeneration,
@@ -78,7 +55,6 @@ data Name
   = BoardViewport
   | ColumnViewport BoardColumn
   | DetailsViewport
-  | IncidentsViewport
   | CardTarget BoardColumn Int
   | EpicTarget BoardColumn Int Int
   | -- | One checkbox of the card filter panel. Named by the box rather than
@@ -86,15 +62,6 @@ data Name
     -- however the chips wrapped at the current width.
     FilterBoxTarget FilterBox
   | DetailsPanel
-  | IncidentsPanel
-  | IncidentTarget IncidentRef
-  | DrainerButton
-  | -- | The usage sidebar's issue approval service control, drawn directly
-    -- above 'DrainerButton'. Its own name rather than a shared service
-    -- target, for the reason "Kanban.UI.Approval" keeps the two lifecycles
-    -- apart: one name would be one place a press meant for either service
-    -- could reach the other.
-    ApprovalButton
   | -- | The usage sidebar's update control. Registered only while the
     -- sidebar is drawn, so a collapsed sidebar leaves no extent for a press
     -- to land on and the control is unclickable exactly when it is invisible.
@@ -103,7 +70,6 @@ data Name
 
 data Overlay
   = HelpOverlay
-  | IncidentsOverlay
   | DetailsOverlay BoardItem
   deriving stock (Eq, Show)
 
@@ -118,7 +84,6 @@ data Overlay
 -- surface for the user.
 data OverlaySurface
   = HelpSurface
-  | IncidentsSurface
   | DetailsSurface
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
@@ -128,76 +93,7 @@ data OverlaySurface
 overlaySurface :: Overlay -> OverlaySurface
 overlaySurface = \case
   HelpOverlay -> HelpSurface
-  IncidentsOverlay -> IncidentsSurface
   DetailsOverlay _ -> DetailsSurface
-
--- | Which of the incidents panel's sources a row came from. New sources are
--- expected — every automated stage that can stop needing a human is a
--- candidate — so the panel is written against this list rather than against
--- the one member it starts with: a source contributes 'IncidentEntry'
--- values and a label, and nothing else about the panel changes.
-data IncidentSource
-  = DrainerSource
-  deriving stock (Eq, Ord, Show)
-
--- | A row's identity, qualified by the source that minted it, so two sources
--- can never collide on one identifier. Drainer rows carry the service's own
--- incident ID, which survives a refresh that inserts, removes, or reorders
--- rows, and that is what keeps a keyboard or mouse action pointed at the
--- incident it was aimed at.
-data IncidentRef
-  = DrainerIncidentRef Text
-  deriving stock (Eq, Ord, Show)
-
--- | One row of the incidents panel: what it concerns, what happened, and
--- where it came from.
---
--- 'incidentEntryWork' is the /authoritative/ board target and is the only
--- thing activation navigates by. An entry with no authoritative target — a
--- supervisor crash, whose @last_pr@ is an inferred diagnostic — is cardless
--- by construction rather than by a check at activation time.
-data IncidentEntry = IncidentEntry
-  { incidentEntryRef :: IncidentRef,
-    incidentEntrySource :: IncidentSource,
-    incidentEntryWork :: Maybe ItemId,
-    incidentEntrySubject :: Text,
-    incidentEntryDetail :: Text,
-    -- | Text too long for the row to state, which the panel wraps beneath it
-    -- rather than eliding away. Only what an operator has to act on earns
-    -- this: a row's own line is the summary, and a continuation line costs
-    -- panel height every other entry shares.
-    incidentEntryNote :: Maybe Text
-  }
-  deriving stock (Eq, Show)
-
--- | Tracks the incidents panel selection by stable source-qualified
--- identity (falling back to a row position only while no entry with that
--- identity is present), so draw and actions always resolve the same target.
-data IncidentSelection = IncidentSelection
-  { incidentSelectionRef :: Maybe IncidentRef,
-    incidentSelectionRow :: Int
-  }
-  deriving stock (Eq, Show)
-
-data IncidentClickOutcome
-  = IncidentClickSelect IncidentSelection
-  | IncidentClickOpen
-  | IncidentClickIgnored
-  deriving stock (Eq, Show)
-
--- | What the drainer source can currently say about itself, kept separate
--- from the answer it gives so that "no incidents" and "no answer" cannot be
--- confused.
---
--- Only 'DrainerSourceReported' is an observation: the controller ran, its
--- response decoded, and it listed exactly these incidents. Everything else
--- means this side does not know, and the panel says so instead of claiming
--- that nothing needs attention.
-data DrainerSourceState
-  = DrainerSourceChecking
-  | DrainerSourceUnavailable Text
-  | DrainerSourceReported [DrainerIncident]
-  deriving stock (Eq, Show)
 
 -- | How a board refresh ended. 'BoardRefreshUnverified' is not just another
 -- failure: the @gh@ process group the refresh spawned could not be confirmed
@@ -313,19 +209,6 @@ data AppEvent
     BoardRefreshShutdownFinished (Maybe GhCleanupFailure)
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
-  | DrainerStatusRefreshed (Either Text DrainerObservation)
-  | DrainerToggleFinished (Either Text DrainerObservation)
-  | -- | The transition generation current when this poll's controller query
-    -- was /issued/, then its result. A poll that began before a toggle press
-    -- carries a read taken before it, so it is discarded rather than allowed
-    -- to settle a transition it never saw.
-    ApprovalStatusRefreshed Int (Either Text ApprovalObservation)
-  | -- | The transition generation the completed toggle belongs to, then its
-    -- result. A completion whose generation another press has superseded is
-    -- discarded rather than applied, so a slow start cannot restore its
-    -- optimistic state over the stop that replaced it.
-    ApprovalToggleFinished Int (Either Text ApprovalObservation)
-  | DirectMergeFinished Int (Either Text DirectMergeOutcome)
   | -- | A displayed notice instance's ten seconds elapsed. It carries the
     -- instance identity the timer was armed for, on the same superseded-
     -- generation reasoning as the animation ticks above: an expiry belonging
@@ -429,7 +312,6 @@ data AppState = AppState
     -- keeps the budget a card is measured at, drawn at, and has its
     -- measurement invalidated by one number rather than three.
     appExcerptsVisible :: Bool,
-    appIncidentSelection :: IncidentSelection,
     appOverlay :: Maybe Overlay,
     -- | Whether the open overlay is drawn fullscreen rather than in its
     -- windowed box. One flag for whichever overlay is open, never a per-kind
@@ -491,58 +373,12 @@ data AppState = AppState
     -- which is the difference between 'CompletedHistoryStale' and
     -- 'CompletedHistoryFailed'.
     appCompletedStatus :: CompletedHistoryStatus,
-    appDrainerController :: Either Text DrainerController,
-    appDrainerStatus :: DrainerStatus,
-    -- | The last observed set of open incidents, or 'Nothing' whenever no
-    -- successful observation stands: before the first poll answers, after a
-    -- query or decode failure, while a start or stop is in flight, and when
-    -- the controller reported no such set at all. See 'DrainerSourceState'.
-    appDrainerIncidents :: Maybe [DrainerIncident],
-    appDrainerBusy :: Bool,
-    -- | The issue approval service's controller, or why there is none. An
-    -- unsupported host is kept apart from every other failure so nothing
-    -- downstream can offer control the host cannot honour (requirement 10).
-    appApprovalController :: Either ApprovalUnavailable ApprovalController,
-    -- | The approval service's last observation, held apart from
-    -- 'appDrainerStatus' so neither service's state can overwrite the other's.
-    appApprovalStatus :: ApprovalStatus,
-    -- | The last observed set of the approval service's open incidents, or
-    -- 'Nothing' whenever no successful observation stands, on the same
-    -- reasoning as 'appDrainerIncidents'.
-    appApprovalIncidents :: Maybe [ApprovalIncident],
-    appApprovalBusy :: Bool,
-    -- | Which start or stop of the approval service this dashboard is waiting
-    -- on. Bumped by every press, and carried by the handoff, so a completion
-    -- can say which transition it belongs to.
-    appApprovalTransition :: Int,
-    -- | The same count, in a cell the status monitor can read.
-    --
-    -- The monitor is a plain 'IO' loop with no view of this record, and the
-    -- press that bumps 'appApprovalTransition' is a pure transition that
-    -- cannot write to one. This is the seam between them: the press's handoff
-    -- publishes the new count here, and the monitor stamps each poll with
-    -- whatever it reads immediately before issuing that poll's query. That is
-    -- what lets a poll say which transition it predates.
-    appApprovalEpoch :: IORef Int,
-    -- | The result identity the last applied observation carried, which is what
-    -- keeps one service result from requiring a board refresh twice. 'Nothing'
-    -- until the first observation establishes a baseline.
-    appApprovalResult :: Maybe ApprovalResult,
-    -- | The pull request a direct @m@ merge is running for, if one is. Held
-    -- apart from 'appDrainerStatus', which reports the launchd service and
-    -- has nothing to say about a run this dashboard started instead of it.
-    appDirectMergePending :: Maybe Int,
-    -- | A direct merge that actually landed, held until the board refresh it
-    -- requires has run. That result is the only report an irreversible action
-    -- gets, and the refresh it triggers would otherwise overwrite it before
-    -- it could be read.
-    appDirectMergeResult :: Maybe DirectMergeReport,
     -- | The startup line's one-time diagnostics, carried until the first
     -- open outcome publishes. 'Nothing' from birth when startup had nothing
     -- to report, and 'Nothing' for good once the first outcome composes the
     -- diagnostics onto its own notice — or finds them already dismissed.
-    -- See 'DirectMergeReport' for why the carrier records the notice
-    -- instance it was last shown as.
+    -- See 'StartupReport' for why the carrier records the notice instance it
+    -- was last shown as.
     appStartupReport :: Maybe StartupReport,
     -- | A board refresh that could not start because a cycle was already in
     -- flight. An in-flight fetch may have read GitHub before a change this
@@ -747,25 +583,6 @@ data ColumnSearch = ColumnSearch
   }
   deriving stock (Eq, Show)
 
--- | A landed merge's result, together with the identity of the notice
--- instance it was last shown as.
---
--- The second field is what keeps the result from outliving its own report.
--- Some two dozen places clear or replace 'appNotice' -- both Esc handlers,
--- every overlay that opens, every selection move, and now the ten-second
--- expiry -- and each of them means the user has stopped looking at this
--- result. None of them can be asked to remember that a second field exists,
--- and a list of sites that must is a list that will be incomplete again the
--- next time one is added. Comparing against the instance actually put on
--- screen needs no such list -- and unlike the text comparison it replaced,
--- it cannot let a later notice that happens to repeat the same words adopt a
--- retired report, because an instance identity is never reissued.
-data DirectMergeReport = DirectMergeReport
-  { directMergeReportResult :: Text,
-    directMergeReportShownInstance :: Int
-  }
-  deriving stock (Eq, Show)
-
 -- | The startup diagnostics — an invalid cache, a settings problem, an
 -- authority notice, a degraded roster entry — together with the identity of
 -- the notice instance they were last shown as.
@@ -776,10 +593,14 @@ data DirectMergeReport = DirectMergeReport
 -- ('Kanban.UI.Util.noticeSetOverStartupReport'), and the first outcome
 -- composes them onto its own settled notice for the ordinary ten seconds
 -- ('Kanban.UI.Util.startupReportApplied'), which also retires the carry for
--- good. The instance comparison is the same rule 'DirectMergeReport' states:
--- a carry is honoured only while what is on screen is still the instance it
--- last wrote, so a manual dismissal or an unrelated action's replacement
--- retires the diagnostics rather than letting a later publish resurrect them.
+-- good. The instance comparison is what keeps the carry from outliving its
+-- own report: some two dozen places clear or replace 'appNotice', and none of
+-- them can be asked to remember that a second field exists. A carry is
+-- honoured only while what is on screen is still the instance it last wrote,
+-- so a manual dismissal or an unrelated action's replacement retires the
+-- diagnostics rather than letting a later publish resurrect them. Unlike a
+-- text comparison it cannot let a later notice that repeats the same words
+-- adopt a retired report, because an instance identity is never reissued.
 data StartupReport = StartupReport
   { startupReportDiagnostics :: Text,
     startupReportShownInstance :: Int

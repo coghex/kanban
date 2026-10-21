@@ -22,16 +22,8 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
-import Kanban.ApprovalService
-  ( ApprovalBackend (..),
-    ApprovalController (..),
-    ApprovalState (..),
-    ApprovalStatus (..),
-  )
 import Kanban.Domain
-import Kanban.Drainer (DrainerBackend (..), DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
-import Kanban.UI.Approval (approvalTogglePress)
 import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, boardMouseAction, boardMousePress)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
@@ -739,8 +731,6 @@ precedenceSpec = describe "key precedence" $ do
           `shouldBe` (character, Just (SearchInsert character), Just action)
       | (character, action) <-
           [ ('u', RefreshAll),
-            ('a', ToggleApproval),
-            ('d', ToggleDrainer),
             ('e', ToggleEpic),
             ('j', NextCard),
             ('k', PreviousCard),
@@ -748,9 +738,7 @@ precedenceSpec = describe "key precedence" $ do
             ('l', NextColumn),
             ('g', FirstItem),
             ('G', LastItem),
-            ('i', ShowIncidents),
             ('c', ToggleSidebar),
-            ('m', MergeDoneCard),
             ('?', ShowHelp)
           ],
         let event = Vty.EvKey (Vty.KChar character) []
@@ -760,7 +748,7 @@ precedenceSpec = describe "key precedence" $ do
     sequence_
       [ (character, searchInput liveSearch event, boardAction BoardScope event)
           `shouldBe` (character, Just (SearchInsert character), Nothing)
-      | character <- "rSAxpo",
+      | character <- "rSAxpoiadm",
         let event = Vty.EvKey (Vty.KChar character) []
       ]
 
@@ -841,25 +829,6 @@ precedenceSpec = describe "key precedence" $ do
     searchInput liveSearch (Vty.EvResize 80 24) `shouldBe` Nothing
     searchInput liveSearch (Vty.EvKey (Vty.KChar '\t') []) `shouldBe` Nothing
 
--- | A controller that exists as a value and names a path nothing will run.
--- 'approvalTogglePress' reads it only into the handoff it returns, which the
--- press below discards, so a toggle can be taken with no subprocess.
-testApprovalController :: ApprovalController
-testApprovalController =
-  ApprovalController "/nonexistent/kanban-test-approval-controller" [] ApprovalLaunchd
-
--- | Everything one approval press decides, since 'AppState' has no 'Eq': the
--- optimistic status, the busy flag that refuses a competing press, the
--- transition the completion is matched against, and the notice.
-approvalFacts :: AppState -> (ApprovalState, Text, Bool, Int, Maybe Text)
-approvalFacts state =
-  ( state.appApprovalStatus.approvalState,
-    state.appApprovalStatus.approvalDetail,
-    state.appApprovalBusy,
-    state.appApprovalTransition,
-    shownNotice state
-  )
-
 -- | State equality without the fields no transition here is about, since
 -- 'AppState' itself has no 'Eq'.
 shouldBe' :: AppState -> AppState -> Expectation
@@ -872,7 +841,7 @@ shouldBe' actual expected =
 mouseSpec :: Spec
 mouseSpec = describe "mouse precedence" $ do
   -- The whole matrix §7 names, stated against the decision dispatch actually
-  -- makes rather than against the classifier feeding it: three things a press
+  -- makes rather than against the classifier feeding it: two things a press
   -- can land on, two buttons that transfer and a wheel that never does,
   -- inside the searched column and outside it.
   it "transfers a left or right press anywhere in a column it is not searching" $ do
@@ -917,74 +886,8 @@ mouseSpec = describe "mouse precedence" $ do
         (landing, name) <- columnLandings column
       ]
 
-  -- Requirement 6: the drainer button is not a column target, so it is
-  -- answered ahead of the transfer and keeps the toggle it has always
-  -- dispatched — the search it never sees keeps its target and its query.
-  --
-  -- Taken rather than asserted about: dispatch decides the press and then
-  -- 'boardMousePress' is the whole of what dispatch does with the decision,
-  -- so running it here is running the press. A drainer press hands its
-  -- controller work off separately, which is what lets this take one without
-  -- a controller subprocess.
-  it "still takes the drainer button's toggle while a search is live" $ do
-    searching <- transferring
-    plain <- searchState
-    let installed state = state {appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [] DrainerLaunchd)}
-        press state = boardMousePress <$> boardMouseAction state DrainerButton Vty.BLeft [] <*> pure (installed state)
-    boardMouseAction searching DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
-    boardMouseAction plain DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
-    -- The toggle ran: the drainer is on its way up and the press said so.
-    ((.appDrainerStatus.drainerState) <$> press searching) `shouldBe` Just DrainerStarting
-    ((.appDrainerBusy) <$> press searching) `shouldBe` Just True
-    (shownNotice <$> press searching) `shouldBe` Just (Just "Starting PR drainer…")
-    -- And the search is exactly where it was, still on its query.
-    ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
-    ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
-    -- The same press with nothing searching does the same thing, which is
-    -- what "keeps working" means.
-    ((.appDrainerStatus.drainerState) <$> press plain) `shouldBe` Just DrainerStarting
-    -- Nothing about that press is a transfer, on any button.
-    sequence_
-      [ searchMouseTransfer searching DrainerButton button `shouldBe` Nothing
-      | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
-      ]
-
-  -- The issue approval control, held to the same rule the drainer button is,
-  -- and to one more the drainer has no counterpart for: the click and the `a`
-  -- binding are the same press. 'toggleApprovalService' is exactly
-  -- 'approvalTogglePress' put back plus the handoff dispatch runs beside it,
-  -- so comparing the click's pure effect with that press is comparing the two
-  -- input paths -- and neither of them needs a controller subprocess.
-  it "still takes the approval control's toggle while a search is live, identically to the key" $ do
-    searching <- transferring
-    plain <- searchState
-    let installed state = state {appApprovalController = Right testApprovalController}
-        press state = boardMousePress <$> boardMouseAction state ApprovalButton Vty.BLeft [] <*> pure (installed state)
-    boardMouseAction searching ApprovalButton Vty.BLeft [] `shouldBe` Just ToggleApprovalFromClick
-    boardMouseAction plain ApprovalButton Vty.BLeft [] `shouldBe` Just ToggleApprovalFromClick
-    -- The key resolves to the action whose dispatch is that same press.
-    boardAction BoardScope (Vty.EvKey (Vty.KChar 'a') []) `shouldBe` Just ToggleApproval
-    -- The toggle ran: the service is on its way up and the press said so.
-    ((.appApprovalStatus.approvalState) <$> press searching) `shouldBe` Just ApprovalStarting
-    ((.appApprovalStatus.approvalDetail) <$> press searching) `shouldBe` Just "starting…"
-    ((.appApprovalBusy) <$> press searching) `shouldBe` Just True
-    (shownNotice <$> press searching) `shouldBe` Just (Just "Starting issue approval service…")
-    -- And it is the key's own press, field for field, not a second one that
-    -- happens to agree about the status.
-    (approvalFacts <$> press searching) `shouldBe` Just (approvalFacts (fst (approvalTogglePress (installed searching))))
-    (approvalFacts <$> press plain) `shouldBe` Just (approvalFacts (fst (approvalTogglePress (installed plain))))
-    -- The search is exactly where it was, still on its query.
-    ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
-    ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
-    -- Nothing about that press is a transfer, on any button.
-    sequence_
-      [ searchMouseTransfer searching ApprovalButton button `shouldBe` Nothing
-      | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
-      ]
-
-  -- The sidebar's update control, held to the same rule the drainer button
-  -- is: it is not a column target, so a live search never sees the press and
-  -- the control keeps the update it dispatches.
+  -- The sidebar's update control is not a column target, so a live search
+  -- never sees the press and the control keeps the update it dispatches.
   --
   -- What the click resolves to is the whole of what there is to take. The
   -- update is not a state transition of its own — 'startAllRefreshes' is what
@@ -1012,18 +915,18 @@ mouseSpec = describe "mouse precedence" $ do
       ]
 
   -- Requirement 5, and the modifier the issue puts out of scope: only a plain
-  -- left press means anything over a sidebar control. Every other button and
-  -- every modified left press falls through to the column arms, which name no
-  -- sidebar control, so the board claims nothing at all for it — no update, no
-  -- toggle, no scroll, no transfer.
-  it "claims nothing for any other press on any of the three sidebar controls" $ do
+  -- left press means anything over the sidebar's update control. Every other
+  -- button and every modified left press falls through to the column arms,
+  -- which name no sidebar control, so the board claims nothing at all for it —
+  -- no update, no scroll, no transfer.
+  it "claims nothing for any other press on the sidebar's update control" $ do
     searching <- transferring
     plain <- searchState
     sequence_
       [ (label, name, button, modifiers, boardMouseAction state name button modifiers)
           `shouldBe` (label, name, button, modifiers, Nothing)
       | (label, state) <- [("searching" :: Text, searching), ("plain", plain)],
-        name <- [UpdateButton, DrainerButton, ApprovalButton],
+        name <- [UpdateButton],
         (button, modifiers) <-
           [(button', []) | button' <- [Vty.BMiddle, Vty.BRight, Vty.BScrollUp, Vty.BScrollDown]]
             <> [(Vty.BLeft, [modifier]) | modifier <- [Vty.MCtrl, Vty.MShift, Vty.MMeta, Vty.MAlt]]

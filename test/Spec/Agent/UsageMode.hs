@@ -13,6 +13,7 @@ import Data.List (isInfixOf, sort)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 import Data.Time (UTCTime, hoursToTimeZone)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -26,9 +27,11 @@ import Kanban.Config
     RepositoryOverride (..),
     UsageCommandConfig (..),
     UsageConfig (..),
+    defaultConfigPath,
     defaultRawConfig,
     defaultUsageConfig,
     emptyRepositoryOverride,
+    loadRawConfig,
     resolveGlobalConfig,
     usageSolveRoundEstimates,
   )
@@ -364,17 +367,57 @@ spec = do
         produced `shouldBe` False
         providerKeys written `shouldBe` ["claude", "codex"]
 
+  -- The configuration file is shared with the scripts under @tools\/@, which
+  -- own keys the application neither reads nor judges. A file that carries
+  -- all of them, in every position they were documented and with values the
+  -- scripts would refuse, has to load here without a warning and leave this
+  -- mode answering, with a @models.toml@ beside it that nothing can parse.
+  --
+  -- The sequence is the one @app/Main.hs@ runs for this mode: the default
+  -- configuration path, its warnings, the global resolution, the query. The
+  -- configuration root and the cache root are both this example's own, and the
+  -- providers are fixtures that answer, so nothing here depends on an
+  -- installed account.
+  describe "a configuration file carrying the keys the scripts own" $ do
+    it "loads with no warning and answers the usage query" $
+      withUsageCacheRoot $ \root -> do
+        codexScript <- recordingProvider root "codex" 71
+        claudeScript <- recordingProvider root "claude" 22
+        withModelsFile root (Just "this is [not toml") $ do
+          configPath <- defaultConfigPath
+          TextIO.writeFile configPath (scriptOwnedConfig [] codexScript claudeScript)
+          loaded <- loadRawConfig Nothing
+          case loaded of
+            Left message -> expectationFailure ("the configuration was refused: " <> Text.unpack message)
+            Right (rawConfig, warnings) -> do
+              warnings `shouldBe` []
+              (produced, written) <- captureStdout (root </> "stdout.json") (runUsageMode jsonMode (resolveGlobalConfig rawConfig))
+              (produced, providerKeys written) `shouldBe` (True, ["claude", "codex"])
+
+    -- The negative control: the same file with one misspelled script-owned key
+    -- must report it, so the empty warning list above is a reading of the
+    -- loader rather than a property of the fixture.
+    it "reports a misspelled script-owned key beside the ones it accepts" $
+      withUsageCacheRoot $ \root ->
+        withModelsFile root Nothing $ do
+          configPath <- defaultConfigPath
+          TextIO.writeFile configPath (scriptOwnedConfig ["missionz = 1"] "codex" "claude")
+          loaded <- loadRawConfig Nothing
+          case loaded of
+            Left message -> expectationFailure ("the configuration was refused: " <> Text.unpack message)
+            Right (_, warnings) -> Text.concat warnings `shouldSatisfy` Text.isInfixOf "missionz"
+
   describe "configuration resolved without a repository" $ do
     it "keeps the global usage commands, timeouts, and cache setting" $ do
       let resolved = resolveGlobalConfig globalOnlyRawConfig
       resolved.resolvedUsage.usageCodexCommand `shouldBe` Just (UsageCommandConfig ["global-codex"])
-      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13 14400
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
       resolved.resolvedCache `shouldBe` False
 
     -- The mode resolves no @owner/name@, so there is nothing for an override
     -- to be keyed by; a repository-scoped timeout must not leak in.
     it "applies no repository override" $
-      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13 14400
+      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
 
   describe "acquisition against real provider commands" $ do
     it "answers from a directory that is not a Git repository at all" $
@@ -610,13 +653,47 @@ providerKeys written = case decode (LazyChar8.pack written) of
   Just (Object document) | Just (Object providers) <- KeyMap.lookup "providers" document -> sort (map Key.toText (KeyMap.keys providers))
   other -> ["not a usage document: " <> Text.pack (show other)]
 
+-- | A configuration file that carries every key the scripts own, in every
+-- position it was documented and with values the scripts would refuse, beside
+-- the two usage commands this mode runs.
+scriptOwnedConfig :: [Text] -> FilePath -> FilePath -> Text
+scriptOwnedConfig topLevel codexScript claudeScript =
+  Text.unlines $
+    topLevel
+      <> [ "[missions]",
+         "agent_ceiling = 0",
+         "[missions.notifications]",
+         "enabled = true",
+         "[timeouts]",
+         "github_seconds = 30",
+         "ping_codex_seconds = 0",
+         "ping_claude_seconds = 99999999999",
+         "worker_deadline_seconds = 604801",
+         "[workflow]",
+         "coordination_paths = [\"\"]",
+         "direct_publication_paths = \"docs/status.md\"",
+         "[usage.codex]",
+         "command = [" <> Text.pack (show codexScript) <> "]",
+         "[usage.claude]",
+         "command = [" <> Text.pack (show claudeScript) <> "]",
+         "[repositories.\"o/n\"]",
+         "[repositories.\"o/n\".missions]",
+         "agent_ceiling = \"two\"",
+         "[repositories.\"o/n\".timeouts]",
+         "ping_codex_seconds = -1",
+         "worker_deadline_seconds = 0",
+         "[repositories.\"o/n\".workflow]",
+         "coordination_paths = [1]",
+         "direct_publication_paths = [\"\"]"
+         ]
+
 -- | Global-only configuration: no repository section for an override to come
 -- from, which is the state the mode resolves against.
 globalOnlyRawConfig :: RawConfig
 globalOnlyRawConfig =
   defaultRawConfig
     { rawCache = False,
-      rawTimeouts = TimeoutsConfig 5 7 9 11 13 14400,
+      rawTimeouts = TimeoutsConfig 5 7 9,
       rawUsage = defaultUsageConfig {usageCodexCommand = Just (UsageCommandConfig ["global-codex"])}
     }
 
@@ -628,7 +705,7 @@ overriddenRawConfig =
     { rawRepositories =
         Map.singleton
           "coghex/kanban"
-          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62) (Just 63) (Just 64) (Just 65)}
+          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62)}
     }
 
 -- | Both providers pointed at real executables, on top of the shared resolved

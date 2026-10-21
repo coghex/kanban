@@ -51,21 +51,13 @@ ACTIVE_SITES = {
     # launch, and re-shown by `restoreStartupNotice` over the announcements
     # the startup refreshes themselves make.
     "src/Kanban/UI.hs": 2,
-    # `Refreshing GitHub…` / `GitHub refresh is already running` over the
-    # direct-merge carry, and both providers' usage-refresh notices, running
-    # and already-running alike.
-    "src/Kanban/UI/Refresh.hs": 5,
+    # `Refreshing GitHub…` / `GitHub refresh is already running`, and both
+    # providers' usage-refresh notices, running and already-running alike.
+    "src/Kanban/UI/Refresh.hs": 6,
     # The quit's `Stopping GitHub work…`, twice — the first press and the
     # re-press while the cleanup is still settling — plus the history pause
     # composed over an outstanding startup line.
     "src/Kanban/UI/Events.hs": 3,
-    # The drainer toggle's optimistic report and the direct merge's
-    # `Merging PR #n…`, relocated here with the rest of the drainer's
-    # lifecycle when the agent screens were removed.
-    "src/Kanban/UI/Drainer.hs": 2,
-    # The approval service toggle's optimistic report, plus the helper's
-    # import.
-    "src/Kanban/UI/Approval.hs": 2,
     # The usage results and the completed-cache warning, each composed over
     # an outstanding startup line rather than allowed to replace it.
     "src/Kanban/UI/Reconcile.hs": 3,

@@ -50,14 +50,14 @@
 ║┃                          ┃┃  │ snapshot barriers, and the │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │ versioned envelope before… │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                          ║
 ║ board: updated 3h ago · history: current                                                                                                                         ║

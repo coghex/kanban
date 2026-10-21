@@ -1,11 +1,10 @@
--- | What the filter criteria admit, how settled history renders once they
--- admit it, and what refuses to act on it.
+-- | What the filter criteria admit and how settled history renders once they
+-- admit it.
 --
 -- Every question here is decided by a total function the @EventM@ arms only
 -- project — 'visibleBoardFor' for the view, 'deriveBoard' for column and
--- order, 'readOnlyHistoryGate' and 'directMergeDecision' for the refusals — so
--- the whole matrix is settled without a terminal, a network, or a GitHub
--- account.
+-- order — so the whole matrix is settled without a terminal, a network, or a
+-- GitHub account.
 module Spec.UI.Filter (spec) where
 
 import qualified Data.Map.Strict as Map
@@ -14,13 +13,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (addUTCTime)
 import Kanban.Domain
-import Kanban.Drainer
-  ( DirectMergeDecision (..),
-    DrainerActivity (..),
-    DrainerState (..),
-    DrainerStatus (..),
-    directMergeDecision,
-  )
 import Kanban.Filter
   ( FilterCriteria (..),
     KindFacet (..),
@@ -34,12 +26,9 @@ import Kanban.Filter
   )
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.Board (trackerHeaderText)
-import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate)
-import Kanban.UI.Filter (readOnlyHistoryRefusal, refreshVisibleBoard)
-import Kanban.UI.Keys (BoardAction (..))
+import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Search (entriesFor, selectableRows)
-import Kanban.UI.Selection (selectedEntry)
-import Kanban.UI.Incidents (locateBoardWork)
+import Kanban.UI.Selection (findEntryWithLocation, selectedEntry)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, itemMetadata)
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
@@ -66,7 +55,6 @@ spec = do
   progressSpec
   orderingSpec
   attentionSpec
-  refusalSpec
   openAuthoritySpec
   addressingSpec
   detailsLinkSpec
@@ -512,68 +500,6 @@ attentionSpec = describe "settled cards and attention" $ do
 
 -- ---------------------------------------------------------------------------
 
--- | Requirement 9. Every settled mutating action refuses a completed card,
--- launches nothing, and leaves reading it alone.
-refusalSpec :: Spec
-refusalSpec = describe "read-only history refusals" $ do
-  it "names exactly the mutating bindings" $
-    filter mutatesSelectedWork [minBound .. maxBound]
-      `shouldBe` [MergeDoneCard]
-
-  it "declines every mutating binding on a completed issue and a completed pull request" $ do
-    settled <- settledState
-    sequence_
-      [ (action, itemNumber item, readOnlyHistoryGate (selecting item settled) action)
-          `shouldBe` (action, itemNumber item, Just (expectedNotice item))
-        | action <- filter mutatesSelectedWork [minBound .. maxBound],
-          item <- [IssueItem (closedIssue 940), PullRequestItem (mergedPullRequest 951)]
-      ]
-
-  it "declines them from a details overlay held open on a settled card too" $ do
-    settled <- settledState
-    let overlaid item = (admitClosed settled) {appOverlay = Just (DetailsOverlay item)}
-    sequence_
-      [ readOnlyHistoryGate (overlaid item) action `shouldBe` Just (expectedNotice item)
-        | action <- filter mutatesSelectedWork [minBound .. maxBound],
-          item <- [IssueItem (closedIssue 940), PullRequestItem (mergedPullRequest 951)]
-      ]
-
-  it "leaves every reading binding alone, and the card itself selectable" $ do
-    settled <- settledState
-    let selected = selecting (IssueItem (closedIssue 940)) settled
-    sequence_
-      [ (action, readOnlyHistoryGate selected action) `shouldBe` (action, Nothing)
-        | action <- filter (not . mutatesSelectedWork) [minBound .. maxBound]
-      ]
-    (entryItem <$> selectedEntry selected) `shouldBe` Just (IssueItem (closedIssue 940))
-
-  -- The launch boundary. A chooser, an overlay, and a reusable session each
-  -- hold an item captured before a refresh, so the refusal is re-asked
-  -- against the newest completed generation rather than trusted from it.
-  it "refuses an item that was live when it was captured and has since settled" $ do
-    settled <- settledState
-    readOnlyHistoryRefusal settled (IssueItem (baseIssue 940 []))
-      `shouldBe` Just (expectedNotice (IssueItem (closedIssue 940)))
-    plain <- testAppState openBoard
-    readOnlyHistoryRefusal plain (IssueItem (baseIssue 940 [])) `shouldBe` Nothing
-
-  -- The merge chain, refused at the launch decision itself rather than only
-  -- at the key press: it outranks the wrong-kind, in-flight and
-  -- drainer-state answers this same function would otherwise give.
-  it "refuses a settled card at the direct-merge decision, ahead of every other cause" $ do
-    directMergeDecision workflow Nothing idleDrainer (Just (PullRequestItem (mergedPullRequest 951)))
-      `shouldBe` RefuseDirectMerge (expectedNotice (PullRequestItem (mergedPullRequest 951)))
-    directMergeDecision workflow Nothing idleDrainer (Just (IssueItem (closedIssue 940)))
-      `shouldBe` RefuseDirectMerge (expectedNotice (IssueItem (closedIssue 940)))
-    directMergeDecision workflow (Just 5) busyDrainer (Just (PullRequestItem (mergedPullRequest 951)))
-      `shouldBe` RefuseDirectMerge (expectedNotice (PullRequestItem (mergedPullRequest 951)))
-
-  it "still merges an approved live pull request" $
-    directMergeDecision workflow Nothing idleDrainer (Just (PullRequestItem approvedLivePullRequest))
-      `shouldBe` RunDirectMerge 830
-
--- ---------------------------------------------------------------------------
-
 -- | Requirement 10. Live workflow behavior reads open data, so turning Closed
 -- on changes nothing about any of it.
 openAuthoritySpec :: Spec
@@ -591,10 +517,10 @@ openAuthoritySpec = describe "the open-only authority" $ do
     -- The settled pull request is admitted to the view and stays absent from
     -- the authority those resolutions read.
     numbersIn admitted.appVisibleBoard Done `shouldBe` [830, 951, 950]
-    locateBoardWork admitted.appBoard (PullRequestId 951) `shouldBe` Nothing
-    locateBoardWork hidden.appBoard (PullRequestId 951) `shouldBe` Nothing
+    findEntryWithLocation admitted.appBoard (PullRequestId 951) `shouldBe` Nothing
+    findEntryWithLocation hidden.appBoard (PullRequestId 951) `shouldBe` Nothing
     sequence_
-      [ locateBoardWork admitted.appBoard target `shouldBe` locateBoardWork hidden.appBoard target
+      [ findEntryWithLocation admitted.appBoard target `shouldBe` findEntryWithLocation hidden.appBoard target
         | target <- [IssueId 800, IssueId 801, IssueId 940, PullRequestId 820, PullRequestId 830]
       ]
 
@@ -880,12 +806,6 @@ updatedPullRequestAfter :: Int -> PullRequest -> PullRequest
 updatedPullRequestAfter seconds pullRequest =
   pullRequest {pullRequestUpdatedAt = addUTCTime (fromIntegral seconds) epoch}
 
-idleDrainer :: DrainerStatus
-idleDrainer = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing
-
-busyDrainer :: DrainerStatus
-busyDrainer = DrainerStatus DrainerOn "running" DrainerServiceRunning Nothing
-
 everyLifecycle :: FilterCriteria
 everyLifecycle = defaultFilterCriteria {filterLifecycle = everyFacetValue}
 
@@ -920,39 +840,6 @@ settledState = do
 
 admitClosed :: AppState -> AppState
 admitClosed state = refreshVisibleBoard state {appFilterCriteria = everyLifecycle}
-
--- | The dashboard with @item@ selected, at whichever column and row it drew.
--- Located by identity, because the card the board holds is the one the
--- generation delivered rather than the literal a case names.
-selecting :: BoardItem -> AppState -> AppState
-selecting item state = case located of
-  Just (column, row) ->
-    admitted
-      { appSelectedColumn = column,
-        appSelectedRows = Map.insert column row admitted.appSelectedRows
-      }
-  Nothing -> admitted
-  where
-    admitted = admitClosed state
-    located = case matches of
-      value : _ -> Just value
-      [] -> Nothing
-    matches =
-      [ (column, row)
-        | column <- allBoardColumns,
-          (row, entry) <- zip [0 ..] (entriesFor admitted column),
-          itemId (entryItem entry) == itemId item
-      ]
-
-expectedNotice :: BoardItem -> Text
-expectedNotice (IssueItem issue) =
-  "Issue #" <> showNumber issue.issueNumber <> " is closed; completed history is read-only"
-expectedNotice (PullRequestItem pullRequest) =
-  "PR #"
-    <> showNumber pullRequest.pullRequestNumber
-    <> " is "
-    <> (if pullRequest.pullRequestState == PullRequestMerged then "merged" else "closed")
-    <> "; completed history is read-only"
 
 -- | Criteria that between them exercise every facet, including the empty ones
 -- an edit can leave behind.

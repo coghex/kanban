@@ -2,9 +2,9 @@
 module Spec.Config.Loading (spec) where
 
 import Control.Monad (forM_)
-import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Text.IO
 import Kanban.Config
@@ -26,7 +26,7 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-  preservedTablesSpec
+  scriptOwnedKeysSpec
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
       withTemporaryCacheRoot $ \configRoot ->
@@ -38,7 +38,7 @@ spec = do
           defaultRawConfig.rawRemoteName `shouldBe` "origin"
           defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
           defaultRawConfig.rawLimits `shouldBe` LimitsConfig 3
-          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45 120 120 14400
+          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
 
     it "honors an explicit --config path pointing at a fixture" $
       withTemporaryCacheRoot $ \configRoot -> do
@@ -72,12 +72,10 @@ spec = do
             approvalMode = ApprovalByEither,
             blockingSeverity = SeverityAmber,
             problemStyleLabels = Set.fromList ["defect"],
-            uiStyleLabels = Set.fromList ["interface", "input"],
-            coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"],
-            directPublicationPaths = Set.fromList ["docs/published.md", "REPORT.md"]
+            uiStyleLabels = Set.fromList ["interface", "input"]
           }
       config.rawLimits `shouldBe` LimitsConfig 5
-      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90 130 140 7200
+      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
       config.rawUsage
         `shouldBe` UsageConfig
           { usageCodexCommand = Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]),
@@ -94,10 +92,8 @@ spec = do
           resolved = resolveConfig "coghex/kanban" config
       resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
       resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
-      resolved.resolvedWorkflow.directPublicationPaths
-        `shouldBe` Set.fromList ["docs/kanban-published.md"]
       resolved.resolvedLimits `shouldBe` LimitsConfig 7
-      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90 130 150 3600
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
       resolved.resolvedCache `shouldBe` False
       resolved.resolvedRemoteName `shouldBe` "upstream"
 
@@ -112,7 +108,7 @@ spec = do
       -- Merge and precedence survive the normalized lookup unchanged.
       (selected "Coghex/Kanban").resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
       (selected "Coghex/Kanban").resolvedLimits `shouldBe` LimitsConfig 7
-      (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90 130 150 3600
+      (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
 
     it "folds the resolved identity ASCII-only, the way tools/kanban_config.py does" $ do
       -- A Unicode fold (Data.Text.toLower here, str.lower() there) maps the
@@ -186,60 +182,6 @@ spec = do
       resolved.resolvedWorkflow.problemStyleLabels `shouldBe` Set.fromList ["defect"]
       resolved.resolvedWorkflow.uiStyleLabels `shouldBe` Set.fromList ["widget-ui"]
 
-    it "defaults the drainer's coordination paths to empty, so an absent key merges past nothing" $ do
-      let (config, warnings) = unsafeConfig (decodeConfigText "[workflow]\napproval_label = \"lgtm\"\n")
-          resolved = resolveConfig "acme/widgets" config
-      warnings `shouldBe` []
-      defaultWorkflowConfig.coordinationPaths `shouldBe` Set.empty
-      resolved.resolvedWorkflow.coordinationPaths `shouldBe` Set.empty
-
-    it "inherits a global coordination-path array and lets a repository replace it in full" $ do
-      let toml =
-            "[workflow]\n"
-              <> "coordination_paths = [\"docs/status.md\", \"ROADMAP.md\"]\n"
-              <> "[repositories.\"acme/widgets\".workflow]\n"
-              <> "coordination_paths = [\"docs/widgets.md\"]\n"
-          (config, _) = unsafeConfig (decodeConfigText toml)
-      -- The repository that names none inherits the global array; the one that
-      -- names its own replaces it rather than extending it.
-      (resolveConfig "other/repo" config).resolvedWorkflow.coordinationPaths
-        `shouldBe` Set.fromList ["docs/status.md", "ROADMAP.md"]
-      (resolveConfig "acme/widgets" config).resolvedWorkflow.coordinationPaths
-        `shouldBe` Set.fromList ["docs/widgets.md"]
-
-    it "defaults direct-publication paths to empty and applies the usual repository replacement" $ do
-      let (defaults, defaultWarnings) = unsafeConfig (decodeConfigText "[workflow]\napproval_label = \"lgtm\"\n")
-          toml =
-            "[workflow]\n"
-              <> "direct_publication_paths = [\"docs/published.md\", \"REPORT.md\"]\n"
-              <> "[repositories.\"acme/widgets\".workflow]\n"
-              <> "direct_publication_paths = [\"docs/widgets.md\"]\n"
-          (config, warnings) = unsafeConfig (decodeConfigText toml)
-      defaultWarnings `shouldBe` []
-      defaultWorkflowConfig.directPublicationPaths `shouldBe` Set.empty
-      (resolveConfig "other/repo" defaults).resolvedWorkflow.directPublicationPaths `shouldBe` Set.empty
-      warnings `shouldBe` []
-      (resolveConfig "other/repo" config).resolvedWorkflow.directPublicationPaths
-        `shouldBe` Set.fromList ["docs/published.md", "REPORT.md"]
-      (resolveConfig "acme/widgets" config).resolvedWorkflow.directPublicationPaths
-        `shouldBe` Set.fromList ["docs/widgets.md"]
-
-    it "rejects an invalid coordination-path value the way every other string array is rejected" $ do
-      decodeConfigText "[workflow]\ncoordination_paths = [\"\"]\n"
-        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
-      decodeConfigText "[workflow]\ncoordination_paths = \"docs/status.md\"\n"
-        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
-      decodeConfigText "[workflow]\ncoordination_paths = [1]\n"
-        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
-
-    it "rejects invalid direct-publication paths with the full key" $ do
-      decodeConfigText "[workflow]\ndirect_publication_paths = [\"\"]\n"
-        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
-      decodeConfigText "[workflow]\ndirect_publication_paths = \"docs/status.md\"\n"
-        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
-      decodeConfigText "[workflow]\ndirect_publication_paths = [1]\n"
-        `shouldSatisfy` errorContains ["workflow", "direct_publication_paths"]
-
     it "rejects an empty label-styling entry the same way every other label list does" $ do
       decodeConfigText "[workflow]\nproblem_style_labels = [\"\"]\n"
         `shouldSatisfy` errorContains ["workflow", "problem_style_labels"]
@@ -298,38 +240,17 @@ spec = do
       (decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show largestSafeSeconds) <> "\n"))
         `shouldSatisfy` isRight
 
-    -- The ping bounds are timeouts like any other, so they are held to the
-    -- same rules rather than to a second, looser copy of them.
-    it "gives both ping timeouts the same positive, overflow-safe validation" $ do
-      let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
-          rejects key value =
-            decodeConfigText ("[timeouts]\n" <> key <> " = " <> Data.Text.pack (show value) <> "\n")
-              `shouldSatisfy` errorContains [key]
-      mapM_
-        (\key -> mapM_ (rejects key) [0, -1, overflowingSeconds])
-        ["ping_codex_seconds", "ping_claude_seconds"]
-      decodeConfigText "[timeouts]\nping_codex_seconds = 1\nping_claude_seconds = 1\n" `shouldSatisfy` isRight
-
-    it "rejects the global-only keys cache, remote_name, usage, and missions inside a repository override" $ do
+    it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
       decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
       decodeConfigText "[repositories.\"a/b\"]\nremote_name = \"origin\"\n" `shouldSatisfy` errorContains ["remote_name"]
       decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".usage]\n" `shouldSatisfy` errorContains ["usage"]
-      -- The scheduler's notification command is the operator's, not one
-      -- repository's, and `config.toml.example` says so. A table that only
-      -- warned here would sit in the file doing nothing while reading as
-      -- configuration that had been applied.
-      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".missions]\n" `shouldSatisfy` errorContains ["missions"]
-      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".missions.notifications]\nenabled = true\n"
-        `shouldSatisfy` errorContains ["missions"]
-
     it "warns, rather than fails, on an unrecognized key while still loading" $ do
       let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
 
-    it "warns on a misspelled direct-publication key rather than accepting it" $ do
-      let (config, warnings) = unsafeConfig (decodeConfigText "[workflow]\ndirect_publication_path = [\"docs/status.md\"]\n")
-      config.rawWorkflow.directPublicationPaths `shouldBe` Set.empty
+    it "warns on a misspelled script-owned key rather than accepting it" $ do
+      let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\ndirect_publication_path = [\"docs/status.md\"]\n")
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "direct_publication_path"
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
 
@@ -564,86 +485,113 @@ gitCheckout root name remote = do
   _ <- readProcessWithExitCode "git" ["-C", checkout, "remote", "add", "origin", remote] ""
   pure checkout
 
--- | The tables the mission runner read and the app no longer does, which the
--- configuration still decodes exactly as before: the scripts under @tools/@
--- and the file's own users keep those keys valid, and trimming them is a later
--- change. These examples were first written beside the runner that consumed
--- them and are the part of that coverage that outlived it.
-preservedTablesSpec :: Spec
-preservedTablesSpec = describe "the configuration tables the app no longer consumes" $ do
-  describe "the notification table" $ do
-    it "is off with no command by default" $ do
-      defaultMissionNotificationConfig.missionNotificationEnabled `shouldBe` False
-      defaultMissionNotificationConfig.missionNotificationCommand `shouldBe` Nothing
-      missionNotificationRefusal defaultMissionNotificationConfig `shouldBe` Nothing
+-- | The keys @tools\/kanban_config.py@ owns and the application neither reads
+-- nor judges, in every position they were documented.
+--
+-- Each case is a document carrying the key together with the same document
+-- with the key taken out, so "unchanged" is a comparison rather than a claim:
+-- the board keys beside the ignored one (@github_seconds@, @approval_label@)
+-- are what would move if the key were mistaken for something the app reads.
+-- A value is whatever the file wrote, including the ones the scripts refuse.
+scriptOwnedKeysSpec :: Spec
+scriptOwnedKeysSpec = describe "the keys the scripts own" $ do
+  forM_ scriptOwnedCases $ \(family, ignored, kept) ->
+    it ("loads quietly and unchanged with " <> family) $ do
+      let (withKeys, warnings) = unsafeConfig (decodeConfigText ignored)
+          (withoutKeys, _) = unsafeConfig (decodeConfigText kept)
+      warnings `shouldBe` []
+      withKeys `shouldBe` withoutKeys
+      resolveConfig "o/n" withKeys `shouldBe` resolveConfig "o/n" withoutKeys
 
-    it "decodes the documented table" $
-      case decodeConfigText "[missions.notifications]\nenabled = true\ncommand = [\"notify-send\", \"kanban\"]\n" of
-        Left message -> expectationFailure (Data.Text.unpack message)
-        Right (config, warnings) -> do
-          warnings `shouldBe` []
-          config.rawMissions.missionsNotifications.missionNotificationEnabled `shouldBe` True
-          config.rawMissions.missionsNotifications.missionNotificationCommand
-            `shouldBe` Just (MissionNotificationCommand ["notify-send", "kanban"])
+  -- The negative control for the examples above. "No warnings" only proves
+  -- something if the same position does warn about a key the schema lacks,
+  -- so each family is paired with a near miss that must be reported: an
+  -- example that stopped reading warnings, or a key that began to be
+  -- claimed more widely than its name, fails here.
+  forM_ nearMissCases $ \(family, document, reported) ->
+    it ("still warns about a near miss beside " <> family) $ do
+      let (_, warnings) = unsafeConfig (decodeConfigText document)
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf reported
 
-    -- Unknown keys warn, exactly as every other table's do, rather than
-    -- failing the load or being silently accepted.
-    it "warns about an unknown key rather than failing" $
-      case decodeConfigText "[missions.notifications]\nenabled = false\nwhenever = true\n" of
-        Left message -> expectationFailure (Data.Text.unpack message)
-        Right (config, warnings) -> do
-          length warnings `shouldBe` 1
-          config.rawMissions.missionsNotifications.missionNotificationEnabled `shouldBe` False
+  it "still refuses a board key with an invalid value beside the ignored ones" $ do
+    decodeConfigText "[timeouts]\ngithub_seconds = 0\nping_codex_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
+    decodeConfigText "[repositories.\"o/n\".timeouts]\nclaude_seconds = 0\nworker_deadline_seconds = 0\n"
+      `shouldSatisfy` errorContains ["claude_seconds"]
+    decodeConfigText "[workflow]\napproval_label = \"\"\ncoordination_paths = [\"\"]\n" `shouldSatisfy` errorContains ["approval_label"]
 
-    it "refuses an empty command array" $
-      case decodeConfigText "[missions.notifications]\ncommand = []\n" of
-        Left message -> ("non-empty" `Data.Text.isInfixOf` message) `shouldBe` True
-        Right _ -> expectationFailure "an empty command array was accepted"
+  it "still refuses the global-only keys the app does read inside a repository override" $ do
+    decodeConfigText "[repositories.\"o/n\"]\ncache = false\nmissions = 1\n" `shouldSatisfy` errorContains ["cache"]
 
-    it "names the refusal an enabled table with no command earns" $
-      missionNotificationRefusal (MissionNotificationConfig True Nothing)
-        `shouldBe` Just "missions.notifications.enabled is true and missions.notifications.command is not set, so there is nothing to run"
+  it "still refuses malformed TOML whatever the ignored keys hold" $
+    decodeConfigText "[missions]\nagent_ceiling = \n" `shouldSatisfy` isLeftText
 
-    -- A command written down and left switched off is how an operator tries
-    -- one out, so it must not become a refusal.
-    it "leaves a configured command switched off without refusing" $
-      missionNotificationRefusal (MissionNotificationConfig False (Just (MissionNotificationCommand ["notify"]))) `shouldBe` Nothing
+scriptOwnedCases :: [(String, Text, Text)]
+scriptOwnedCases =
+  [ ( "a missions table the scripts would refuse",
+      "remote_name = \"upstream\"\n[missions]\nagent_ceiling = 0\n[missions.notifications]\nenabled = true\n",
+      "remote_name = \"upstream\"\n"
+    ),
+    ( "missions of the wrong type, and a negative and a fractional ceiling",
+      "missions = 3\n",
+      ""
+    ),
+    ( "a notification command of the wrong type",
+      "[missions]\nagent_ceiling = -1\n[missions.notifications]\ncommand = 7\nenabled = \"yes\"\n",
+      ""
+    ),
+    ( "valid ping and worker-deadline timeouts beside board timeouts",
+      "[timeouts]\ngithub_seconds = 60\nping_codex_seconds = 130\nping_claude_seconds = 140\nworker_deadline_seconds = 7200\n",
+      "[timeouts]\ngithub_seconds = 60\n"
+    ),
+    ( "out-of-range ping and worker-deadline timeouts",
+      "[timeouts]\ngithub_seconds = 60\nping_codex_seconds = 0\nping_claude_seconds = -1\nworker_deadline_seconds = 604801\n",
+      "[timeouts]\ngithub_seconds = 60\n"
+    ),
+    ( "ping and worker-deadline timeouts of the wrong type",
+      "[timeouts]\ngithub_seconds = 60\nping_codex_seconds = \"soon\"\nping_claude_seconds = [1]\nworker_deadline_seconds = 1.5\n",
+      "[timeouts]\ngithub_seconds = 60\n"
+    ),
+    ( "an overflowing ping timeout",
+      "[timeouts]\nping_codex_seconds = 9223372036854775807\n",
+      ""
+    ),
+    ( "valid coordination and direct-publication paths",
+      "[workflow]\napproval_label = \"lgtm\"\ncoordination_paths = [\"docs/status.md\", \"ROADMAP.md\"]\ndirect_publication_paths = [\"docs/published.md\"]\n",
+      "[workflow]\napproval_label = \"lgtm\"\n"
+    ),
+    ( "coordination and direct-publication paths of the wrong shape",
+      "[workflow]\napproval_label = \"lgtm\"\ncoordination_paths = [\"\"]\ndirect_publication_paths = \"docs/status.md\"\n",
+      "[workflow]\napproval_label = \"lgtm\"\n"
+    ),
+    ( "coordination and direct-publication paths holding numbers",
+      "[workflow]\ncoordination_paths = [1]\ndirect_publication_paths = [true]\n",
+      ""
+    ),
+    ( "ping and worker-deadline timeouts in a repository table",
+      "[repositories.\"o/n\".timeouts]\ngithub_seconds = 15\nping_claude_seconds = 0\nworker_deadline_seconds = \"never\"\nping_codex_seconds = 150\n",
+      "[repositories.\"o/n\".timeouts]\ngithub_seconds = 15\n"
+    ),
+    ( "coordination and direct-publication paths in a repository table",
+      "[repositories.\"o/n\".workflow]\napproval_label = \"ship-it\"\ncoordination_paths = [\"\"]\ndirect_publication_paths = [\"docs/o.md\"]\n",
+      "[repositories.\"o/n\".workflow]\napproval_label = \"ship-it\"\n"
+    ),
+    ( "a missions table inside a repository table",
+      "[repositories.\"o/n\"]\npath = \"/tmp/o-n\"\n[repositories.\"o/n\".missions]\nagent_ceiling = 0\n[repositories.\"o/n\".missions.notifications]\nenabled = true\n",
+      "[repositories.\"o/n\"]\npath = \"/tmp/o-n\"\n"
+    ),
+    ( "a scalar missions key inside a repository table",
+      "[repositories.\"o/n\"]\nmissions = false\n",
+      "[repositories.\"o/n\"]\n"
+    )
+  ]
 
-  describe "the agent ceiling" $ do
-    let ceilingOf text = (.missionsAgentCeiling) . (.rawMissions) . fst <$> decodeConfigText text
-        refusalOf configured = missionAgentCeilingRefusal defaultMissionsConfig {missionsAgentCeiling = configured}
-
-    it "defaults to two and takes a positive whole number" $ do
-      ceilingOf "" `shouldBe` Right (MissionAgentCeiling defaultMissionAgentCeiling)
-      defaultMissionAgentCeiling `shouldBe` 2
-      ceilingOf "[missions]\nagent_ceiling = 5\n" `shouldBe` Right (MissionAgentCeiling 5)
-
-    it "refuses zero, a negative number, a fraction, and anything else by name" $
-      forM_ ["0", "-1", "1.5", "\"two\"", "true"] $ \written -> do
-        let configured = ceilingOf ("[missions]\nagent_ceiling = " <> written <> "\n")
-        (written, fmap (fmap (Data.Text.isInfixOf "missions.agent_ceiling") . refusalOf) configured)
-          `shouldBe` (written, Right (Just True))
-
-  describe "the worker deadline" $ do
-    it "preserves the four-hour default when the setting is omitted" $ do
-      defaultWorkerDeadlineSeconds `shouldBe` 14400
-      defaultTimeoutsConfig.timeoutsWorkerDeadlineSeconds `shouldBe` 14400
-      case decodeConfigText "[timeouts]\ngithub_seconds = 30\n" of
-        Left message -> expectationFailure (Data.Text.unpack message)
-        Right (config, _) -> config.rawTimeouts.timeoutsWorkerDeadlineSeconds `shouldBe` 14400
-
-    it "documents one finite maximum and rejects everything outside the range" $ do
-      maximumWorkerDeadlineSeconds `shouldBe` 7 * 24 * 60 * 60
-      sequence_
-        [ (value, decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> value <> "\n"))
-            `shouldSatisfy` (\(_, decoded) -> either (const True) (const False) decoded)
-          | value <- ["0", "-1", Data.Text.pack (show (maximumWorkerDeadlineSeconds + 1))]
-        ]
-      case decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> Data.Text.pack (show maximumWorkerDeadlineSeconds) <> "\n") of
-        Left message -> expectationFailure (Data.Text.unpack message)
-        Right (config, _) -> config.rawTimeouts.timeoutsWorkerDeadlineSeconds `shouldBe` maximumWorkerDeadlineSeconds
-
-    it "names the ceiling in the message an over-maximum value fails with" $
-      case decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> Data.Text.pack (show (maximumWorkerDeadlineSeconds + 1)) <> "\n") of
-        Right _ -> expectationFailure "an over-maximum deadline loaded"
-        Left message -> Data.Text.unpack message `shouldSatisfy` (show maximumWorkerDeadlineSeconds `isInfixOf`)
+nearMissCases :: [(String, Text, Text)]
+nearMissCases =
+  [ ("missions", "missionz = 1\n", "missionz"),
+    ("the ping timeouts", "[timeouts]\nping_codex_second = 1\n", "ping_codex_second"),
+    ("the worker deadline", "[timeouts]\nworker_deadline = 1\n", "worker_deadline"),
+    ("the coordination paths", "[workflow]\ncoordination_path = []\n", "coordination_path"),
+    ("the direct-publication paths", "[workflow]\ndirect_publication_path = []\n", "direct_publication_path"),
+    ("a repository table's timeouts", "[repositories.\"o/n\".timeouts]\nping_claude_second = 1\n", "ping_claude_second"),
+    ("a repository table's workflow", "[repositories.\"o/n\".workflow]\ncoordination_path = []\n", "coordination_path")
+  ]

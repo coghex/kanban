@@ -23,7 +23,6 @@ import Kanban.UI.Filter (toggleFilterPanel)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (drawOverlay, helpLines, mouseHelpEntries)
 import Kanban.UI.Search (openSearch)
-import Kanban.UI.Incidents (incidentsFooterHints)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (AppState (..), Overlay (..))
 import Kanban.UI.Util (shownNotice)
@@ -106,7 +105,7 @@ spec = describe "keybinding table" $ do
     -- binding added by accident.
     it "keeps the overlay scopes to the board's bindings, plus the one that is overlay-only" $ do
       map (.bindingAction) (scopeBindings DetailsScope)
-        `shouldBe` [OpenCardPage, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
+        `shouldBe` [OpenCardPage, ToggleFullscreen, DismissOrClose, QuitDashboard]
       map (.bindingAction) (scopeBindings HelpScope) `shouldBe` [ToggleFullscreen, DismissOrClose, QuitDashboard]
       map (.bindingAction) (scopeBindings OverlayScope) `shouldBe` [ToggleFullscreen]
       map (.bindingAction) (scopeBindings BoardScope)
@@ -146,7 +145,7 @@ spec = describe "keybinding table" $ do
     it "includes the entries the hand-written line had dropped" $
       sequence_
         [ (label, label `elem` Text.splitOn "  " footerHintLine) `shouldBe` (label, True)
-          | label <- ["g first", "G last", "esc close", "m merge", "Ctrl-L repaint"]
+          | label <- ["g first", "G last", "esc close", "Ctrl-L repaint"]
         ]
 
     -- Issue #525. The row along the bottom of the screen used to name the
@@ -205,14 +204,12 @@ spec = describe "keybinding table" $ do
 
   -- Issue #525 requirement 4: the overlays that drew a hint line inside their
   -- own box no longer do, now that the base footer names their keys. Rendered
-  -- rather than read off the source, and asked of every overlay -- the
-  -- incidents panel has no golden frame of its own, so nothing else here would
-  -- notice one coming back.
+  -- rather than read off the source, and asked of every overlay.
   describe "overlay hint relocation" $ do
     it "accounts for every overlay the dashboard can open" $ do
       base <- overlayBaseState
       nub [overlayRoute overlay | (_, overlay, _, _) <- overlayFooterCases base]
-        `shouldMatchList` ["help", "details", "incidents"]
+        `shouldMatchList` ["help", "details"]
 
     it "draws no overlay's hint chips inside its own box" $ do
       base <- overlayBaseState
@@ -220,24 +217,14 @@ spec = describe "keybinding table" $ do
       -- the absence assertion below by having nothing in it to find.
       sequence_
         [ (name, length (overlayBoxLines state overlay) > 4) `shouldBe` (name, True)
-          | (name, overlay, state, _) <- overlayFooterCases base,
-            drewItsOwnHint overlay
+          | (name, overlay, state, _) <- overlayFooterCases base
         ]
       sequence_
         [ (name, chip, any (chip `Text.isInfixOf`) (overlayBoxLines state overlay))
             `shouldBe` (name, chip, False)
           | (name, overlay, state, _) <- overlayFooterCases base,
-            drewItsOwnHint overlay,
             chip <- overlayHintChips overlay
         ]
-
-    -- The negative control. The details and help overlays never drew a hint
-    -- line, so they are the two the assertion above must skip, and naming
-    -- them keeps a predicate that skipped everything from passing it.
-    it "skips exactly the two overlays that never drew one" $ do
-      base <- overlayBaseState
-      nub [overlayRoute overlay | (_, overlay, _, _) <- overlayFooterCases base, not (drewItsOwnHint overlay)]
-        `shouldMatchList` ["help", "details"]
 
   -- §7 gives `h`, `l`, Left, and Right a different meaning while a search is
   -- open: the letters are text and the arrows move the search. The base line
@@ -307,30 +294,33 @@ spec = describe "keybinding table" $ do
         ]
       nub gutters `shouldBe` take 1 gutters
 
-  -- The keys the agent screens used. They are unbound, not repurposed: no
-  -- scope resolves one to an action, and the dashboard's own event handler
-  -- does nothing with one on the base board beyond the per-event maintenance
-  -- every event gets.
-  describe "the unbound agent keys" $ do
+  -- The keys the agent screens and the service controls used. They are
+  -- unbound, not repurposed: no scope resolves one to an action, and the
+  -- dashboard's own event handler does nothing with one on the base board
+  -- beyond the per-event maintenance every event gets. Two of them stay live
+  -- where a surface owns the keyboard — a live search types them and the
+  -- filter panel's @d@ restores the defaults — which the examples after these
+  -- hold apart from the board's table.
+  describe "the unbound agent and service keys" $ do
     it "resolves none of them to an action in any scope" $
       sequence_
         [ (scope, character, boardAction scope (Vty.EvKey (Vty.KChar character) []))
             `shouldBe` (scope, character, Nothing)
           | scope <- [minBound .. maxBound],
-            character <- removedAgentKeys
+            character <- removedKeys
         ]
 
     it "claims none of them in the table at all" $
       sequence_
         [ (character, [candidate.bindingAction | candidate <- boardBindings, pressed <- candidate.bindingKeys, pressed == chord (Vty.KChar character) []])
             `shouldBe` (character, [])
-          | character <- removedAgentKeys
+          | character <- removedKeys
         ]
 
     it "leaves the base board unchanged when one is pressed with no overlay open" $ do
       base <- testAppState (fixtureBoard [(Issues, [fixtureStandaloneEntry 10])])
       baseline <- runDashboardScript (120, 40) id base [quitStep]
-      for_ removedAgentKeys $ \character -> do
+      for_ removedKeys $ \character -> do
         pressed <- runDashboardScript (120, 40) id base [Press (Vty.EvKey (Vty.KChar character) []), quitStep]
         (character, quietFacts pressed.runState) `shouldBe` (character, quietFacts baseline.runState)
         pressed.runState.appOverlay `shouldBe` Nothing
@@ -425,12 +415,11 @@ withOverlay overlay state = state {appOverlay = Just overlay}
 --
 -- Total over the routes rather than over 'Overlay' -- which carries payloads
 -- and so cannot be enumerated -- with 'overlayRoute' holding the inventory
--- to three.
+-- to two.
 overlayFooterCases :: AppState -> [(String, Overlay, AppState, [Text])]
 overlayFooterCases base =
   [ opened "help" HelpOverlay (map footerHint (scopeBindings HelpScope)),
-    opened "details" (DetailsOverlay (IssueItem overlayIssue)) (map footerHint (scopeBindings DetailsScope)),
-    opened "incidents" IncidentsOverlay incidentsFooterHints
+    opened "details" (DetailsOverlay (IssueItem overlayIssue)) (map footerHint (scopeBindings DetailsScope))
   ]
   where
     opened name overlay declared = (name, overlay, withOverlay overlay base, declared)
@@ -442,15 +431,6 @@ overlayRoute :: Overlay -> String
 overlayRoute = \case
   HelpOverlay -> "help"
   DetailsOverlay _ -> "details"
-  IncidentsOverlay -> "incidents"
-
--- | Whether this overlay used to draw a hint line inside its own box. Total
--- for the same reason 'overlayRoute' is.
-drewItsOwnHint :: Overlay -> Bool
-drewItsOwnHint = \case
-  HelpOverlay -> False
-  DetailsOverlay _ -> False
-  IncidentsOverlay -> True
 
 -- | One overlay drawn through the real 'drawOverlay', so what is asserted
 -- absent is absent from the box a user actually sees rather than from the
@@ -463,18 +443,26 @@ overlayBoxLines state overlay = renderWidgetLines (themeFor testOptions) 120 (dr
 removedAgentKeys :: [Char]
 removedAgentKeys = "rSAxpo"
 
+-- | The four keys the service controls used: the incidents panel, the issue
+-- approval service, the PR drainer, and the direct merge.
+removedServiceKeys :: [Char]
+removedServiceKeys = "iadm"
+
+-- | Every key a board binding was removed from.
+removedKeys :: [Char]
+removedKeys = removedAgentKeys <> removedServiceKeys
+
 -- | Everything an unbound key must leave alone on the base board: the overlay,
--- the notice, the selection, the search and filter surfaces, and the service
--- state a binding could have moved. The clock, the notice's expiry and the
+-- the notice, the selection, the search and filter surfaces, and the sidebar
+-- and excerpt state a binding could have moved. The clock, the notice's expiry and the
 -- layout epochs are per-event maintenance and are deliberately not compared.
-quietFacts :: AppState -> (Maybe Overlay, Maybe Text, (Int, [(Int, Int)]), Bool, Bool, Bool, Bool, Bool)
+quietFacts :: AppState -> (Maybe Overlay, Maybe Text, (Int, [(Int, Int)]), Bool, Bool, Bool, Bool)
 quietFacts state =
   ( state.appOverlay,
     shownNotice state,
     (fromEnum state.appSelectedColumn, [(fromEnum column, row) | (column, row) <- Map.toList state.appSelectedRows]),
     state.appSearch == Nothing,
     state.appFilterPanel == Nothing,
-    state.appDrainerBusy || state.appApprovalBusy,
     state.appSidebarVisible,
     state.appExcerptsVisible
   )

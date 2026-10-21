@@ -348,8 +348,7 @@ testResolvedConfig =
         defaultUsageConfig
           { usageCodexCommand = Just (UsageCommandConfig ["/nonexistent/kanban-test-codex-usage"]),
             usageClaudeCommand = Just (UsageCommandConfig ["/nonexistent/kanban-test-claude-usage"])
-          },
-      resolvedMissions = defaultMissionsConfig
+          }
     }
 
 fullFixtureToml :: Text
