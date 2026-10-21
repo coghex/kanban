@@ -15,6 +15,17 @@ created above it.
 
 ### Unreleased
 
+- Removed the review backend, the provider adapter and the review tool server
+  (epic #794, child 4, #815; part 2 of #798's split). `kanban --review-tools`
+  no longer exists: the parser refuses it as an unknown option, alone and beside
+  `--usage`; no mode starts a review. `--usage`, `--glyph-test` and the dashboard
+  behave as before. `Kanban.Review` with its `Canonical`, `Client`, `Connection`,
+  `Diagnostics`, `Prompts`, `Stream`, `Tools` and `Types` submodules,
+  `Kanban.ReviewToolServer`, `Kanban.ProviderAdapter`, `Kanban.Solve.Event`,
+  `Kanban.Transcript` and `Kanban.Settings` are deleted, with the tests and Python
+  assertions that pinned them, and `Kanban.Process` stops exporting
+  `managedProcessPid`. Review session logs and the settings file on disk are
+  neither read nor deleted.
 - Removed the solve and pull-request flows and the deliberate ping (epic #794,
   child 4, #814; part 1 of #798's split). `kanban --ping` no longer exists: the
   parser refuses it as an unknown option, alone, repeated and beside `--usage`,
