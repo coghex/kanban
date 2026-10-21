@@ -34,14 +34,14 @@
 ||                          ||                                 |  | category defaults         | |                                |  |  reviewed:approve         | ||
 ||                          ||                                 |  |  code-health              | |                                |  |  feature                  | ||
 ||                          ||                                 |  | @claude-agent · updated   | |                                |  | #901 · agent-name →       | ||
-|| +-------------------+    ||                                 |  | 4h ago                    | |                                |  | master · updated 3h ago   | ||
-|| | approve_issues.py |    ||                                 |  | Make the fresh-install    | |                                |  | Reads the cache through   | ||
-|| +-------------------+    ||                                 |  | behavior explicit and     | |                                |  | the versioned envelope    | ||
-|| off                      ||                                 |  | keep local state outside… | |                                |  | and reports a truncated…  | ||
-|| +--------------+         ||                                 |  +---------------------------+ |                                |  | ◐ CI 9/12 · behind        | ||
-|| | drain_prs.py |         ||                                 |                                |                                |  +---------------------------+ ||
-|| +--------------+         ||                                 |                                |                                |                                ||
-|| off                      ||                                 |                                |                                |                                ||
+||                          ||                                 |  | 4h ago                    | |                                |  | master · updated 3h ago   | ||
+||                          ||                                 |  | Make the fresh-install    | |                                |  | Reads the cache through   | ||
+||                          ||                                 |  | behavior explicit and     | |                                |  | the versioned envelope    | ||
+||                          ||                                 |  | keep local state outside… | |                                |  | and reports a truncated…  | ||
+||                          ||                                 |  +---------------------------+ |                                |  | ◐ CI 9/12 · behind        | ||
+||                          ||                                 |                                |                                |  +---------------------------+ ||
+||                          ||                                 |                                |                                |                                ||
+||                          ||                                 |                                |                                |                                ||
 |+--------------------------++---------------------------------+--------------------------------+--------------------------------+--------------------------------+|
 | h/l/any letter type  backspace delete  ←/→ move search  ↑/↓ select  enter details  s/esc close                                                                   |
 | board: updated 3h ago · history: current                                                                                                                         |

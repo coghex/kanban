@@ -64,7 +64,6 @@ import Kanban.Domain
     issueNumber,
     pullRequestNumber,
   )
-import Kanban.Drainer (directMergeArguments)
 import Kanban.Filter
   ( criteriaDataset,
     defaultFilterCriteria,
@@ -83,11 +82,10 @@ import Kanban.GitHub
     planCoordinator,
   )
 import Kanban.Repository (parseRemoteRepository)
-import Kanban.UI.Events (boardMouseAction, boardMousePress, mutatesSelectedWork)
+import Kanban.UI.Events (boardMouseAction, boardMousePress)
 import Kanban.UI.Keys (BoardAction, binding)
 import Kanban.UI.Types
   ( AppState,
-    IncidentRef (..),
     Name (..),
   )
 import Spec.Design.Entries
@@ -396,24 +394,24 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "`mutatesSelectedWork`, total in `BoardAction`, is True for exactly one action: MergeDoneCard.",
+                "The dashboard's action inventory is exactly the recorded `BoardAction` values, none of which acts on the work a card stands for.",
               factRationale =
-                "That one is the drainer's own merge path this entry permits, and nothing else on the board acts on the work a card stands for — no action edits a card's title, body, labels, assignees, or column. Because the predicate is total in `BoardAction`, an action added to the table in Kanban.UI.Keys cannot reach the board without a decision here, and a second mutating action fails this comparison.",
+                "No recorded action edits a card's title, body, labels, assignees, or column; they select, search, filter, expand, open a page, resize an overlay, refresh, collapse, and quit. The inventory is compared exactly and in both directions, so an action added to the table in Kanban.UI.Keys cannot reach the board without a decision here.",
               factReads = [],
-              factCheck = pure mutatingActions
+              factCheck = pure boardActionInventory
             }
       ),
     Declaration
       3
-      "Implementing a merge. Kanban decides only whether to invoke the PR drainer's own single-pull-request path (`tools/drain_prs.py --pr`), which owns every gate, the merge itself, and the post-merge cleanup; Kanban holds no second copy of any of that, and merges nothing that path would refuse."
+      "Implementing a merge. Kanban merges nothing: no board action starts a merge and every GitHub request it makes is a read; the PR drainer under `tools/` runs outside the application."
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "`directMergeArguments`, the one argument vector Kanban builds to merge a pull request, is the resolved `drain_prs.py` path followed by `--path`, `--repo`, `--pr` and the number, with `--config` appended when one is selected.",
+                "The dashboard's action inventory is exactly the recorded `BoardAction` values, none of which merges anything; and every GraphQL document Kanban sends begins `query(` and contains no `mutation`, over both traversals and every cursor and sub-issue combination.",
               factRationale =
-                "Merging by any other route would mean a second argument vector — a `gh pr merge`, a `git merge`, or a GraphQL mutation — rather than this delegation. Holding the vector exactly is what keeps the decision the only thing on this side: every gate the drainer applies stays behind the script this names, and a merge implemented here would have to stop building it.",
+                "A merge is a mutating `gh` subcommand, a `git merge`, or a GraphQL mutation, and each would have to be reached from a binding or built as a request. The closed action inventory leaves no binding to reach one from, and every request the board builds is a read.",
               factReads = [],
-              factCheck = pure mergeDelegation
+              factCheck = pure (everyFault [boardActionInventory, githubRequestsAreReads])
             }
       ),
     Declaration
@@ -478,11 +476,11 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "Every GraphQL document Kanban sends begins `query(` and contains no `mutation`, over both traversals and every cursor and sub-issue combination; and `mutatesSelectedWork` is True for exactly the one drainer merge action.",
+                "Every GraphQL document Kanban sends begins `query(` and contains no `mutation`, over both traversals and every cursor and sub-issue combination; and the dashboard's action inventory is exactly the recorded `BoardAction` values, none of which acts on a card's work.",
               factRationale =
-                "An assignment or a label change is a GraphQL mutation or a mutating `gh` subcommand, and every document Kanban sends is a query. The action side is closed too: the one action that acts on a card's work hands off to the drainer's merge path §3 names, and it edits no assignee or label from the board.",
+                "An assignment or a label change is a GraphQL mutation or a mutating `gh` subcommand, and every document Kanban sends is a query. The action side is closed too: no recorded action edits an assignee or a label from the board.",
               factReads = [],
-              factCheck = pure (everyFault [githubRequestsAreReads, mutatingActions])
+              factCheck = pure (everyFault [githubRequestsAreReads, boardActionInventory])
             }
       ),
     Declaration
@@ -748,11 +746,7 @@ boardActionInventory =
       "OpenCardPage",
       "ToggleFullscreen",
       "DismissOrClose",
-      "ShowIncidents",
       "RefreshAll",
-      "ToggleApproval",
-      "ToggleDrainer",
-      "MergeDoneCard",
       "ToggleSidebar",
       "ToggleExcerpts",
       "ShowHelp",
@@ -804,14 +798,6 @@ boardActionInventoryBeforeCardPage =
     ]
     (map showText everyBoardAction)
 
--- | The actions that act on the work a card stands for.
-mutatingActions :: Maybe Text
-mutatingActions =
-  sameAs
-    "the board actions that act on the work a card stands for"
-    ["MergeDoneCard"]
-    (map showText (filter mutatesSelectedWork everyBoardAction))
-
 -- | The bindings table takes the action and nothing else.
 compileTimeBindings :: Maybe Text
 compileTimeBindings = pinnedType "the board's binding table" binding "BoardAction -> KeyBinding"
@@ -831,32 +817,6 @@ singleRepositoryDataset =
     "the dataset a board is derived from"
     criteriaDataset
     "FilterCriteria -> Maybe RepoSnapshot -> Maybe CompletedHistory -> Maybe RepoSnapshot"
-
--- | The vector Kanban builds to merge one pull request.
-mergeDelegation :: Maybe Text
-mergeDelegation = everyFault [withoutConfig, withConfig]
-  where
-    repository = Repository "/checkout" "coghex" "kanban"
-    drainer = "/opt/kanban/drain_prs.py"
-    withoutConfig =
-      sameAs
-        "the merge argument vector"
-        ["/opt/kanban/drain_prs.py", "--path", "/checkout", "--repo", "coghex/kanban", "--pr", "41"]
-        (directMergeArguments drainer repository Nothing 41)
-    withConfig =
-      sameAs
-        "the merge argument vector with a selected configuration"
-        [ "/opt/kanban/drain_prs.py",
-          "--path",
-          "/checkout",
-          "--repo",
-          "coghex/kanban",
-          "--pr",
-          "41",
-          "--config",
-          "/etc/kanban/config.toml"
-        ]
-        (directMergeArguments drainer repository (Just "/etc/kanban/config.toml") 41)
 
 -- | Every `gh` vector the board builds, over both traversals.
 githubRequestsAreReads :: Maybe Text
@@ -956,14 +916,12 @@ pointerClaims = do
 declaredPointerClaims :: [(Text, Text, Text, Text)]
 declaredPointerClaims =
   sort
-    [ ("ApprovalButton", "BLeft", "no modifiers", "ToggleApprovalFromClick"),
-      ("CardTarget", "BLeft", "any modifiers", "SelectOrOpenCardAt"),
+    [ ("CardTarget", "BLeft", "any modifiers", "SelectOrOpenCardAt"),
       ("CardTarget", "BRight", "any modifiers", "SelectCardOnlyAt"),
       ("CardTarget", "BScrollDown", "any modifiers", "ScrollColumnBy"),
       ("CardTarget", "BScrollUp", "any modifiers", "ScrollColumnBy"),
       ("ColumnViewport", "BScrollDown", "any modifiers", "ScrollColumnBy"),
       ("ColumnViewport", "BScrollUp", "any modifiers", "ScrollColumnBy"),
-      ("DrainerButton", "BLeft", "no modifiers", "ToggleDrainerFromClick"),
       ("EpicTarget", "BLeft", "any modifiers", "ToggleEpicFromClick"),
       ("EpicTarget", "BScrollDown", "any modifiers", "ScrollColumnBy"),
       ("EpicTarget", "BScrollUp", "any modifiers", "ScrollColumnBy"),
@@ -1004,18 +962,13 @@ claimedPresses state =
 -- names, with one target per board column where the name carries one.
 probeTargets :: [(Text, [Name])]
 probeTargets =
-  [ ("ApprovalButton", [ApprovalButton]),
-    ("BoardViewport", [BoardViewport]),
+  [ ("BoardViewport", [BoardViewport]),
     ("CardTarget", [CardTarget column 0 | column <- everyColumn]),
     ("ColumnViewport", [ColumnViewport column | column <- everyColumn]),
     ("DetailsPanel", [DetailsPanel]),
     ("DetailsViewport", [DetailsViewport]),
-    ("DrainerButton", [DrainerButton]),
     ("EpicTarget", [EpicTarget column 0 7 | column <- everyColumn]),
     ("FilterBoxTarget", [FilterBoxTarget box | box <- everyFilterBox]),
-    ("IncidentTarget", [IncidentTarget (DrainerIncidentRef "drainer")]),
-    ("IncidentsPanel", [IncidentsPanel]),
-    ("IncidentsViewport", [IncidentsViewport]),
     ("UpdateButton", [UpdateButton])
   ]
 

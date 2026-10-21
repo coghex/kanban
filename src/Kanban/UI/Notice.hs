@@ -83,15 +83,6 @@ data NoticeActivity
   | -- | One provider's @Refreshing … usage…@, alive while that provider's
     -- freshness says so.
     UsageRefreshRunning UsageProvider
-  | -- | The PR drainer's optimistic start/stop report, alive until the
-    -- toggle's observation lands.
-    DrainerToggleRunning
-  | -- | The issue approval service's optimistic start/stop report, alive
-    -- until the toggle's observation lands.
-    ApprovalToggleRunning
-  | -- | @Merging PR #n…@, alive while that pull request's direct merge is
-    -- pending.
-    DirectMergeRunning Int
   | -- | @Stopping GitHub work…@, alive while the quit is waiting for the
     -- coordinator's cleanup verdict.
     QuitSettling
@@ -184,8 +175,8 @@ armedNoticeExpiry state = do
 currentNotice :: NoticeState -> Maybe Text
 currentNotice state = (.noticeText) <$> state.noticeCurrent
 
--- | The displayed instance's identity, which is what the direct-merge carry
--- compares instead of text ('Kanban.UI.Util.outstandingDirectMergeReport').
+-- | The displayed instance's identity, which is what the startup-report carry
+-- compares instead of text ('Kanban.UI.Util.outstandingStartupReport').
 currentNoticeInstance :: NoticeState -> Maybe Int
 currentNoticeInstance state = (.noticeInstance) <$> state.noticeCurrent
 

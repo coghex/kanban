@@ -18,9 +18,6 @@ module Kanban.UI.Filter
     refreshVisibleBoard,
     applyCriteriaChange,
 
-    -- * Read-only history
-    readOnlyHistoryRefusal,
-
     -- * The panel
     FilterInput (..),
     applyFilterInput,
@@ -51,7 +48,7 @@ module Kanban.UI.Filter
   )
 where
 
-import Data.List (elemIndex, find)
+import Data.List (elemIndex)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -64,7 +61,6 @@ import Kanban.Filter
 import Kanban.UI.Search (SearchAnchor, openSearch, seatColumnOn, selectedAnchorIn)
 import Kanban.UI.Types
 import Kanban.UI.Util (allColumns, noticeCleared, showText)
-import Kanban.Workflow (itemCompleted, readOnlyHistoryNotice)
 
 -- | Recompute what the criteria admit from the datasets currently held.
 --
@@ -113,27 +109,6 @@ applyCriteriaChange change state = reseat (refreshVisibleBoard edited)
         seated
         (filter ((/= state.appSelectedColumn) . fst) anchors <> filter ((== state.appSelectedColumn) . fst) anchors)
 
--- | Why a mutating action must decline this item, or 'Nothing' when it may
--- proceed.
---
--- The item a caller holds is not trusted on its own. A details overlay can
--- have been opened while the work was live and still be on screen after a
--- refresh settled it, so the newest completed generation is asked too: it
--- outranks the held record, and the refusal is worded from that generation's
--- own copy of the item. That is what makes this safe to call at a launch
--- boundary as well as at the key press that reached it.
-readOnlyHistoryRefusal :: AppState -> BoardItem -> Maybe Text
-readOnlyHistoryRefusal state item
-  | Just newer <- settledInHistory = Just (readOnlyHistoryNotice newer)
-  | itemCompleted item = Just (readOnlyHistoryNotice item)
-  | otherwise = Nothing
-  where
-    settledInHistory = state.appCompletedHistory >>= settledItem
-    settledItem history = case item of
-      IssueItem issue -> IssueItem <$> find ((== issue.issueNumber) . (.issueNumber)) history.historyIssues
-      PullRequestItem pullRequest ->
-        PullRequestItem <$> find ((== pullRequest.pullRequestNumber) . (.pullRequestNumber)) history.historyPullRequests
-
 -- ---------------------------------------------------------------------------
 -- Focus
 -- ---------------------------------------------------------------------------
@@ -157,7 +132,7 @@ reachableSearch state
 -- close path has to know the panel is underneath it, and neither does the
 -- blocker. A visible panel is never keyboard-dead — without that, checking
 -- @Closed@ while search held the focus would leave the box that put the
--- blocker up unable to take it down, and @d@ would reach the drainer.
+-- blocker up unable to take it down.
 focusedFilterPanel :: AppState -> Maybe FilterPanel
 focusedFilterPanel state = do
   panel <- state.appFilterPanel

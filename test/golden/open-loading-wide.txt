@@ -49,16 +49,16 @@
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃                                                                                                                                                                          ║
-║┃ ┃ approve_issues.py ┃    ┃                                                                                                                                                                          ║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃                                                                                                                                                                          ║
-║┃ off                      ┃                                                                                                                                                                          ║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃                                                                                                                                                                          ║
-║┃ ┃ drain_prs.py ┃         ┃                                                                                                                                                                          ║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃                                                                                                                                                                          ║
-║┃ off                      ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                                                                                                                                                          ║
-║ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  i attention  u update  a approvals  d drainer  m merge   ║
+║ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  u update  c sidebar  v excerpts  ? help  Ctrl-L repaint  ║
 ║ board: refreshing… · history: current                                                                                                                                                                ║
 ║ Refreshing GitHub…                                                                                                                                                                                   ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

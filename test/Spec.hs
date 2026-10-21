@@ -17,7 +17,6 @@
 module Main (main) where
 
 import qualified Spec.Agent.Capture as Capture
-import qualified Spec.ApprovalService as ApprovalService
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Usage as Usage
 import qualified Spec.Agent.UsageMode as UsageMode
@@ -26,7 +25,6 @@ import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
 import qualified Spec.Config.Loading as ConfigLoading
 import qualified Spec.Design.Witnesses as DesignWitnesses
-import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.History as GitHubHistory
@@ -34,7 +32,6 @@ import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.ConcurrentReaders as ConcurrentReaders
 import qualified Spec.GitHub.RecordLock as RecordLock
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
-import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
@@ -62,7 +59,6 @@ import qualified Spec.UI.FocusRefresh as FocusRefresh
 import qualified Spec.UI.Notice as Notice
 import qualified Spec.UI.Fullscreen as Fullscreen
 import qualified Spec.UI.Golden as Golden
-import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Keys as Keys
 import qualified Spec.UI.Layout as Layout
 import qualified Spec.UI.OpenData as OpenData
@@ -120,8 +116,9 @@ main = do
 -- > cabal run kanban-test -- --print-slow-items=2000
 --
 -- which is how to check the packing again after a group's cost moves. Those
--- measurements predate the removal of the review, solve and ping groups, which
--- left the supervision lane without a group and so removed it, and they predate
+-- measurements predate the removal of the review, solve, ping, drainer,
+-- approval-service and managed-path groups, the first of which left the
+-- supervision lane without a group and so removed it, and they predate
 -- "Spec.Repository.Lease", whose 1.7 seconds are small enough to ride along
 -- anywhere on cost alone; it sits in @UsageLane@ for the reason
 -- 'suiteColocations' states rather than for its cost.
@@ -151,9 +148,6 @@ suiteGroups =
     -- against that churn. Its own cost is a few seconds of forced cleanup.
     SuiteGroup "Spec.GitHub.ConcurrentReaders" UsageLane ConcurrentReaders.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
-    SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
-    SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,
-    SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
@@ -170,7 +164,6 @@ suiteGroups =
     SuiteGroup "Spec.UI.Fullscreen" PingLane Fullscreen.spec,
     SuiteGroup "Spec.UI.Notice" PingLane Notice.spec,
     SuiteGroup "Spec.UI.Golden" PingLane Golden.spec,
-    SuiteGroup "Spec.UI.Incidents" PingLane Incidents.spec,
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
     SuiteGroup "Spec.UI.Browser" PingLane Browser.spec,

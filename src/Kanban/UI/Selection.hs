@@ -74,9 +74,6 @@ normalizeSelectedRowsAfterToggle expandedTrackers board = Map.mapWithKey (normal
 refreshOverlay :: Board -> Maybe Overlay -> (Maybe Overlay, Maybe Text)
 refreshOverlay _ Nothing = (Nothing, Nothing)
 refreshOverlay _ (Just HelpOverlay) = (Just HelpOverlay, Nothing)
--- The panel is rebuilt from live state on every draw, so a refresh that
--- changes what needs attention is picked up without closing it.
-refreshOverlay _ (Just IncidentsOverlay) = (Just IncidentsOverlay, Nothing)
 refreshOverlay board (Just (DetailsOverlay oldItem)) =
   case findItem board (itemId oldItem) of
     Just (_, _, refreshedItem) -> (Just (DetailsOverlay refreshedItem), Nothing)

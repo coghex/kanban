@@ -1111,15 +1111,14 @@ reimplement the removal, and `--check` remains read-only.
   lifecycle, plus the service loop), `tools/service_manager.py` (the one
   service-manager boundary both of the others reach their host's manager
   through), and
-  `tools/install_drainer.py` (installer), surfaced in-app by
-  `src/Kanban/Drainer.hs`. The
+  `tools/install_drainer.py` (installer). The
   drainer (`tools/drain_prs.py`) records and resolves its own per-pull
-  -request conflict incidents through that same storage. Kanban's in-app
-  surface is read-only for everything the *service* owns — status, incidents,
-  logs — and adds exactly two mutations: starting or stopping the installed job
-  through the controller, and running `tools/drain_prs.py --pr` once for one
-  selected pull request. It owns neither merge policy nor cleanup; every gate,
-  the merge, and the post-merge obligations stay with `tools/drain_prs.py`.
+  -request conflict incidents through that same storage. The application has
+  no in-app surface for any of it: it neither reads the service's status,
+  incidents, or logs nor starts, stops, or merges through it, and the owner
+  runs the controller and `tools/drain_prs.py --pr` from the command line.
+  Merge policy and cleanup belong to `tools/drain_prs.py` alone; every gate,
+  the merge, and the post-merge obligations stay with it.
 - **Asset root and target:** the repository a job drains and the tree its
   installed script links point into are two separate inputs.
   `tools/install_drainer.py --repo` is the target: a real main checkout with a
@@ -1164,9 +1163,8 @@ reimplement the removal, and `--check` remains read-only.
   — the controller and the installer both reach their host's manager through
   that backend, and neither builds a `launchctl` or `systemctl` argument
   vector, reads either one's output, or writes or parses a plist or a unit
-  file. `launchctl` is spawned nowhere else in the tree; the one `systemctl`
-  spawn outside that backend is the §2.8 dashboard's read-only user-manager
-  version probe, which manages no job. The drainer's own PR-merge loop
+  file. Neither `launchctl` nor `systemctl` is spawned anywhere else in the
+  tree, and no application module spawns either. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
   operation, and, only for automated stale-head rereview rounds, to whichever
   of `codex exec` or `claude -p` the roster's operating mode selects: Codex in
@@ -1206,27 +1204,10 @@ reimplement the removal, and `--check` remains read-only.
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
   request, and is covered by `tools/test_single_pr_drain.py`.
-  `src/Kanban/Drainer.hs` spawns that entry point directly, as
+  Nothing in the application runs it: the owner invokes it as
   `python3 <install dir>/drain_prs.py --path <root> --repo OWNER/NAME --pr
-  <number> [--config <path>]`, for the board's `m` key. The script is resolved
-  from the Kanban-managed install directory — `KANBAN_DRAINER_INSTALL_DIR`,
-  then the directory the discovered service definition runs its controller
-  from, then
-  the directory holding the discovery record — rather than from the repository
-  checkout, so an install made with `--install-dir` stays usable by a dashboard
-  that inherits none of the installer's environment. A source that is present
-  but names no resolvable directory — a relative override, or a definition
-  that does not run its controller from an absolute path — fails there rather
-  than falling through to the next source, since falling through would merge
-  with a different installation than the one configured and say nothing. A
-  missing installation is reported with a remediation naming
-  `tools/install_drainer.py` and the directory actually consulted, never as a
-  failed merge. The result that run writes is accepted only after it is
-  established to be this contract's document for the pull request that was
-  asked about — schema, a version Kanban reads, the selected number, a known
-  outcome, and no contradiction between the outcome, the merge flag, and the
-  dry-run flag — since resolving a path means whatever is installed there
-  answers, and a claimed merge is both shown to the user and acted on.
+  <number> [--config <path>]`, and the result it writes is the document
+  `docs/pr-drainer.md` specifies.
 - **Review authority and the verdict a merge obeys:** the drainer reads every
   published review marker on a candidate — the canonical `pr-review:v2` §2.2's
   coordinator publishes, its own `pr-review:v1`, and the legacy `codex-review`
@@ -1281,42 +1262,32 @@ reimplement the removal, and `--check` remains read-only.
   definition per
   canonical GitHub repository, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized
-  identity. Kanban names none of them: it selects this repository's entry in
-  the discovery record `tools/drain_prs_service.py` writes — at that module's
-  own resolved location, which is `~/Library/Application Support/kanban/pr-drainer/config.json`
-  on macOS and the XDG one on Linux (§5) — resolves the
-  definition's path from that entry, then reads the command out of the
-  definition itself — `ProgramArguments` from the plist through
-  `/usr/bin/plutil`, `ExecStart` from the unit file read directly — which stays
-  authoritative for what the service manager will actually run. Which location
-  that is, the dashboard answers the same way the controller does:
-  `src/Kanban/ManagedPaths.hs` probes the XDG location and then the
-  `~/Library` one, on both platforms, exactly as `tools/kanban_config.py`
-  does, so a Linux host discovers an XDG-installed drainer from the board and
-  from the Python side alike. `src/Kanban/Drainer.hs` spells neither location:
-  it asks that resolver, which is the one place either is written down on this
-  side of the boundary. That entry is a
-  discriminated union: it names the `backend` that wrote it, and carries that
-  backend's own `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`.
-  An entry naming no backend at all is the shape written before that field
-  existed, which makes it launchd's and is why a macOS drainer installed before
-  this survives with no reinstall and no manual edit; an unknown backend name,
-  an entry mixing one backend's keys with the other's, and an entry naming a
-  backend without its identifier or an absolute definition path all fail closed
-  with reinstall guidance rather than being resolved as launchd. So does a
-  record describing the manager the reading host does not have, which is a
-  record that travelled between hosts rather than an install. Kanban
-  passes its own repository identity as `--repo OWNER/NAME` alongside
+  identity. The controller does not look a definition up: `job_for_identity` in
+  `tools/drain_prs_service.py` derives the job from the normalized identity
+  alone — the identifier and the definition path through the selected
+  `tools/service_manager.py` backend, the runtime and log directories from the
+  identity's slug. The one thing it reads from the discovery record
+  `tools/drain_prs_service.py` writes — at that module's own resolved location,
+  which is `~/Library/Application Support/kanban/pr-drainer/config.json` on
+  macOS and the XDG one on Linux (§5) — is that repository's optional
+  `config_path`, from the entry its identity selects. Which location that is,
+  `tools/kanban_config.py` answers for every Python component: it probes the
+  XDG location and then the `~/Library` one, on both platforms, and is the one
+  place either is written down. The installer writes each entry as a
+  discriminated union naming the `backend` that wrote it and that backend's own
+  `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`; an entry naming no
+  backend is the shape written before that field existed, which makes it
+  launchd's. A caller
+  passes its repository identity as `--repo OWNER/NAME` alongside
   `--path`; the controller resolves the checkout's own remote and refuses any
   identity but that one, including another remote of the same checkout, so
-  neither a `kanban --repo` nor a `kanban --config` override can select or
-  create another repository's drainer, or act on this checkout's job while the
-  dashboard reports a different repository. The installed definition carries
+  neither a `--repo` nor a `--config` override can select or create another
+  repository's drainer. The installed definition carries
   the
   same `--repo` for its own `run` invocation, so a shared `remote_name` changed
   after installation stops that job rather than re-pointing it: it drains
   nothing and logs the refusal until `tools/install_drainer.py` is re-run.
-  A `--pr` run takes the same three inputs — the dashboard's resolved checkout
+  A `--pr` run takes the same three inputs — the caller's checkout
   as `--path`, its identity as `--repo OWNER/NAME`, and the active absolute
   `--config` when one is set — plus the pull-request number. It resolves the
   checkout's own remote and refuses any other identity before reading the pull
@@ -1330,19 +1301,13 @@ reimplement the removal, and `--check` remains read-only.
   completed merge, `2` for no merge, and `1` for an error. Its human log lines
   go to stderr, never stdout. `docs/pr-drainer.md` documents the schema, the
   reason vocabulary, and the exit statuses.
-- **Failure semantics:** an unresolved incident surfaces in Kanban's
-  sidebar as `DrainerWarning`/`DrainerError` with the incident summary
-  (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
-  incident rules independently of Kanban. A `--pr` run Kanban started reports
-  only into that action's own notice, never into the sidebar's drainer status,
-  which describes the service this ran instead of. Its declined-reason text is
-  presented as the run wrote it rather than replaced by a generic message, and
-  a run whose merge landed before it failed is reported as merged *and* as
-  unfinished, because the post-merge obligations follow an irreversible merge.
-  Kanban invokes it only when the service is known stopped with no open
-  incident, and only one such run may be in flight per dashboard; the drainer's
-  own per-repository run lock is the cross-process guard behind that, reported
-  as the `run_locked` reason. Every incident is attributed to the
+- **Failure semantics:** the service defines its own retry/backoff and
+  incident rules, and the application surfaces none of them. A `--pr` run's
+  declined-reason text is its own message, and a run whose merge landed before
+  it failed is reported as merged *and* as unfinished, because the post-merge
+  obligations follow an irreversible merge. The drainer's own per-repository
+  run lock is the cross-process guard against concurrent runs, reported as the
+  `run_locked` reason. Every incident is attributed to the
   normalized canonical repository rather than to the checkout that raised it,
   so any clone of that repository lists, acknowledges, and clears it — only
   *running* a drainer is exclusive per identity. Incidents come in five
@@ -1389,8 +1354,7 @@ reimplement the removal, and `--check` remains read-only.
   ordinary failure handling applies. The controller reports the state as
   `offline` — live, holding the repository, distinct from `running`,
   `stopped`, and a crash — only while the marker naming it was written by the
-  live child of a live runner; Kanban renders it as `DrainerOffline`, counts it
-  as running for the `d` toggle, and refuses the direct merge. An outage writes
+  live child of a live runner. An outage writes
   no incident and sends no notification. A stop while offline skips the final
   cleanup pass #216 established and leaves every obligation recorded; a
   connected stop is unchanged. `--once` and `--pr` runs never wait.
@@ -1535,10 +1499,8 @@ reimplement the removal, and `--check` remains read-only.
   is `<record-dir>` itself unless an override moved it.
 
   `<record-dir>` and `<log-root>` are this platform's own conventions,
-  resolved for every Python component by `tools/kanban_config.py` and, for
-  the record the dashboard reads, by that module's Haskell counterpart
-  `src/Kanban/ManagedPaths.hs` — the two agree by construction, each spelling
-  both platforms' locations once — and declared as
+  resolved for every Python component by `tools/kanban_config.py`, which spells
+  both platforms' locations once, and declared as
   `personal-path` rows in §4: on macOS
   `~/Library/Application Support/kanban/pr-drainer` and
   `~/Library/Logs/kanban/pr-drainer`, and on Linux `$XDG_DATA_HOME` and
@@ -1558,7 +1520,7 @@ reimplement the removal, and `--check` remains read-only.
   convention elsewhere, so a host that merely exports the variable is not
   thereby installing somewhere custom — which is what would otherwise leave a
   `~/Library` installation unrelocated forever. With no override in play `<install-dir>`
-  *is* `<record-dir>`, which is why the record is a fixed location a dashboard
+  *is* `<record-dir>`, which is why the record is a fixed location a component
   that inherits no environment can still find, while the scripts beside it are
   not.
   Per checkout — a
@@ -1742,9 +1704,8 @@ reimplement the removal, and `--check` remains read-only.
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
 | `ps` | Yes | Kanban's own process-liveness snapshot (`src/Kanban/Process.hs`) runs it unconditionally. |
-| `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), or the issue approval service's (§2.8); `/usr/bin/plutil` below only reads the jobs it installs. |
-| `/usr/bin/plutil` | No | Only needed to read those two services' LaunchAgent definitions on macOS. |
-| `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control any of those optional services' user units. Kanban reads a unit's own file directly, so Linux needs no reader alongside it. |
+| `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), or the issue approval service's (§2.8). |
+| `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the row above: only needed to install and control any of those optional services' user units. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
 ### 2.7 Pull-request repair (`$repair` / `/repair`)
@@ -1832,11 +1793,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   operations), `tools/install_issue_approval.py` (installation safety — the
   managed links, the controller-copy match, and the canonical backend it
   resolves but never installs), and `tools/service_manager.py` (the same one
-  service-manager boundary §2.4 names), surfaced in-app by
-  `src/Kanban/ApprovalService.hs`. Kanban's in-app surface is read-only for
-  everything the service owns — status, the barrier, incidents — and adds
-  exactly one mutation: starting or stopping the installed job through the
-  controller. It owns no review policy whatever.
+  service-manager boundary §2.4 names). The application has no in-app surface
+  for it: it neither reads the service's status, barrier, or incidents nor
+  starts or stops the job, and the owner runs the controller from the command
+  line. The service owns no review policy either; the canonical backend does.
 - **Backend selection:** the same `tools/service_manager.select_backend`
   probe §2.4 describes, constructed for the `issue-approval`
   `ServiceNamespace` instead of the drainer's. A namespace is what keeps each
@@ -1866,22 +1826,9 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   by `tools/test_approve_issues_service.py`. Managing a job is
   `tools/service_manager.py`'s alone, exactly as in §2.4: it is the only
   component that spawns `launchctl` at all, and the only one that spawns
-  `systemctl --user` to act on a unit. Two other components reach these
-  commands without managing anything, and both are in-app dashboards that
-  install and control nothing. `src/Kanban/ApprovalService.hs` detects the
-  host's
-  manager: it probes for both with `findExecutable`, and where it finds
-  `systemctl` it spawns `systemctl --user show --property Version --value`
-  through `runGroupedProcess` to learn whether this account's user manager
-  answers at all, mirroring the installer's own probe so the two agree about
-  which hosts have a service. That is why the `launchctl-cli` and
-  `systemctl-cli` rows in §4 name this module alongside the backend, as the
-  `plutil-cli` row does, and why it is a scanned Haskell surface: the
-  §6 executable check recovers both names from it. The same listing puts
-  the discovery-record location `src/Kanban/ApprovalService.hs` builds into the
-  home-relative
-  reconciliation, which is what holds that dashboard and its controller to one
-  answer about where the record is. Unlike §2.4, the home-relative paths this
+  `systemctl --user` to act on a unit. No other component reaches
+  these commands.
+  Unlike §2.4, the home-relative paths this
   service's three Python modules build *are* reconciled from
   here: `tools/test_agent_workflow_contract.py` resolves each parsed module for
   every chain of literal path segments reaching a home root — following a name
@@ -2558,27 +2505,26 @@ claude-cli | executable | claude | src/Kanban/Claude.hs;codex-plugin/plugins/kan
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py;claude-plugin/plugins/kanban/scripts/tracked_issue_create.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
+python3-cli | executable | python3 | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
-plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
-launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
-systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
+launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
+systemctl-cli | executable | systemctl | tools/service_manager.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
-issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
-drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
-drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
-drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py | kanban | supported | no
-drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py;src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py | kanban | supported | no
+drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
+drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
+drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/kanban_config.py;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py | kanban | supported | no
+drainer-install-dir-xdg | personal-path | /.local/share/kanban/pr-drainer | tools/kanban_config.py;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py | kanban | supported | no
 drainer-log-dir | personal-path | /Library/Logs/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 drainer-log-dir-xdg | personal-path | /.local/state/kanban/pr-drainer | tools/kanban_config.py | kanban | supported | no
 issue-approval-job-label | personal-path | com.coghex.issue-approval | tools/service_manager.py | kanban | supported | no
 issue-approval-install-dir | personal-path | /Library/Application Support/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
-issue-approval-discovery-record | personal-path | /Library/Application Support/kanban/issue-approval/config.json | docs/issue-approval.md;src/Kanban/ApprovalService.hs | kanban | supported | no
+issue-approval-discovery-record | personal-path | /Library/Application Support/kanban/issue-approval/config.json | docs/issue-approval.md | kanban | supported | no
 issue-approval-runtime-dir | personal-path | /Library/Application Support/kanban/issue-approval/runtime | docs/issue-approval.md | kanban | supported | no
 issue-approval-lock-dir | personal-path | /Library/Application Support/kanban/issue-approval/locks | docs/issue-approval.md | kanban | supported | no
 issue-approval-log-dir | personal-path | /Library/Logs/kanban/issue-approval | docs/issue-approval.md | kanban | supported | no
@@ -2618,13 +2564,11 @@ one platform's row leaves the other's spelling undeclared. The four install
 and log rows declare `tools/kanban_config.py` because that module is where
 each is written down, once: §5 describes which of them is a fresh install's
 write default on a given host, and which existing installation a probe
-prefers. The two record rows declare `src/Kanban/ManagedPaths.hs` instead,
-because that is where the record's own path is spelled whole:
-`tools/kanban_config.py` composes it from the install directory above and a
-separate file name, so it carries neither literal, while the Haskell resolver
-spells each one for the same reason this manifest needs it spelled — a
-reconciliation matches a literal, not an expression. Both record rows also
-carry the same twenty packaged assets, because since issue #445 each of them
+prefers. The two record rows declare no tracked module of their own:
+`tools/kanban_config.py` composes the record's path from the install directory
+above and a separate file name, so it carries neither literal whole, and the
+Haskell resolver that once spelled each one is gone. Both record rows carry
+the same twenty packaged assets, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
 naming the macOS one: the fourteen Markdown workflow assets whose `bash` fence
 resolves the backend, and the six pull-request coordinators. An asset that spells
@@ -2643,7 +2587,7 @@ same directory as the XDG data directory spells it.
 `drainer-discovery-record` and `drainer-discovery-record-xdg` are the record
 inside each. The install directory is listed separately from the record because
 the two move independently: `--install-dir` relocates this directory, while the
-record's own path is fixed precisely so a dashboard that inherited no
+record's own path is fixed precisely so a component that inherited no
 environment can still find an install that moved. `drainer-log-dir` and
 `drainer-log-dir-xdg` are the log root as macOS and the XDG *state* directory
 spell it; no option moves it, so unlike `drainer-install-dir` it has no
@@ -2660,14 +2604,8 @@ Every one of the six declares `tools/kanban_config.py`, because that module is
 where each is written down, once, for both platforms — the controller, the
 installer and the drainer all resolve through it rather than spelling a path of
 their own. §5 describes which of them is a fresh install's write default on a
-given host and which existing installation the probe prefers. The four record
-and install-directory rows also declare `src/Kanban/ManagedPaths.hs`, which is
-`tools/kanban_config.py`'s Haskell counterpart: the dashboard resolves the record through
-one resolver of its own rather than spelling a location in each reader, and
-that resolver probes the same two locations in the same order, so a Linux host
-discovers an XDG-installed drainer from the board and from the Python side
-alike. Both platforms' rows name it, because both spellings live there. The two
-log rows do not, and need not: no Haskell consumer reads a drainer log.
+given host and which existing installation the probe prefers. No Haskell
+module reads any of them: the dashboard that once resolved the record is gone.
 
 Since issue #511 the two install-directory rows additionally name packaged
 consumers, the first any drainer location has had: the two rendered `drain-prs`
@@ -2746,20 +2684,10 @@ and the trees beneath it through a nullary helper each, as
 of those four composed literals for a `files` entry to be grounded in, and the
 guide is the one place in this repository where they are written down.
 
-`issue-approval-discovery-record` is the fifth, and the exception: it names
-`src/Kanban/ApprovalService.hs` beside the guide. The controller composes that
-location exactly as it composes the other four, but unlike them it has a second
-consumer — the in-app dashboard §2.8 names — and `approvalRecordPath` there
-builds it as one literal joined to the account's home directory. So the record's
-spelling *is* carried in tracked source, and the row is grounded in it. Because
-the literal is joined rather than absolute it omits the row's leading separator,
-so the function writes the row's own spelling out in a comment beside it — the
-one place the two forms are reconciled, and a line whose deletion fails the
-grounding check rather than quietly unhooking the row from its consumer. The
-sibling `issue-review-discovery-record` and `drainer-discovery-record` rows, and
-their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms —
-there the literal carries the leading separator, so no reconciling comment is
-needed.
+`issue-approval-discovery-record` is the fifth, and like the other four it
+declares `docs/issue-approval.md` alone: the in-app dashboard that was a second
+consumer of the record, and carried its spelling in tracked source, is gone, so
+the guide is again the one place in this repository where it is written down.
 
 `mission-runner-job-label` is not a location at all: it is the identifier prefix
 `tools/service_manager.py` still derives a job's identifier from, on the terms
@@ -2767,10 +2695,6 @@ needed.
 above. The mission runner that used it was removed with its scripts, but
 `tools/service_manager.py` is outside that removal, so the prefix and its row
 stay with it.
-
-`managedRecordHome` answers `getHomeDirectory` for both managed components,
-because `tools/kanban_config.py`'s resolvers are `Path.home()`-anchored and
-`src/Kanban/ManagedPaths.hs` is the Haskell counterpart of that one module.
 
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
@@ -2782,10 +2706,7 @@ against the `personal-path` tokens here. It is the counterpart of the Haskell an
 markdown scans above, over a third surface that spells its paths in neither of
 their shapes, and it is what makes each of these five rows load-bearing: change
 any one of these locations without changing its row and the scan reports the new
-one. `issue-approval-discovery-record` answers to the Haskell scan as well,
-since `src/Kanban/ApprovalService.hs` joined that surface: moving the record in
-either consumer without changing the row is reported, which is what keeps the
-dashboard and the controller from disagreeing about where it is.
+one.
 
 That last property needs one rule the literal scans do not have. Those recover
 whatever the source wrote down, which is routinely a file *inside* a declared
@@ -2989,8 +2910,8 @@ brand's asset speaking a tool its declaration does not carry.
   identifiers, and that is the
   service-manager backend:
   `tools/drain_prs_service.py` resolves each repository's normalized canonical
-  GitHub identity — through the remote the shared Kanban configuration names,
-  the same one the dashboard resolves its own repository through — and
+  GitHub identity — through the remote the shared Kanban configuration names —
+  and
   `tools/service_manager.py` derives that job's identifier from it, renders and
   writes the definition, and builds every manager target from the same
   identifier. One slug names the identifier and the runtime and log directories
@@ -3005,14 +2926,9 @@ brand's asset speaking a tool its declaration does not carry.
   derivation is total, produces a valid nonempty label for every supported
   `owner/name`, and is injective across distinct normalized identities, so no
   two repositories can name one job. `tools/install_drainer.py` resolves a job
-  through those two modules rather than restating any of it, and
-  `src/Kanban/Drainer.hs` derives no identifier at all: it selects the entry
-  for the identity it resolved and reads the backend, the identifier, and the
-  definition path out of it.
-  Haskell cannot import a Python constant, so a record one side writes and the
-  other reads is the only coupling here that cannot drift. Its location stays
+  through those two modules rather than restating any of it. Its location stays
   fixed even when `--install-dir` moves everything
-  else, since a dashboard that never inherits `KANBAN_DRAINER_INSTALL_DIR`
+  else, since a component that never inherits `KANBAN_DRAINER_INSTALL_DIR`
   still has to find it: that option relocates the script links and the runtime
   state, not this document. It is one document rather than two — the
   installer's global `ntfy_url` and each repository's `config_path` live in it
@@ -3469,12 +3385,10 @@ brand's asset speaking a tool its declaration does not carry.
   installation the user did not choose is worse than not reviewing; a record
   that will not parse, or whose `backend_path` is wrong-typed or relative,
   is its own failure naming that document. The per-platform defaults above
-  are resolved by both native resolution points: `tools/kanban_config.py` and
+  are resolved by one native resolution point: `tools/kanban_config.py` and
   every component that imports it — `tools/approve_issues.py`,
   `tools/install_issue_review.py`, `tools/setup_workflows.py`, and
-  `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
-  is where the Haskell side's record location is now resolved and the only
-  place either platform's spelling of it is written down on that side. The
+  `tools/approve_issues_service.py`. The
   eighteen vendored plugin assets listed above probe the same two record
   locations in the same order since issue #445, so an XDG-defaulted install is
   discovered on every host, but they reach that answer without importing
@@ -3571,32 +3485,23 @@ brand's asset speaking a tool its declaration does not carry.
 `python3 -m unittest discover -s tools -p 'test_*.py'`, which CI already
 runs) parses the manifest in §4 and:
 
-- fails if the usage-probe, shared process, or issue-approval-dashboard source
-  files (`src/Kanban/Codex.hs`, `Claude.hs`,
-  `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`, `ManagedPaths.hs`,
-  `ApprovalService.hs`, `Process.hs`) invoke a literal external command that
-  has no matching `executable` manifest entry — `GitHub/Run.hs` rather than
-  `GitHub.hs`
+- fails if the usage-probe or shared process source files
+  (`src/Kanban/Codex.hs`, `Claude.hs`, `GitHub/Run.hs`, `Repository.hs`,
+  `Process.hs`) invoke a literal external command that has no matching
+  `executable` manifest entry — `GitHub/Run.hs` rather than `GitHub.hs`
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
-  `src/Kanban/GitHub/` that resolves or starts an executable;
-  `ManagedPaths.hs` because the two managed discovery records' locations moved
-  there out of `Drainer.hs` and the issue-review backend resolver, which is
-  what the bullet below has to see them in; and `ApprovalService.hs` because it is the
-  §2.8 dashboard, which the same bullet has to see the issue-approval discovery
-  record in and which resolves `launchctl` and `systemctl` for its
-  host-backend detection. That list is exhaustive for `src/` over the call
-  shapes these extractors recognise — a literal name passed to
-  `proc`/`findExecutable`/`readProcessWithExitCode`, a literal name passed to
-  `Kanban.Drainer`'s timed `runProcess` helper, a `findExecutable` argument a
-  `case` or `if` binds to string literals, and a location spelled as one
-  literal hung off a `getHomeDirectory` result. Two other modules call one of
-  those functions and are deliberately out, because neither writes a name
-  or a path any extractor could recover: `ServiceProcess.hs` and
-  `UsageCommand.hs` are spawn helpers that pass `proc` an
-  executable *value* their caller computed. Listing either
-  would add a member the extractors recover nothing from, which is a surface
-  entry that scans nothing rather than coverage;
+  `src/Kanban/GitHub/` that resolves or starts an executable. That list is
+  exhaustive for `src/` over the call shapes these extractors recognise — a
+  literal name passed to `proc`/`findExecutable`/`readProcessWithExitCode`, a
+  `findExecutable` argument a `case` or `if` binds to string literals, and a
+  location spelled as one literal hung off a `getHomeDirectory` result. One
+  other module calls one of those functions and is deliberately out, because
+  it writes neither a name nor a path any extractor could recover:
+  `UsageCommand.hs` is a spawn helper that passes `proc` an executable *value*
+  its caller computed. Listing it would add a member the extractors recover
+  nothing from, which is a surface entry that scans nothing rather than
+  coverage;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files, the
   tracked Claude plugin's packaged `commands/*.md` files, the tracked Grok
   plugin's packaged `SKILL.md` files, the tracked Kimi plugin's packaged
@@ -3650,8 +3555,7 @@ runs) parses the manifest in §4 and:
   spelled `run`, matched as a family so the next wrapper is covered before it
   is written), that has no matching
   `executable` manifest entry — that is how `launchctl` is held to the same
-  standard as `/usr/bin/plutil`, which merely reads the job `launchctl`
-  installs. This surface is discovered rather than enumerated, so a tool
+  standard as every other command. This surface is discovered rather than enumerated, so a tool
   module added later is scanned as soon as it lands; `test_*.py` modules and
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on

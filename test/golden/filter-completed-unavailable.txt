@@ -50,14 +50,14 @@
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
 ║┃                          ┃                                                                                                                                                                          ║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃                                                                                                                                                                          ║
-║┃ ┃ approve_issues.py ┃    ┃                                                                                                                                                                          ║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃                                                                                                                                                                          ║
-║┃ off                      ┃                                                                                                                                                                          ║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃                                                                                                                                                                          ║
-║┃ ┃ drain_prs.py ┃         ┃                                                                                                                                                                          ║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃                                                                                                                                                                          ║
-║┃ off                      ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
+║┃                          ┃                                                                                                                                                                          ║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛                                                                                                                                                                          ║
 ║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                                                              ║
 ║ board: updated 3h ago · history: failed                                                                                                                                                              ║

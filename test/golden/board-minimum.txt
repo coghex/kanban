@@ -49,16 +49,16 @@
 ║┃                          ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  │ replace it atomically…     │ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  │ replace it atomically…     │ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  i attention  u updat ║
+║ j/↓ next  k/↑ previous  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  u update  c sidebar  ║
 ║ board: updated 3h ago · history: current                                                                                                                         ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

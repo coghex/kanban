@@ -4,8 +4,6 @@ module Kanban.UI.Util
     cacheEnabled,
     columnName,
     countedSource,
-    directMergeNoticeFor,
-    directMergeReportAfterRefresh,
     entriesForBoard,
     entryPrimaryTrackerNumber,
     itemBody,
@@ -19,20 +17,15 @@ module Kanban.UI.Util
     noticeExpiryApplied,
     noticeSet,
     noticeSetFor,
-    noticeSetOverDirectMergeResult,
     noticeSetOverStartupReport,
-    directMergeCarryApplied,
-    outstandingDirectMergeReport,
     outstandingStartupReport,
     overflowText,
-    recordDirectMergeShown,
     recordStartupShown,
     settleNoticeLifecycle,
     shownNotice,
     startupReportApplied,
     primaryTrackerNumber,
     relativeAge,
-    rightOrNothing,
     safeIndex,
     safeLast,
     selectedRow,
@@ -73,9 +66,6 @@ relativeAge now thenTime
   | otherwise = showText (seconds `div` 86400) <> "d ago"
   where
     seconds = max 0 (floor (diffUTCTime now thenTime) :: Int)
-
-rightOrNothing :: Either failure value -> Maybe value
-rightOrNothing = either (const Nothing) Just
 
 entriesForBoard :: Board -> BoardColumn -> [ColumnEntry]
 entriesForBoard board column = Map.findWithDefault [] column board.boardColumns
@@ -202,33 +192,6 @@ countedSource noun count = showText count <> " " <> noun <> if count == 1 then "
 selectedRow :: AppState -> BoardColumn -> Int
 selectedRow state column = Map.findWithDefault 0 column state.appSelectedRows
 
--- | The report still worth carrying, given the notice instance on screen
--- now: 'Nothing' once anything has replaced or cleared the instance this
--- last wrote. Compared by instance identity rather than text, so a later
--- notice repeating the same words cannot adopt a retired report.
-outstandingDirectMergeReport :: Maybe Int -> Maybe DirectMergeReport -> Maybe DirectMergeReport
-outstandingDirectMergeReport displayed report = do
-  candidate <- report
-  if displayed == Just candidate.directMergeReportShownInstance then Just candidate else Nothing
-
--- | A notice with an outstanding result kept in front of it, and the report
--- to carry forward. The carried report still names the instance it was
--- displayed as /before/ this composition; whoever shows the composed text
--- owes it the new instance, which 'noticeSetOverDirectMergeResult' and
--- 'directMergeCarryApplied' below are the two callers of.
-directMergeNoticeFor :: Maybe DirectMergeReport -> Text -> (Text, Maybe DirectMergeReport)
-directMergeNoticeFor Nothing notice = (notice, Nothing)
-directMergeNoticeFor (Just report) notice =
-  (report.directMergeReportResult <> " · " <> notice, Just report)
-
--- | The report to carry past a refresh that has just published. Dropped once
--- the refresh the merge required has actually run, and kept while that
--- refresh is still only queued -- otherwise the fetch that merely happened to
--- be in flight would carry the result away before the required one had even
--- started.
-directMergeReportAfterRefresh :: Bool -> Maybe DirectMergeReport -> Maybe DirectMergeReport
-directMergeReportAfterRefresh queued carried = if queued then carried else Nothing
-
 -- | The whole of what showing a settled notice does to the state: a fresh
 -- instance on the line, and nothing else.
 --
@@ -267,9 +230,6 @@ noticeActivityLive state activity = case activity of
   StartupLoadRunning -> state.appBoardFreshness == NotLoaded || state.appBoardFreshness == Loading
   BoardRefreshRunning -> state.appBoardFreshness == Loading
   UsageRefreshRunning provider -> Map.findWithDefault NotLoaded provider state.appUsageFreshness == Loading
-  DrainerToggleRunning -> state.appDrainerBusy
-  ApprovalToggleRunning -> state.appApprovalBusy
-  DirectMergeRunning number -> state.appDirectMergePending == Just number
   QuitSettling -> state.appQuitPending
 
 -- | Classify the displayed notice against what the application still tracks
@@ -281,62 +241,17 @@ settleNoticeLifecycle state =
   state {appNotice = settleNotice state.appNow (noticeActivityLive state) state.appNotice}
 
 -- | Apply one fired 'Kanban.UI.Types.NoticeExpired' tick: clear the line
--- when the tick names the displayed instance and its deadline has passed,
--- and retire the direct-merge result behind the notice in the same step --
--- timed dismissal ends the result exactly as 'Esc' does, so the refresh it
--- required can never recreate it (issue #590 requirement 11). A stale tick
--- changes nothing at all.
+-- when the tick names the displayed instance and its deadline has passed. A
+-- stale tick changes nothing at all.
 noticeExpiryApplied :: Int -> AppState -> AppState
 noticeExpiryApplied instanceId state
-  | noticeExpiryDue instanceId state.appNow state.appNotice =
-      noticeCleared
-        state
-          { appDirectMergeResult =
-              case outstandingDirectMergeReport (currentNoticeInstance state.appNotice) state.appDirectMergeResult of
-                Just _ -> Nothing
-                Nothing -> state.appDirectMergeResult
-          }
+  | noticeExpiryDue instanceId state.appNow state.appNotice = noticeCleared state
   | otherwise = state
 
--- | Show a notice with an outstanding direct-merge result kept in front of
--- it, carrying that result forward onto the instance just displayed -- and
--- only while the result was still the one displayed when this ran.
-noticeSetOverDirectMergeResult :: NoticeLife -> Text -> AppState -> AppState
-noticeSetOverDirectMergeResult life message state =
-  let outstanding = outstandingDirectMergeReport (currentNoticeInstance state.appNotice) state.appDirectMergeResult
-      (composed, carried) = directMergeNoticeFor outstanding message
-      composedState = state {appNotice = showNotice life composed state.appNotice}
-   in composedState {appDirectMergeResult = recordDirectMergeShown composedState <$> carried}
-
--- | Re-front an outstanding direct-merge result over whatever notice a
--- published board refresh just produced, and decide what result to carry
--- past it: kept while the refresh the merge requires is still only queued,
--- dropped once it has actually run. @before@ is the state the refresh
--- outcome was applied over, which is where "was the result still displayed?"
--- has to be answered.
-directMergeCarryApplied :: AppState -> AppState -> AppState
-directMergeCarryApplied before state =
-  let outstanding = outstandingDirectMergeReport (currentNoticeInstance before.appNotice) before.appDirectMergeResult
-      (composed, carried) = directMergeNoticeFor outstanding (fromMaybe "" (shownNotice state))
-      composedState = case outstanding of
-        Just _ -> noticeSet composed state
-        Nothing -> state
-   in composedState
-        { appDirectMergeResult =
-            directMergeReportAfterRefresh
-              before.appBoardRefreshQueued
-              (recordDirectMergeShown composedState <$> carried)
-        }
-
--- | Stamp a carried report with the instance of the notice just displayed,
--- which is what the next 'outstandingDirectMergeReport' compares against.
-recordDirectMergeShown :: AppState -> DirectMergeReport -> DirectMergeReport
-recordDirectMergeShown state report =
-  report {directMergeReportShownInstance = fromMaybe (-1) (currentNoticeInstance state.appNotice)}
-
--- | The startup diagnostics still worth carrying, on exactly the rule
--- 'outstandingDirectMergeReport' applies to a merge result: only while the
--- notice instance they were last shown as is the one displayed now.
+-- | The startup diagnostics still worth carrying: only while the notice
+-- instance they were last shown as is the one displayed now. Compared by
+-- instance identity rather than text, so a later notice repeating the same
+-- words cannot adopt a retired report.
 outstandingStartupReport :: Maybe Int -> Maybe StartupReport -> Maybe StartupReport
 outstandingStartupReport displayed report = do
   candidate <- report

@@ -809,14 +809,13 @@ class SingleSourceInstallPathTests(unittest.TestCase):
     # name, in either platform's spelling: it is what a consumer that
     # inherits no environment finds an installation by, so naming it is the
     # opposite of rebuilding the installer's default. Issue #444 added the
-    # XDG spelling, because the Haskell resolver probes both.
+    # XDG spelling, because the resolver probes both.
     RECORD_PATHS = tuple(f"{directory}/config.json" for directory in MANAGED_PATHS[:2])
     CONSUMERS = (
         "tools/approve_issues.py",
         "tools/install_issue_review.py",
         "tools/setup_workflows.py",
         "tools/approve_issues_service.py",
-        "src/Kanban/ManagedPaths.hs",
     )
     TOOLS = Path(__file__).resolve().parent
     REPO_ROOT = TOOLS.parent
@@ -828,10 +827,10 @@ class SingleSourceInstallPathTests(unittest.TestCase):
             # Each record path contains its install directory as a prefix, so
             # the record spellings come out before the directories are looked
             # for; what is left is a genuine reconstruction of a managed
-            # location. src/Kanban/ManagedPaths.hs is the one consumer that
-            # spells both records, and this is what holds it to spelling only
-            # those -- a log directory or a bare install directory appearing
-            # there would be a second definition of a Python-owned path.
+            # location. A consumer may name the records' fixed rendezvous, and
+            # this is what holds it to naming only those -- a log directory or
+            # a bare install directory appearing there would be a second
+            # definition of a Python-owned path.
             without_record = content
             for record_path in self.RECORD_PATHS:
                 without_record = without_record.replace(record_path, "")

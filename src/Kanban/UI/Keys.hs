@@ -5,7 +5,7 @@
 -- help overlay, and once into the key arms of 'Kanban.UI.Events.handleEvent'.
 -- Nothing checked the three against each other, so they drifted — a kill
 -- notice named @k@ for the @x@ binding, the footer omitted @g@, @G@, @Esc@,
--- @Ctrl-L@, and @m@, and the help overlay omitted @?@ itself.
+-- and @Ctrl-L@, and the help overlay omitted @?@ itself.
 --
 -- Every one of those facts now has a single definition site: 'binding' maps
 -- each 'BoardAction' to its keys, scopes, footer label, and help
@@ -82,9 +82,7 @@ eventBindingKey :: Vty.Event -> Maybe BindingKey
 eventBindingKey (Vty.EvKey key modifiers) = Just (chord key modifiers)
 eventBindingKey _ = Nothing
 
--- | Where a binding is live. The incidents panel consumes its own input before
--- dispatch reaches this table, so it is deliberately absent: an overlay that
--- answers a key itself is not a scope the base board can be dispatched in.
+-- | Where a binding is live.
 data BindingScope
   = -- | The board itself, with no overlay open.
     BoardScope
@@ -94,9 +92,8 @@ data BindingScope
   | -- | The help overlay.
     HelpScope
   | -- | Any open overlay that answers this table's keys through the one
-    -- shared arm ahead of its own decoder -- the incidents panel as well as
-    -- the two scopes above. It exists for the single binding that is live in
-    -- all of them at once.
+    -- shared arm ahead of its own decoder -- the two scopes above. It exists
+    -- for the single binding that is live in all of them at once.
     OverlayScope
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
@@ -117,11 +114,7 @@ data BoardAction
   | OpenCardPage
   | ToggleFullscreen
   | DismissOrClose
-  | ShowIncidents
   | RefreshAll
-  | ToggleApproval
-  | ToggleDrainer
-  | MergeDoneCard
   | ToggleSidebar
   | ToggleExcerpts
   | ShowHelp
@@ -183,7 +176,7 @@ binding action = case action of
       "Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, F focuses the filter panel, and Esc or s closes it"
   -- Only the key that shows the panel is a binding. Everything typed into a
   -- focused panel is decoded by "Kanban.UI.Filter" ahead of this table,
-  -- because `d` there restores the defaults rather than toggling the drainer.
+  -- because `d` there restores the defaults.
   ShowFilter ->
     KeyBinding action [key 'F'] [BoardScope] Nothing "filter" "filter cards; j/k move, Left/Right change group, space toggles, d defaults"
       "Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged"
@@ -200,32 +193,16 @@ binding action = case action of
       "Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL"
   -- Deliberately not a 'BoardScope' binding: with nothing open there is no box
   -- to grow, and the founding request was for a key that exists only inside an
-  -- overlay. 'OverlayScope' is what makes it live in the incidents panel,
-  -- which keeps its own decoder.
+  -- overlay.
   ToggleFullscreen ->
     KeyBinding action [key 'f'] [DetailsScope, HelpScope, OverlayScope] Nothing "fullscreen" "toggle the open overlay between windowed and fullscreen"
       "Toggle the open overlay between its windowed box and fullscreen; with no overlay open the key does nothing"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
       "Close an overlay or dismiss any notice early, ahead of its ten-second lifetime"
-  ShowIncidents ->
-    KeyBinding action [key 'i'] [BoardScope] Nothing "attention" "everything needing attention; Enter goes to its work"
-      "Open the incidents panel listing everything needing attention; Enter goes to that work"
   RefreshAll ->
     KeyBinding action [key 'u'] [BoardScope] (Just "click") "update" "update board and both usage providers"
       "Update GitHub board data and both usage providers"
-  -- A live search still types this letter into its query: `searchInput`
-  -- decodes a printable key ahead of this table, exactly as it does for the
-  -- other lowercase bindings.
-  ToggleApproval ->
-    KeyBinding action [key 'a'] [BoardScope] (Just "click") "approvals" "start or stop issue approval service"
-      "Start or stop the service-managed issue approval service"
-  ToggleDrainer ->
-    KeyBinding action [key 'd'] [BoardScope] (Just "click") "drainer" "start or stop PR drainer"
-      "Start or stop the service-managed PR drainer"
-  MergeDoneCard ->
-    KeyBinding action [key 'm'] [BoardScope, DetailsScope] Nothing "merge" "merge the selected approved PR in Done"
-      "Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path"
   ToggleSidebar ->
     KeyBinding action [key 'c'] [BoardScope] Nothing "sidebar" "collapse / expand sidebar"
       "Collapse or expand the usage sidebar"

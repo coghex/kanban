@@ -147,12 +147,7 @@ finishCurrentBoardRefresh before searchAnchor = do
   -- to move columns and this phase's search cannot follow it. A no-op with no
   -- search open, and a no-op after a failed refresh, which changes no board.
   modify (reseatSearch searchAnchor)
-  -- Applied over whichever notice the outcome above produced, so a merge that
-  -- landed is still reported once the refresh it required has published --
-  -- above all a merge whose post-merge work then failed, which this is the
-  -- only place the user is ever told about.
-  modify (directMergeCarryApplied before)
-  -- And the startup diagnostics, riding the line the outcome just replaced:
+  -- The startup diagnostics, riding the line the outcome just replaced:
   -- the first publication composes them onto its own settled notice for the
   -- ordinary ten seconds and retires the carry ('startupReportApplied').
   modify (startupReportApplied before)

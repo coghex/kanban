@@ -445,5 +445,3 @@ spec = do
             { approvalLabel = "lgtm",
               changesRequestedLabel = "needs-work"
             }
-      defaultWorkflowConfig.coordinationPaths `shouldBe` Set.empty
-      defaultWorkflowConfig.directPublicationPaths `shouldBe` Set.empty

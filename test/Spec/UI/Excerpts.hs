@@ -53,7 +53,7 @@ import Kanban.UI.Board
     refreshColumnWindows,
     unmeasuredLayoutInputs,
   )
-import Kanban.UI.Events (BoardActionGate (..), blockedByCompletedLoad, boardActionGate, mutatesSelectedWork)
+import Kanban.UI.Events (BoardActionGate (..), blockedByCompletedLoad, boardActionGate)
 import Kanban.UI.Keys
   ( BindingScope (..),
     BoardAction (..),
@@ -86,12 +86,11 @@ spec = describe "card excerpt toggle" $ do
           | scope <- [DetailsScope, HelpScope, OverlayScope]
         ]
 
-    -- The two total predicates that decide where a binding is live, and the
-    -- gate they compose into. Requirement 2 and the review's input-precedence
-    -- amendment between them say this key reaches no card, so neither may
+    -- The total predicate that decides where a binding is live, and the gate
+    -- it composes into. Requirement 2 and the review's input-precedence
+    -- amendment between them say this key reaches no card, so it may not
     -- claim it.
     it "reaches no card and is not inert under the blocker" $ do
-      mutatesSelectedWork ToggleExcerpts `shouldBe` False
       blockedByCompletedLoad ToggleExcerpts `shouldBe` False
       state <- excerptState 12
       boardActionGate state ToggleExcerpts `shouldBe` DispatchBoardAction

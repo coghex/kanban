@@ -14,7 +14,6 @@ module Kanban.Workflow
     orderCardLabels,
     pruneOffBoardChildren,
     pullRequestStatus,
-    readOnlyHistoryNotice,
     rereviewLabel,
     sortBoardEntries,
   )
@@ -469,22 +468,6 @@ itemLifecycleBadge (PullRequestItem pullRequest) = case pullRequest.pullRequestS
   PullRequestOpen -> Nothing
   PullRequestClosed -> Just "CLOSED"
   PullRequestMerged -> Just "MERGED"
-
--- | Why a mutating action declined a settled card. It names the item and the
--- outcome that settled it, so the refusal reads as a fact about the card
--- rather than as a failure of the key that was pressed.
-readOnlyHistoryNotice :: BoardItem -> Text
-readOnlyHistoryNotice item = subject <> " is " <> outcome <> "; completed history is read-only"
-  where
-    subject = case item of
-      IssueItem issue -> "Issue #" <> showNumber issue.issueNumber
-      PullRequestItem pullRequest -> "PR #" <> showNumber pullRequest.pullRequestNumber
-    outcome = case item of
-      IssueItem _ -> "closed"
-      PullRequestItem pullRequest -> case pullRequest.pullRequestState of
-        PullRequestMerged -> "merged"
-        _ -> "closed"
-    showNumber = Text.pack . show
 
 -- | Whether an item carries the configured changes-requested label, which is
 -- the strongest workflow category a filter can select on and is therefore

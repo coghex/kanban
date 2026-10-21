@@ -25,11 +25,9 @@ where
 
 
 import Brick
-import Brick.BChan (BChan, newBChan, writeBChan)
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Monad (forever, void, when)
+import Brick.BChan (newBChan)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.IORef (newIORef)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -38,13 +36,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime, getCurrentTimeZone )
 import qualified Graphics.Vty as Vty
-import Kanban.ApprovalService
-  ( ApprovalActivity (..),
-    ApprovalState (..),
-    ApprovalStatus (..),
-    approvalUnavailableStatus,
-    discoverApprovalController,
-  )
 import Kanban.Cache
   ( CompletedCacheLoad (..),
     UsageCacheLoad (..),
@@ -54,14 +45,6 @@ import Kanban.Cache
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.Drainer
-  ( DrainerActivity (..),
-    DrainerController,
-    DrainerState (..),
-    DrainerStatus (..),
-    discoverDrainerController,
-    queryDrainerStatus
-    )
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Repository (RepositoryRoster, rosterDegradationNotices)
 import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
@@ -79,9 +62,7 @@ import Kanban.UI.Theme
 import Kanban.UI.Board
 import Kanban.UI.Overlay
 import Kanban.UI.Refresh
-import Kanban.UI.Drainer (drainerErrorStatus)
 import Kanban.UI.Events
-import Kanban.UI.Approval (monitorApprovalService)
 
 runDashboard :: Options -> ResolvedConfig -> Repository -> RepositoryRoster -> IO ()
 runDashboard options config repository roster = do
@@ -104,9 +85,6 @@ runHeldDashboard authority options config repository roster = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
   (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
-  drainerController <- discoverDrainerController repository
-  approvalController <- discoverApprovalController repository
-  approvalEpoch <- newIORef 0
   eventChannel <- newBChan 256
   historyTraversal <- newHistoryTraversal
   -- One coordinator per repository for the dashboard's lifetime, started
@@ -189,7 +167,6 @@ runHeldDashboard authority options config repository roster = do
             -- above reads, so the first settle finds the budget already
             -- current and the layout epoch stays zero.
             appExcerptsVisible = defaultExcerptsVisible,
-            appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
             -- Nothing is open, so nothing is fullscreen. Never restored from
             -- a previous run: an overlay always opens windowed, which is what
@@ -234,38 +211,6 @@ runHeldDashboard authority options config repository roster = do
               case initialHistory of
                 Just _ -> CompletedHistoryCurrent
                 Nothing -> CompletedHistoryLoading,
-            appDrainerController = drainerController,
-            appDrainerStatus =
-              case drainerController of
-                -- Not 'DrainerServiceStarting': nothing has reported a state
-                -- yet, and an action that may only run against a settled
-                -- "off" must not read "no answer so far" as one.
-                Right _ -> DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing
-                Left message -> drainerErrorStatus message,
-            -- Nothing has been observed yet, and a failed discovery never
-            -- will be: both must read as an unanswered source rather than as
-            -- a drainer with no open incidents.
-            appDrainerIncidents = Nothing,
-            appDrainerBusy = False,
-            appApprovalController = approvalController,
-            appApprovalStatus =
-              case approvalController of
-                -- Not 'ApprovalServiceStopped': nothing has reported a state
-                -- yet, and an interlock that may only permit work against a
-                -- settled service must not read "no answer so far" as one.
-                Right _ ->
-                  ApprovalStatus ApprovalStarting "checking…" ApprovalServiceUnknown Nothing Nothing
-                Left unavailable -> approvalUnavailableStatus unavailable,
-            -- Nothing has been observed yet, and a failed discovery never
-            -- will be: both read as an unanswered source rather than as a
-            -- service with no open incidents.
-            appApprovalIncidents = Nothing,
-            appApprovalBusy = False,
-            appApprovalTransition = 0,
-            appApprovalEpoch = approvalEpoch,
-            appApprovalResult = Nothing,
-            appDirectMergePending = Nothing,
-            appDirectMergeResult = Nothing,
             appBoardRefreshQueued = False,
             appRefreshCoordinator = refreshCoordinator,
             appQuitPending = False,
@@ -389,26 +334,6 @@ startApplication = do
   -- classified — and armed, if any of it managed to settle before the first
   -- real event — rather than waiting unclassified for one to arrive.
   settleNoticeExpiry initialNotice
-  state <- get
-  case state.appDrainerController of
-    Left _ -> pure ()
-    Right controller ->
-      void
-        . liftIO
-        . forkIO
-        $ monitorDrainer controller state.appEventChannel
-  case state.appApprovalController of
-    Left _ -> pure ()
-    Right controller ->
-      void
-        . liftIO
-        . forkIO
-        $ monitorApprovalService
-          state.appRepository
-          controller
-          serviceStatusIntervalMicros
-          state.appApprovalEpoch
-          state.appEventChannel
 
 -- | Mouse reporting is an optional affordance on a dashboard that must stay
 -- fully keyboard-operable (docs\/design.md §2), and vty exposes mode support
@@ -425,15 +350,3 @@ enableMouseIfSupported output =
 enableFocusIfSupported :: Vty.Output -> IO ()
 enableFocusIfSupported output =
   when (Vty.supportsMode output Vty.Focus) (Vty.setMode output Vty.Focus True)
-
-monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
-monitorDrainer controller eventChannel = forever $ do
-  queryDrainerStatus controller >>= writeBChan eventChannel . DrainerStatusRefreshed
-  threadDelay serviceStatusIntervalMicros
-
--- | How often each managed service's status is read. One constant for both,
--- because the approval service is polled on the same cadence as the PR drainer
--- (requirement 4) and two constants would be two cadences the moment one was
--- edited.
-serviceStatusIntervalMicros :: Int
-serviceStatusIntervalMicros = 10 * 1000 * 1000

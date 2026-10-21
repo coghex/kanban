@@ -31,7 +31,7 @@ import Kanban.UI.Board
     footerHintLine,
     searchFooterHintLine,
   )
-import Kanban.UI.Events (BoardMouseAction (..), blockedByCompletedLoad, boardMouseAction, boardMousePress, mutatesSelectedWork)
+import Kanban.UI.Events (BoardMouseAction (..), blockedByCompletedLoad, boardMouseAction, boardMousePress)
 import Kanban.UI.Filter
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, entriesFor, openSearch, searchInput)
@@ -674,10 +674,8 @@ blockerSpec = describe "the completed-history blocker" $ do
       `shouldBe` replicate 6 True
     map blockedByCompletedLoad [OpenSearch, ToggleEpic, ShowDetails, OpenCardPage]
       `shouldBe` replicate 4 True
-    map blockedByCompletedLoad [MergeDoneCard]
-      `shouldBe` replicate 1 True
-    map blockedByCompletedLoad [ShowFilter, DismissOrClose, ShowHelp, RefreshAll, ToggleDrainer, ToggleSidebar, ShowIncidents, RepaintTerminal, QuitDashboard]
-      `shouldBe` replicate 9 False
+    map blockedByCompletedLoad [ShowFilter, DismissOrClose, ShowHelp, RefreshAll, ToggleSidebar, RepaintTerminal, QuitDashboard]
+      `shouldBe` replicate 7 False
 
   -- No column is drawn under the blocker, so there is no box to type into and
   -- none to open. The query itself survives and comes back with the columns.
@@ -774,15 +772,12 @@ mouseSpec = describe "mouse" $ do
           ]
       ]
     -- The things drawn through the blocker still answer: the panel that put it
-    -- up, and all three sidebar controls, none of which is a card target.
+    -- up, and the sidebar's update control, neither of which is a card target.
     boardMouseAction blocked (FilterBoxTarget (LifecycleBox LifecycleClosed)) Vty.BLeft []
       `shouldBe` Just (ToggleFilterBoxFromClick (LifecycleBox LifecycleClosed))
-    boardMouseAction blocked DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
-    boardMouseAction blocked ApprovalButton Vty.BLeft [] `shouldBe` Just ToggleApprovalFromClick
     boardMouseAction blocked UpdateButton Vty.BLeft [] `shouldBe` Just RefreshAllFromClick
     -- And the key path the click shares its action with is not blocked either.
-    blockedByCompletedLoad ToggleApproval `shouldBe` False
-    mutatesSelectedWork ToggleApproval `shouldBe` False
+    blockedByCompletedLoad RefreshAll `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- What the board says about the criteria

@@ -1,25 +1,20 @@
 module Kanban.UI.Events
   ( BoardActionGate (..),
     BoardMouseAction (..),
-    IncidentsAction (..),
     OverlayExtent (..),
     OverlayMouseAction (..),
     QuitDecision (..),
     QuitRequest (..),
     dashboardQuitRequest,
     applyCardClick,
-    applyIncidentsAction,
     blockedByCompletedLoad,
     boardActionGate,
     boardMouseAction,
     boardMousePress,
     handleEvent,
-    incidentsAction,
-    mutatesSelectedWork,
     overlayExtent,
     overlayMouseAction,
     quitDecision,
-    readOnlyHistoryGate,
     stoppingGitHubWorkNotice,
   )
 where
@@ -31,7 +26,6 @@ import Control.Concurrent (forkIO )
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (getCurrentTime )
 import qualified Graphics.Vty as Vty
@@ -56,7 +50,6 @@ import Kanban.UI.Filter
     focusFilterPanel,
     focusedFilterPanel,
     focusedSearch,
-    readOnlyHistoryRefusal,
     settleFacetCounts,
     toggleFilterBoxFromClick,
     toggleFilterPanel,
@@ -65,10 +58,7 @@ import Kanban.UI.Keys
 import Kanban.UI.State
 import Kanban.UI.Search
 import Kanban.UI.Selection
-import Kanban.UI.Incidents
 import Kanban.UI.Refresh
-import Kanban.UI.Approval
-import Kanban.UI.Drainer
 import Kanban.UI.Reconcile
 
 -- | Every event the dashboard receives, and the one place the fullscreen flag
@@ -77,9 +67,8 @@ import Kanban.UI.Reconcile
 -- 'settleOverlayFullscreen' is applied to whatever the dispatch below left
 -- behind, against the overlay that was open before it. Doing it here rather
 -- than beside every assignment to 'appOverlay' is what makes an overlay
--- opened from another one -- the incidents panel's Enter into a live session,
--- a solve session handing off to its PR review -- come back windowed without
--- every such transition having to remember to say so.
+-- opened from another one come back windowed without every such transition
+-- having to remember to say so.
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
   now <- liftIO getCurrentTime
@@ -148,20 +137,13 @@ dispatchEvent event = do
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
-    (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
-    (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
-    (_, AppEvent (ApprovalStatusRefreshed issuedUnder result)) -> applyApprovalStatus issuedUnder result
-    (_, AppEvent (ApprovalToggleFinished transition result)) -> applyApprovalToggle transition result
-    (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
     -- The tick clears only the instance it was armed for, and only once that
     -- instance's deadline has actually passed; everything else about the
     -- decision is 'Kanban.UI.Util.noticeExpiryApplied''s.
     (_, AppEvent (NoticeExpired instanceId)) -> modify (noticeExpiryApplied instanceId)
     (_, AppEvent (PageOpenFinished url outcome)) -> reportPageOpen url outcome
     -- @f@ is the one binding live in every overlay, so it is resolved once
-    -- here rather than in each overlay's own arms below. It has to come first:
-    -- the incidents panel answers /every/ event it receives, so a letter
-    -- reaching it is a letter it has swallowed.
+    -- here rather than in each overlay's own arms below.
     (Just _, VtyEvent keyEvent)
       | Just ToggleFullscreen <- boardAction OverlayScope keyEvent ->
           modify toggleOverlayFullscreen
@@ -169,8 +151,6 @@ dispatchEvent event = do
     -- be resolved before the overlays below, which do.
     (Just HelpOverlay, VtyEvent keyEvent)
       | Just action <- boardAction HelpScope keyEvent -> applyBoardAction action
-    (overlay, incidentEvent)
-      | Just action <- incidentsAction overlay incidentEvent -> handleIncidentsAction action
     (Just (DetailsOverlay _), VtyEvent keyEvent)
       | Just action <- boardAction DetailsScope keyEvent -> applyBoardAction action
     (Just (DetailsOverlay _), mouseEvent)
@@ -213,8 +193,6 @@ dispatchEvent event = do
 data BoardMouseAction
   = -- | Move the live search to this column, consuming the press.
     TransferSearch BoardColumn
-  | ToggleDrainerFromClick
-  | ToggleApprovalFromClick
   | RefreshAllFromClick
   | ToggleFilterBoxFromClick FilterBox
   | ToggleEpicFromClick BoardColumn Int Int
@@ -227,27 +205,24 @@ data BoardMouseAction
 --
 -- A live search outranks every column press: a left or right press aimed at
 -- any column but the searched one moves the search there and does nothing
--- else, wherever in that column it landed. It does not outrank the three
--- sidebar controls or a filter checkbox, none of which is a column target at
--- all and all of which are answered first, and it claims neither the wheel —
+-- else, wherever in that column it landed. It does not outrank the sidebar's
+-- update control or a filter checkbox, neither of which is a column target at
+-- all and both of which are answered first, and it claims neither the wheel —
 -- which retargets nothing, so it keeps scrolling whatever is under the
 -- pointer — nor the middle button.
 --
--- All three sidebar controls take a plain left press and nothing else. A
--- middle, right, wheel, or modifier-carrying press over one falls through
--- every arm below, which name only column targets, and the board claims
--- nothing for it.
+-- The update control takes a plain left press and nothing else. A middle,
+-- right, wheel, or modifier-carrying press over it falls through every arm
+-- below, which name only column targets, and the board claims nothing for it.
 --
 -- The completed-history blocker outranks every /card/ press and nothing else.
 -- No column is drawn under it, so a @CardTarget@, @EpicTarget@, or
 -- @ColumnViewport@ press arriving there names a row from a frame that is no
 -- longer on screen; resolving one would act on whatever the criteria have
--- since put at that index. The sidebar controls and the filter panel are drawn
--- through the blocker and keep working.
+-- since put at that index. The sidebar's update control and the filter panel
+-- are drawn through the blocker and keep working.
 boardMouseAction :: AppState -> Name -> Vty.Button -> [Vty.Modifier] -> Maybe BoardMouseAction
 boardMouseAction state name button modifiers = case (name, button, modifiers) of
-  (DrainerButton, Vty.BLeft, []) -> Just ToggleDrainerFromClick
-  (ApprovalButton, Vty.BLeft, []) -> Just ToggleApprovalFromClick
   (UpdateButton, Vty.BLeft, []) -> Just RefreshAllFromClick
   (FilterBoxTarget box, Vty.BLeft, _) -> Just (ToggleFilterBoxFromClick box)
   _ | completedCardsBlocked state -> Nothing
@@ -270,12 +245,6 @@ boardMouseAction state name button modifiers = case (name, button, modifiers) of
 boardMousePress :: BoardMouseAction -> AppState -> AppState
 boardMousePress = \case
   TransferSearch column -> transferSearchTo column
-  ToggleDrainerFromClick -> fst . drainerTogglePress
-  -- The key's own pure core, not a second decision: 'toggleApprovalService'
-  -- is exactly this half of 'approvalTogglePress' followed by the handoff
-  -- 'applyBoardMouseAction' runs below, so the click cannot acquire a toggle
-  -- policy of its own.
-  ToggleApprovalFromClick -> fst . approvalTogglePress
   -- The update is not a state transition of its own. Every mark it leaves —
   -- the loading freshness, the notice, the coalesced follow-up — is made by
   -- the same 'startAllRefreshes' the key reaches, which is where a press made
@@ -290,20 +259,13 @@ boardMousePress = \case
   ScrollColumnBy _ _ -> \state -> state {appEnsureSelectionVisible = False}
 
 -- | Carries out one decided press: its effect on the state, and then the
--- four things that are not state — the viewport scroll, the controller
--- handoff a drainer press makes, the controller handoff an approval press
--- makes, and the update an update press starts.
+-- two things that are not state — the viewport scroll, and the update an
+-- update press starts.
 applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
 applyBoardMouseAction action = do
-  before <- get
   modify (boardMousePress action)
   case action of
     ScrollColumnBy column amount -> vScrollBy (viewportScroll (ColumnViewport column)) amount
-    ToggleDrainerFromClick -> runDrainerToggleHandoff before
-    -- Read off the state the press was taken from, which is what makes this
-    -- the same handoff the key path runs: 'toggleApprovalService' decides
-    -- from the pre-press state too.
-    ToggleApprovalFromClick -> runApprovalToggleHandoff before
     -- The key's own dispatch, not a second call to whatever it happens to
     -- reach today, so the click cannot acquire a refresh path of its own.
     RefreshAllFromClick -> applyBoardAction RefreshAll
@@ -313,8 +275,8 @@ applyBoardMouseAction action = do
 -- a binding cannot be added to that table without deciding here what pressing
 -- it does.
 --
--- The scope it fired in is not a parameter: the five actions that are live
--- from a card's details overlay as well as from the board act on whichever
+-- The scope it fired in is not a parameter: the actions that are live from a
+-- card's details overlay as well as from the board act on whichever
 -- selection is in front of the user, and that is exactly what the open
 -- overlay says.
 applyBoardAction :: BoardAction -> EventM Name AppState ()
@@ -323,7 +285,6 @@ applyBoardAction action = do
   case boardActionGate state action of
     DispatchBoardAction -> dispatchBoardAction action
     IgnoreBoardAction -> pure ()
-    RefuseBoardAction notice -> setNotice notice
 
 -- | What happens to a press before 'dispatchBoardAction' could see it.
 data BoardActionGate
@@ -331,19 +292,16 @@ data BoardActionGate
     DispatchBoardAction
   | -- | The press is inert and says nothing.
     IgnoreBoardAction
-  | -- | The press is refused, with this notice instead.
-    RefuseBoardAction Text
   deriving stock (Eq, Show)
 
 -- | Everything that can stand between a key press and its arm, as one pure
--- decision, in the order the two are asked.
+-- decision.
 --
 -- Pure, and the whole of what 'applyBoardAction' decides, so a press can be
 -- taken and inspected without a terminal.
 boardActionGate :: AppState -> BoardAction -> BoardActionGate
 boardActionGate state action
   | completedCardsBlocked state && blockedByCompletedLoad action = IgnoreBoardAction
-  | Just notice <- readOnlyHistoryGate state action = RefuseBoardAction notice
   | otherwise = DispatchBoardAction
 
 -- | Which bindings the completed-history blocker makes inert.
@@ -351,13 +309,12 @@ boardActionGate state action
 -- Everything that reaches a card does: the blocker draws none, so a press that
 -- moved, opened, or acted on one would be resolving a selection left over from
 -- the frame before it. Nothing else is touched — the filter panel that put the
--- blocker up, the footer, help, options, refresh, the drainer, the issue
--- approval service, the sidebar, @Esc@, @q@, and @Ctrl-C@ all stay exactly as
--- usable as they were.
+-- blocker up, the footer, help, options, refresh, the sidebar, @Esc@, @q@,
+-- and @Ctrl-C@ all stay exactly as usable as they were.
 --
--- Total in 'BoardAction' for the same reason 'mutatesSelectedWork' is: a
--- binding added to the table in "Kanban.UI.Keys" cannot reach the board
--- without a decision about whether a card-free surface may dispatch it.
+-- Total in 'BoardAction' on purpose: a binding added to the table in
+-- "Kanban.UI.Keys" cannot reach the board without a decision about whether a
+-- card-free surface may dispatch it.
 blockedByCompletedLoad :: BoardAction -> Bool
 blockedByCompletedLoad = \case
   NextCard -> True
@@ -370,73 +327,17 @@ blockedByCompletedLoad = \case
   ToggleEpic -> True
   ShowDetails -> True
   OpenCardPage -> True
-  MergeDoneCard -> True
   ShowFilter -> False
   -- Reaches no card: it resizes whichever overlay is already open, and the
   -- blocker is a board-side surface with no overlay over it in the first
   -- place.
   ToggleFullscreen -> False
   DismissOrClose -> False
-  ShowIncidents -> False
   RefreshAll -> False
-  ToggleApproval -> False
-  ToggleDrainer -> False
   ToggleSidebar -> False
   -- Reaches no card either: it changes how every card is laid out, and a
   -- blocker that is drawing none of them still has a footer, a filter panel,
   -- and a board to come back to.
-  ToggleExcerpts -> False
-  ShowHelp -> False
-  RepaintTerminal -> False
-  QuitDashboard -> False
-
--- | Whether the card in front of the user puts this action out of reach, and
--- what to say instead.
---
--- One decision covering every mutating binding, taken before any of them
--- resolves a target, so a completed card refuses ahead of the wrong-kind,
--- approval and drainer-state errors each arm would otherwise report. The arm
--- re-asks it at its own boundary, which is what an overlay opened before a
--- refresh needs; this is what makes the key press itself refuse.
-readOnlyHistoryGate :: AppState -> BoardAction -> Maybe Text
-readOnlyHistoryGate state action
-  | mutatesSelectedWork action = subject >>= readOnlyHistoryRefusal state
-  | otherwise = Nothing
-  where
-    -- Exactly what the arms below act on: the item a details overlay is open
-    -- for, and otherwise the board's own selection, promoted to the epic a
-    -- collapsed group draws.
-    subject = case state.appOverlay of
-      Just (DetailsOverlay item) -> Just item
-      _ -> selectedBoardItem state
-
--- | Which bindings act on the work a card stands for rather than only reading
--- it or moving around it.
---
--- Total in 'BoardAction' on purpose: a binding added to the table in
--- "Kanban.UI.Keys" cannot reach the board without a decision here about
--- whether settled history is allowed to reach it.
-mutatesSelectedWork :: BoardAction -> Bool
-mutatesSelectedWork = \case
-  MergeDoneCard -> True
-  NextCard -> False
-  PreviousCard -> False
-  PreviousColumn -> False
-  NextColumn -> False
-  FirstItem -> False
-  LastItem -> False
-  OpenSearch -> False
-  ShowFilter -> False
-  ToggleEpic -> False
-  ShowDetails -> False
-  OpenCardPage -> False
-  ToggleFullscreen -> False
-  DismissOrClose -> False
-  ShowIncidents -> False
-  RefreshAll -> False
-  ToggleApproval -> False
-  ToggleDrainer -> False
-  ToggleSidebar -> False
   ToggleExcerpts -> False
   ShowHelp -> False
   RepaintTerminal -> False
@@ -455,11 +356,7 @@ dispatchBoardAction = \case
   OpenCardPage -> onSelection openItemPage openSelectedPage
   ToggleFullscreen -> modify toggleOverlayFullscreen
   DismissOrClose -> closeOverlay
-  ShowIncidents -> handleIncidentsAction OpenIncidentsPanel
   RefreshAll -> startAllRefreshes
-  ToggleApproval -> toggleApprovalService
-  ToggleDrainer -> toggleDrainer
-  MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
   ToggleExcerpts -> modify toggleCardExcerpts
   OpenSearch -> modify openSearch
@@ -631,130 +528,6 @@ applyOverlayMouseAction scrollOverlay = \case
   OverlayMouseScroll amount -> scrollOverlay amount
   OverlayMouseClose -> closeOverlay
   OverlayMouseNoOp -> pure ()
-
--- | What one event does to the incidents panel. Separated from the dispatch
--- that carries it out so the whole interaction — opening the panel, moving,
--- clicking, activating, closing — is decided by pure code that needs no
--- terminal (docs\/design.md §18).
-data IncidentsAction
-  = OpenIncidentsPanel
-  | CloseIncidentsPanel
-  | MoveIncidentSelection Int
-  | ScrollIncidentsPanel Int
-  | ActivateSelectedIncident
-  | ClickIncidentRow IncidentRef
-  | IgnoreIncidentsEvent
-  deriving stock (Eq, Show)
-
--- | The panel's event policy while it is open: it consumes its own keys and
--- mouse events. 'Nothing' means the event is not the panel's business and the
--- dashboard's other bindings decide it — including the @i@ that opens the
--- panel in the first place, which is a base-board binding like any other and
--- is declared once in "Kanban.UI.Keys" rather than a second time here.
---
--- What this answers is named for the user by 'incidentsFooterHints', which
--- the base footer draws while the panel is open (issue #525), so a key added
--- or dropped here owes that list a row.
-incidentsAction :: Maybe Overlay -> BrickEvent Name AppEvent -> Maybe IncidentsAction
-incidentsAction (Just IncidentsOverlay) event = Just $ case event of
-  VtyEvent (Vty.EvKey Vty.KEsc []) -> CloseIncidentsPanel
-  VtyEvent (Vty.EvKey Vty.KDown []) -> MoveIncidentSelection 1
-  VtyEvent (Vty.EvKey (Vty.KChar 'j') []) -> MoveIncidentSelection 1
-  VtyEvent (Vty.EvKey Vty.KUp []) -> MoveIncidentSelection (-1)
-  VtyEvent (Vty.EvKey (Vty.KChar 'k') []) -> MoveIncidentSelection (-1)
-  VtyEvent (Vty.EvKey Vty.KEnter []) -> ActivateSelectedIncident
-  -- Wheel events resolve to a scroll wherever they land: the rows are
-  -- clickable, so a wheel over one is reported against the row rather than
-  -- against the panel.
-  MouseDown _ Vty.BScrollUp _ _ -> ScrollIncidentsPanel (-3)
-  MouseDown _ Vty.BScrollDown _ _ -> ScrollIncidentsPanel 3
-  MouseDown (IncidentTarget reference) Vty.BLeft _ _ -> ClickIncidentRow reference
-  _ -> IgnoreIncidentsEvent
-incidentsAction _ _ = Nothing
-
--- | Carries out one 'IncidentsAction'. Read-only with respect to everything
--- the panel lists: it moves the dashboard's own selection and overlay and
--- touches no incident, session, or GitHub state.
-applyIncidentsAction :: IncidentsAction -> AppState -> AppState
-applyIncidentsAction action state = case action of
-  OpenIncidentsPanel ->
-    noticeCleared
-      state
-        { appOverlay = Just IncidentsOverlay,
-          appIncidentSelection = resolveIncidentSelection entries state.appIncidentSelection
-        }
-  CloseIncidentsPanel -> noticeCleared state {appOverlay = Nothing}
-  MoveIncidentSelection amount -> state {appIncidentSelection = movedSelection amount}
-  ScrollIncidentsPanel amount -> state {appIncidentSelection = movedSelection amount}
-  ActivateSelectedIncident -> activate (activationTarget state.appIncidentSelection)
-  ClickIncidentRow clickedRef -> case resolveIncidentClick entries state.appIncidentSelection clickedRef of
-    IncidentClickIgnored -> state
-    IncidentClickOpen -> activate (Just clickedRef)
-    IncidentClickSelect selection -> state {appIncidentSelection = selection}
-  IgnoreIncidentsEvent -> state
-  where
-    entries = incidentEntries state
-
-    -- Which identity a key press aims at, which is not always the one
-    -- stored. A selection that already names a row keeps that name even
-    -- after the row disappears: that is what stops a refresh from handing
-    -- the key press to whatever moved into its place. A selection that
-    -- names nothing has no such claim to protect — it is what a panel
-    -- opened over an empty list leaves behind — and a poll that lands the
-    -- first row while the panel is open makes 'drawIncidents' resolve and
-    -- highlight it. Resolving here too is what keeps Enter acting on the
-    -- row the user can see highlighted.
-    activationTarget selection = case selection.incidentSelectionRef of
-      Just reference -> Just reference
-      Nothing -> (resolveIncidentSelection entries selection).incidentSelectionRef
-
-    movedSelection amount =
-      let resolved = resolveIncidentSelection entries state.appIncidentSelection
-          maximumIndex = max 0 (length entries - 1)
-          nextIndex = max 0 (min maximumIndex (resolved.incidentSelectionRow + amount))
-       in IncidentSelection (incidentEntryRef <$> safeIndex nextIndex entries) nextIndex
-
-    activate Nothing = noticeSet "No incident is selected" state
-    -- Resolved against the visible view: activation moves the selection to a
-    -- row, and a row is an index into what the criteria are showing.
-    activate (Just reference) = case resolveIncidentActivation state.appVisibleBoard entries reference of
-      -- The row went away between the last render and this key press. The
-      -- panel stays open with nothing acted on, rather than sending the user
-      -- to whichever incident took its place.
-      Nothing -> noticeSet "That incident is no longer listed" state
-      Just activation -> applyIncidentActivation activation state
-
-applyIncidentActivation :: IncidentActivation -> AppState -> AppState
-applyIncidentActivation activation state =
-  maybe noticeCleared noticeSet activation.incidentActivationNotice
-    . selectWork
-    $ state {appOverlay = Nothing}
-  where
-    selectWork current = case activation.incidentActivationWork of
-      -- No row to go to: column, row, and tracker expansion are all left
-      -- exactly as they were.
-      Nothing -> current
-      Just location ->
-        current
-          { appSelectedColumn = location.boardWorkColumn,
-            appSelectedRows = Map.insert location.boardWorkColumn location.boardWorkRow current.appSelectedRows,
-            appExpandedTrackers = maybe id Set.insert location.boardWorkExpands current.appExpandedTrackers,
-            -- With the set, for the reason 'Kanban.UI.Types.appExpansionEpoch'
-            -- states. Bumped whether or not this reveal expands anything: a
-            -- counter that moves without the set costs one column measurement,
-            -- while a set that moves without the counter draws a stale one.
-            appExpansionEpoch = current.appExpansionEpoch + 1,
-            appEnsureSelectionVisible = True
-          }
-
--- | Dispatches one panel action, adding the one effect the pure transition
--- cannot express: the viewport scroll a wheel event asks for.
-handleIncidentsAction :: IncidentsAction -> EventM Name AppState ()
-handleIncidentsAction action = do
-  modify (applyIncidentsAction action)
-  case action of
-    ScrollIncidentsPanel amount -> vScrollBy (viewportScroll IncidentsViewport) amount
-    _ -> pure ()
 
 -- | Open the board selection's own GitHub page, promoted to the epic a
 -- collapsed group draws exactly as the keys that act on a card are

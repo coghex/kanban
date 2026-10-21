@@ -58,7 +58,7 @@ import Kanban.GitHub
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider, usageProviders)
 import System.Timeout (timeout)
-import Kanban.UI.Notice (NoticeActivity (..), NoticeLife (..))
+import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.State
@@ -153,14 +153,6 @@ startQueuedBoardRefresh = do
     modify (\current -> current {appBoardRefreshQueued = False})
     startBoardRefresh
 
--- | Set a notice, keeping an outstanding direct-merge result in front of it
--- and carrying that result forward only while it is still the one displayed.
--- Both callers report the board fetch, so the composed line stays an active
--- notice while that fetch is loading and expires ten seconds after it is not.
-announceOverDirectMergeResult :: Text -> EventM Name AppState ()
-announceOverDirectMergeResult =
-  modify . noticeSetOverDirectMergeResult (ActiveWhile BoardRefreshRunning)
-
 -- | The board's own refresh request, which is now a request to the
 -- repository's coordinator rather than a thread of its own.
 --
@@ -177,11 +169,11 @@ startBoardRefresh = do
   inFlight <- liftIO (coordinatorOpenCycleInFlight state.appRefreshCoordinator)
   case boardRefreshDispatch state.appBoardFreshness inFlight of
     QueueRefreshUntilIdle -> do
-      announceOverDirectMergeResult "GitHub refresh is already running"
+      modify (noticeSetFor BoardRefreshRunning "GitHub refresh is already running")
       modify (\current -> current {appBoardRefreshQueued = True})
     StartRefreshNow -> do
       now <- liftIO getMonotonicTimeNSec
-      announceOverDirectMergeResult "Refreshing GitHub…"
+      modify (noticeSetFor BoardRefreshRunning "Refreshing GitHub…")
       modify (\current -> current {appBoardFreshness = Loading, appLastBoardRefreshStarted = Just now})
       -- No whole-request deadline. `github_seconds` bounds one page now
       -- (§13), and an uncapped traversal of a large repository legitimately

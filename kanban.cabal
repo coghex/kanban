@@ -119,7 +119,6 @@ library kanban-internal
   visibility: private
   hs-source-dirs: src
   exposed-modules:
-    Kanban.ApprovalService
     Kanban.Browser
     Kanban.CLI
     Kanban.Cache
@@ -130,12 +129,10 @@ library kanban-internal
     Kanban.Config
     Kanban.Domain
     Kanban.Filter
-    Kanban.Drainer
     Kanban.Fixture
     Kanban.GlyphTest
     Kanban.GitHub
     Kanban.Layout
-    Kanban.ManagedPaths
     Kanban.Paths
     Kanban.Process
     Kanban.Provider
@@ -145,13 +142,10 @@ library kanban-internal
     Kanban.Text
     Kanban.Tracker
     Kanban.UI
-    Kanban.UI.Approval
     Kanban.UI.Board
     Kanban.UI.Details
-    Kanban.UI.Drainer
     Kanban.UI.Events
     Kanban.UI.Filter
-    Kanban.UI.Incidents
     Kanban.UI.Keys
     Kanban.UI.Overlay
     Kanban.UI.Reconcile
@@ -178,7 +172,6 @@ library kanban-internal
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
-    Kanban.ServiceProcess
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
@@ -216,8 +209,8 @@ test-suite kanban-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Spec.hs
+  build-tool-depends: kanban:kanban
   other-modules:
-    Spec.ApprovalService
     Spec.Agent.Capture
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Lifecycle
@@ -229,8 +222,6 @@ test-suite kanban-test
     Spec.Config.Loading
     Spec.Design.Entries
     Spec.Design.Witnesses
-    Spec.Drainer
-    Spec.Drainer.DirectMerge
     Spec.GitHub.BoardRefresh
     Spec.GitHub.ConcurrentReaders
     Spec.GitHub.Decoding
@@ -238,7 +229,6 @@ test-suite kanban-test
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RecordLock
     Spec.GitHub.RefreshCoordinator
-    Spec.ManagedPaths
     Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease
@@ -271,7 +261,6 @@ test-suite kanban-test
     Spec.UI.FocusRefresh
     Spec.UI.Fullscreen
     Spec.UI.Golden
-    Spec.UI.Incidents
     Spec.UI.Keys
     Spec.UI.Layout
     Spec.UI.Notice

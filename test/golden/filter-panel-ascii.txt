@@ -34,14 +34,14 @@
 ||                          ||     | Write the envelope      | |     | envelope and reject a  | |  | calculating               | |  | modal-aware ownership…    | ||
 ||                          ||     | header ahead of the     | |     | payload whose recorde… | |  +---------------------------+ |  | ✓ CI 14/14 · clean        | ||
 ||                          ||     | payload so a partial…   | |     +------------------------+ |                                |  +---------------------------+ ||
-|| +-------------------+    ||     +-------------------------+ |                                |                                |                                ||
-|| | approve_issues.py |    ||                                 |  STANDALONE                    |                                |  +---------------------------+ ||
-|| +-------------------+    ||                                 |  +---------------------------+ |                                |  | PR #861 Adopt the         | ||
-|| off                      ||  > #701  Input routing          |  | #833 Improve notification | |                                |  | envelope in the snapshot… | ||
-|| +--------------+         ||  hardening  0/1 complete        |  | category defaults         | |                                |  |  reviewed:approve         | ||
-|| | drain_prs.py |         ||  STANDALONE                     |  |  code-health              | |                                |  |  feature                  | ||
-|| +--------------+         ||  +----------------------------+ |  | @claude-agent · updated   | |                                |  | #901 · agent-name →       | ||
-|| off                      ||  | #756 Define the            | |  | 4h ago                    | |                                |  | master · updated 3h ago   | ||
+||                          ||     +-------------------------+ |                                |                                |                                ||
+||                          ||                                 |  STANDALONE                    |                                |  +---------------------------+ ||
+||                          ||                                 |  +---------------------------+ |                                |  | PR #861 Adopt the         | ||
+||                          ||  > #701  Input routing          |  | #833 Improve notification | |                                |  | envelope in the snapshot… | ||
+||                          ||  hardening  0/1 complete        |  | category defaults         | |                                |  |  reviewed:approve         | ||
+||                          ||  STANDALONE                     |  |  code-health              | |                                |  |  feature                  | ||
+||                          ||  +----------------------------+ |  | @claude-agent · updated   | |                                |  | #901 · agent-name →       | ||
+||                          ||  | #756 Define the            | |  | 4h ago                    | |                                |  | master · updated 3h ago   | ||
 |+--------------------------++---------------------------------+--------------------------------+--------------------------------+--------------------------------+|
 | j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                          |
 | board: updated 3h ago · history: current                                                                                                                         |
