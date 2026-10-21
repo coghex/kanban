@@ -119,9 +119,10 @@ defaultLimitsConfig =
 -- the same kind of value read from the same table rather than because it
 -- bounds a provider call. The four above bound one request this process makes
 -- and are consulted at the moment it is made; this one is resolved once at a
--- launch and becomes durable in that worker's own 'Kanban.Worker.WorkerSpec',
--- so a later run reads the bound the launch recorded and never this setting
--- (issue #595, requirement 15).
+-- launch and was recorded in that worker's own specification, so a later run
+-- read the bound the launch recorded and never this setting (issue #595,
+-- requirement 15). No worker reads it now; the setting still parses until the
+-- configuration trim.
 data TimeoutsConfig = TimeoutsConfig
   { timeoutsGithubSeconds :: Int,
     timeoutsCodexSeconds :: Int,
@@ -152,10 +153,10 @@ defaultWorkerDeadlineSeconds = 4 * 60 * 60
 -- | The one documented ceiling @worker_deadline_seconds@ is validated
 -- against: seven days.
 --
--- Named once rather than bounded per call site, because
--- 'Kanban.Worker.WorkerSpec' records the resolved value as an unconditional
--- finite 'Int' and every launch path must therefore be able to point at the
--- same maximum. A finite ceiling is also what makes "resolved to a finite
+-- Named once rather than bounded per call site, because a worker
+-- specification recorded the resolved value as an unconditional finite 'Int'
+-- and every launch path therefore had to be able to point at the same
+-- maximum. A finite ceiling is also what makes "resolved to a finite
 -- number of seconds" provable rather than merely usual: without one, a
 -- configuration file could name a bound no watchdog would ever reach, which
 -- is a permanently resident worker written as a number (§3).

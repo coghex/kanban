@@ -46,7 +46,6 @@ data Options = Options
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
-    optionWorkerSpec :: Maybe FilePath,
     optionReviewTools :: Maybe FilePath
   }
   deriving stock (Eq, Show)
@@ -60,19 +59,16 @@ data Options = Options
 -- no build-tool dependency on @executable kanban@, so a mode selection written
 -- only in @app\/Main.hs@ is unreachable from every example.
 --
--- The order is @main@'s, and it is not arbitrary: neither a worker nor the
--- re-entered review tool server is a dashboard
--- at all, the observational modes answer without needing configuration or a
--- repository, and a ping — the only one that spends quota — yields to every
--- one of them (§5). 'DashboardMode' is what is left, which is why it is last.
+-- The order is @main@'s, and it is not arbitrary: the re-entered review tool
+-- server is not a dashboard at all, the observational modes answer without
+-- needing configuration or a repository, and a ping — the only one that spends
+-- quota — yields to every one of them (§5). 'DashboardMode' is what is left,
+-- which is why it is last.
 data LaunchMode
-  = -- | @--worker@, carrying the spec path it names.
-    WorkerMode FilePath
-  | -- | @--review-tools@, carrying the endpoint directory it proxies over:
+  = -- | @--review-tools@, carrying the endpoint directory it proxies over:
     -- Kanban re-entered as the stdio MCP server a review session's
-    -- @claude@ spawns (D-15). Internal machinery exactly as the worker
-    -- mode is — only a launch this process itself built ever invokes it —
-    -- and it loads no roster, resolves no repository, reads no
+    -- @claude@ spawns (D-15). Internal machinery — only a launch this
+    -- process itself built ever invokes it — and it loads no roster, resolves no repository, reads no
     -- configuration, and takes no lease: everything a tool call needs
     -- lives in the parent on the other end of the endpoint.
     ReviewToolServerMode FilePath
@@ -91,10 +87,9 @@ data LaunchMode
   deriving stock (Eq, Show)
 
 launchMode :: Options -> LaunchMode
-launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) of
-  (Just workerSpec, _) -> WorkerMode workerSpec
-  (Nothing, Just endpointDirectory) -> ReviewToolServerMode endpointDirectory
-  (Nothing, Nothing)
+launchMode options = case options.optionReviewTools of
+  Just endpointDirectory -> ReviewToolServerMode endpointDirectory
+  Nothing
     | options.optionGlyphTest -> GlyphTestMode
     | options.optionDoctor -> DoctorMode
     | options.optionUsage -> UsageQueryMode
@@ -114,10 +109,9 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
 -- 'Kanban.Usage.usageProviders' narrows the report and
 -- 'Kanban.Ping.pingBrandRefusal' refuses a brand a single-agent install does
 -- not load, both of which need a provider set this refusal has already
--- established is non-empty. Nothing else is: a worker replays the
--- assignment its own specification recorded and consults no roster at all,
--- the review tool server proxies to a parent that resolved everything
--- before launching it and likewise consults no roster,
+-- established is non-empty. Nothing else is: the review tool server proxies
+-- to a parent that resolved everything before launching it and likewise
+-- consults no roster,
 -- @--doctor@ is the read-only mode that exists to say /why/ an AI action would
 -- not start and so must answer in exactly this case, @--glyph-test@ asks the
 -- terminal rather than a provider, and the dashboard is a board-only Kanban in
@@ -126,7 +120,6 @@ launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
   PingQueryMode -> True
-  WorkerMode _ -> False
   ReviewToolServerMode _ -> False
   GlyphTestMode -> False
   DoctorMode -> False
@@ -154,9 +147,8 @@ launchModeRefusal mode loaded
 -- | Whether this invocation takes the repository's board lease.
 --
 -- Only the dashboard does. Every other mode either never resolves a repository
--- (a worker is handed its own spec; the review tool server is handed its
--- endpoint; @--glyph-test@ and @--doctor@ answer from
--- the terminal and the environment) or resolves one without becoming a board
+-- (the review tool server is handed its endpoint; @--glyph-test@ and @--doctor@
+-- answer from the terminal and the environment) or resolves one without becoming a board
 -- (@--usage@ is global, and @--ping@ starts a quota window and exits). None of
 -- them writes the durable @gh@ record, so none of them has anything to
 -- serialise against — and a mode that took the lease would refuse to run
@@ -240,13 +232,6 @@ optionsParser =
           ( long "config"
               <> metavar "FILE"
               <> help "Override the global configuration path"
-          )
-      )
-    <*> optional
-      ( strOption
-          ( long "worker-spec"
-              <> metavar "FILE"
-              <> internal
           )
       )
     <*> optional

@@ -114,9 +114,8 @@ mcpToolAllowance toolName = "mcp__" <> reviewToolServerName <> "__" <> toolName
 -- one server, Kanban's own binary re-entered against this thread's endpoint.
 --
 -- The executable is the caller's to supply because it must be the exact
--- binary that is already running — 'System.Environment.getExecutablePath',
--- the same re-entry precedent "Kanban.Worker" set — rather than whatever
--- @kanban@ a PATH lookup would find.
+-- binary that is already running — 'System.Environment.getExecutablePath' —
+-- rather than whatever @kanban@ a PATH lookup would find.
 reviewToolServerConfig :: FilePath -> FilePath -> Value
 reviewToolServerConfig executable endpointDirectory =
   object

@@ -268,7 +268,7 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
 --
 -- Takes the resolved 'Assignment' rather than the roster it came from: the
 -- caller has already established that the cell exists (see 'solveAssignment'
--- and the refusals in "Kanban.UI.Solve" and "Kanban.Worker"), so this stays
+-- and the refusals in "Kanban.UI.Solve"), so this stays
 -- total and gains no failure return of its own. Under an absent
 -- @models.toml@ the compiled defaults make every argument below
 -- byte-identical to the literals this replaced.

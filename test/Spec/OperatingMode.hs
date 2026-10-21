@@ -192,7 +192,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, True, True, False]
 
   -- The mission modes are gone, not merely unselected: the parser turns each
   -- spelling away as an option it does not know, so no invocation can reach a
@@ -220,6 +220,27 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
       Failure failure -> fst (renderFailure failure "kanban") `shouldNotSatisfy` isInfixOf "mission"
       _ -> expectationFailure "--help did not render help"
 
+  -- The mode removed with the worker layer, refused the same way and named in
+  -- the diagnostic, alone and beside a mode that is still selected.
+  it "refuses --worker-spec as an unknown option, naming it" $
+    sequence_
+      [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
+        | (flag, arguments) <-
+            [ ("--worker-spec", ["--worker-spec", "/tmp/spec.json"]),
+              ("--worker-spec", ["--usage", "--worker-spec", "/tmp/spec.json"])
+            ],
+          let refusal = case execParserPure defaultPrefs optionsParserInfo arguments of
+                Failure failure ->
+                  let (message, code) = renderFailure failure "kanban"
+                   in Just (code, ("Invalid option `" <> flag <> "'") `isInfixOf` message)
+                _ -> Nothing
+      ]
+
+  it "lists it nowhere in --help" $
+    case execParserPure defaultPrefs optionsParserInfo ["--help"] of
+      Failure failure -> fst (renderFailure failure "kanban") `shouldNotSatisfy` isInfixOf "--worker-spec"
+      _ -> expectationFailure "--help did not render help"
+
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
       [ (mode, launchModeRefusal mode (Right noAgentRoster)) `shouldBe` (mode, Just noAgentModeMessage)
@@ -242,9 +263,9 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
           mode <- [UsageQueryMode, PingQueryMode]
       ]
 
-  -- Everything else answers about the terminal, its own recorded
-  -- specification, or the board, so none of it is refused — `--doctor` least
-  -- of all, since saying why an AI action would not start is what it is for.
+  -- Everything else answers about the terminal, the environment, or the
+  -- board, so none of it is refused — `--doctor` least of all, since saying
+  -- why an AI action would not start is what it is for.
   it "refuses no other mode, whatever the roster" $
     sequence_
       [ (mode, launchModeRefusal mode loaded) `shouldBe` (mode, Nothing)
@@ -260,8 +281,7 @@ everyMode :: [LaunchMode]
 everyMode =
   map
     launchMode
-    [ testOptions {optionWorkerSpec = Just "/tmp/spec.json"},
-      testOptions {optionReviewTools = Just "/tmp/endpoint"},
+    [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
       testOptions {optionGlyphTest = True},
       testOptions {optionDoctor = True},
       testOptions {optionUsage = True},

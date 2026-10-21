@@ -303,20 +303,19 @@ spec = do
   describe "which invocations take the repository" $ do
     it "is the dashboard, and only the dashboard" $ do
       map launchMode everyMode
-        `shouldBe` [ WorkerMode "/tmp/spec.json",
-                     ReviewToolServerMode "/tmp/endpoint",
+        `shouldBe` [ ReviewToolServerMode "/tmp/endpoint",
                      GlyphTestMode,
                      DoctorMode,
                      UsageQueryMode,
                      PingQueryMode,
                      DashboardMode
                    ]
-      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, True]
+      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, True]
 
     -- The order is §5's, and the reason it is asserted is that an invocation
     -- naming two modes must resolve to the one that does not take the lease.
     it "leaves the lease unclaimed when a dashboard flag is combined with an earlier mode" $ do
-      acquiresRepositoryLease testOptions {optionWorkerSpec = Just "/tmp/spec.json", optionPing = ["codex"]} `shouldBe` False
+      acquiresRepositoryLease testOptions {optionReviewTools = Just "/tmp/endpoint", optionPing = ["codex"]} `shouldBe` False
       acquiresRepositoryLease testOptions {optionDoctor = True, optionUsage = True} `shouldBe` False
       -- Options a dashboard does carry do not change the answer.
       acquiresRepositoryLease testOptions {optionRepo = Just "coghex/kanban", optionFresh = True} `shouldBe` True
@@ -401,8 +400,7 @@ unownedGroup groupPid = OwnedProcessGroup groupPid [] False Nothing False
 -- | Every mode an invocation can select, one option set each, in §5's order.
 everyMode :: [Options]
 everyMode =
-  [ testOptions {optionWorkerSpec = Just "/tmp/spec.json"},
-    testOptions {optionReviewTools = Just "/tmp/endpoint"},
+  [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
     testOptions {optionGlyphTest = True},
     testOptions {optionDoctor = True},
     testOptions {optionUsage = True},

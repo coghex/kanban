@@ -116,8 +116,7 @@ data ReviewProtocol
 -- | How a launch names the re-entered MCP server that will serve this
 -- session's Kanban tools (D-15): the exact executable to re-enter — the
 -- currently running one, resolved by the client through
--- 'System.Environment.getExecutablePath' exactly as "Kanban.Worker" resolves
--- its supervisor, never a @kanban@ found on PATH — and the directory of the
+-- 'System.Environment.getExecutablePath', never a @kanban@ found on PATH — and the directory of the
 -- FIFO endpoint the client created for this one review thread.
 data ReviewToolServerLaunch = ReviewToolServerLaunch
   { toolServerExecutable :: FilePath,

@@ -1,4 +1,4 @@
--- | Managed process, worker and review client harnesses.
+-- | Managed process and review client harnesses.
 module Spec.Support.Process
   ( withSurvivingGroupLeader,
     withVacatedGroupLeader,
@@ -9,14 +9,8 @@ module Spec.Support.Process
     withNonLeaderShell,
     processIdentity,
     identityForProcess,
-    runningWorkerState,
-    isDiagnosticEvent,
-    isWorkerFailedEvent,
     chattyProviderLines,
     chattyProvider,
-    runChattyWorker,
-    assertBoundedWorkerSurfaces,
-    admitTelemetry,
     rawTelemetryLines,
     singleNotice,
     aggregatedNotices,
@@ -24,12 +18,6 @@ module Spec.Support.Process
     isSolveOutputEvent,
     isPullRequestSessionIdentifiedEvent,
     isPullRequestFlowOutputEvent,
-    workerFixtureSpec,
-    workerFixtureAssignment,
-    deadlineFixtureSpec,
-    waitForWorkerState,
-    isOrphaned,
-    isTerminal,
     withRecordingReviewClient,
     withRecordingReviewClientUsing,
     readTwoConnectionLog,
@@ -83,24 +71,22 @@ module Spec.Support.Process
     runBoundedCanonicalCommand,
     canonicalSessionLogText,
     fakeController,
-    fakeApprovalController,
-    writeTerminalWorker
+    fakeApprovalController
   )
 where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, throwIO, try)
 import Control.Monad (void)
-import Data.Aeson (Value (..), eitherDecode, encode)
+import Data.Aeson (Value (..), encode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
-import Data.List (dropWhileEnd, find, findIndex, findIndices, isPrefixOf, sort)
+import Data.List (dropWhileEnd, isPrefixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Text.IO as TextIO
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time (UTCTime (..))
 import Kanban.Domain
 import Kanban.ApprovalService (ApprovalBackend (..), ApprovalController (..))
 import Kanban.Drainer (DrainerBackend (..), DrainerController (..))
@@ -113,7 +99,7 @@ import Kanban.Process
     managedProcess,
     readProcessSnapshot
   )
-import Kanban.Models (ModelRoster, ProviderName (..), RecordedAssignment, defaultRoster)
+import Kanban.Models (ModelRoster, ProviderName (..), defaultRoster)
 import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
@@ -147,44 +133,21 @@ import Kanban.Review
 import Kanban.Solve
   ( AgentEvent (..),
     ProviderAdapter (..),
-    ResumeProvenance (..),
     SolveEvent (..),
-    SolveOutcome (..),
-    SolveWorkflow (..),
-    SolverBrand (..),
     StreamEvent (..),
-    UnknownAggregator,
     adapterFor,
     emitStreamEvent,
     sealUnknownAggregates,
-    maxUnknownNoticeLength,
     newUnknownAggregator,
-    parseSolveOutputLine,
-    solveAssignment,
-    unknownNoticeSamples
-  )
-import Kanban.Worker
-  ( SolveWorkerTask (..),
-    WorkerEvent (..),
-    WorkerDescriptor (..),
-    WorkerId (..),
-    WorkerSpec (..),
-    WorkerState (..),
-    WorkerStatus (..),
-    WorkerTask (..),
-    descriptorForSpec,
-    discoverWorkerHistory,
-    monitorWorker,
-    runWorker
+    parseSolveOutputLine
   )
 import Kanban.Transcript (SessionLog, closeSessionLog, openSessionLog, sessionLogPath)
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
-import Spec.Support.Fixtures (epoch, fixtureReviewThread)
-import Spec.Support.Roster (cellOf)
+import Spec.Support.Fixtures (fixtureReviewThread)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath ((</>))
 import System.IO (Handle, hClose)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
@@ -367,33 +330,6 @@ identityForProcess process = do
       Just identity -> pure identity
       Nothing -> fail "spawned process was not present in a process snapshot"
 
-runningWorkerState :: WorkerId -> Int -> Maybe ProcessIdentity -> WorkerState
-runningWorkerState identifier pid identity =
-  WorkerState
-    { workerStateId = identifier,
-      workerStateStatus = WorkerRunning,
-      workerStateWorkerPid = pid,
-      workerStateWorkerIdentity = identity,
-      workerStateProviderPid = Nothing,
-      workerStateProviderIdentity = Nothing,
-      workerStateSessionId = Nothing,
-      workerStateLogPath = Nothing,
-      workerStateHeartbeatAt = epoch,
-      workerStateLastActivity = "running",
-      workerStateKnownProcesses = [],
-      workerStateReviewThread = Nothing,
-      workerStateReviewTurn = Nothing,
-      workerStateReviewRequest = Nothing
-    }
-
-isDiagnosticEvent :: WorkerEvent -> Bool
-isDiagnosticEvent (WorkerDiagnostic _) = True
-isDiagnosticEvent _ = False
-
-isWorkerFailedEvent :: WorkerEvent -> Bool
-isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
-isWorkerFailedEvent _ = False
-
 -- | How many occurrences of the unrecognized @telemetry@ type
 -- 'chattyProvider' streams. Comfortably past 'unknownNoticeSamples', so a
 -- run proves collapsing rather than merely staying under the sample budget.
@@ -419,74 +355,6 @@ chattyProvider sessionId sentinel tailCommands =
       ]
         <> tailCommands
     )
-
--- | Drives a real worker — the real supervisor, the real solve or PR flow,
--- and a real provider process — over a 'chattyProvider' run, then reports
--- the three surfaces the bound has to hold on: the durable worker journal,
--- what a replay of that journal delivers, and how many raw provider lines
--- the session log kept. Collecting sinks would prove none of these; only
--- 'appendWorkerEvent' and 'monitorWorker' running for real do.
-runChattyWorker :: FilePath -> WorkerSpec -> String -> IO ([ByteString.ByteString], [AgentEvent], Int)
-runChattyWorker temporaryRoot spec identifier = do
-  let repository = spec.workerRepository
-      binaryRoot = temporaryRoot </> "bin"
-      fakeCodex = binaryRoot </> "codex"
-      workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
-      specPath = workerRoot </> identifier <> ".spec.json"
-      statePath = workerRoot </> identifier <> ".state.json"
-      eventPath = workerRoot </> identifier <> ".events.jsonl"
-  createDirectory repository.repositoryRoot
-  createDirectory binaryRoot
-  createDirectoryIfMissing True workerRoot
-  ByteString.writeFile fakeCodex (chattyProvider "chatty-worker-session" "Created PR #999" [])
-  setFileMode fakeCodex 0o700
-  LazyByteString.writeFile specPath (encode spec)
-  originalPath <- maybe "" id <$> lookupEnv "PATH"
-  withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
-    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
-      runWorker specPath `shouldReturn` Right ()
-      journal <- ByteString.lines <$> ByteString.readFile eventPath
-      replayed <- newIORef []
-      descriptors <- discoverWorkerHistory repository
-      case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
-        Nothing -> throwIO (userError "worker was not discoverable for replay")
-        Just descriptor -> void (timeout 15000000 (monitorWorker descriptor (\_ _ event -> modifyIORef replayed (event :))))
-      replayedEvents <- reverse <$> readIORef replayed
-      stateBytes <- LazyByteString.readFile statePath
-      logPath <- case eitherDecode stateBytes :: Either String WorkerState of
-        Right state -> requireJust "worker state recorded no session log path" state.workerStateLogPath
-        Left message -> throwIO (userError ("undecodable worker state: " <> message))
-      rawCount <- rawTelemetryLines [logPath]
-      pure (journal, [agentEvent | WorkerAgentOutput agentEvent <- replayedEvents], rawCount)
-
--- | The bound, asserted on all three of a real worker's surfaces at once:
--- the journal holds only the samples and one summary, ordered before the
--- terminal envelope; replay delivers exactly those same bounded notices; and
--- the session log still holds every raw provider line.
-assertBoundedWorkerSurfaces :: ([ByteString.ByteString], [AgentEvent], Int) -> IO ()
-assertBoundedWorkerSurfaces (journal, replayedOutputs, rawCount) = do
-  let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
-      terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
-  length noticeIndices `shouldBe` unknownNoticeSamples + 1
-  case (reverse noticeIndices, terminalIndex) of
-    (lastNotice : _, Just terminal) -> lastNotice `shouldSatisfy` (< terminal)
-    _ -> expectationFailure "expected bounded notices and a terminal envelope in the worker journal"
-  let replayedNotices = [agentEvent.agentEventSummary | agentEvent <- replayedOutputs, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
-  length replayedNotices `shouldBe` unknownNoticeSamples + 1
-  replayedNotices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length)
-  last replayedNotices `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
-  rawCount `shouldBe` chattyProviderLines
-
--- | Pushes @count@ occurrences of one unrecognized event type through a
--- supervisor's shared aggregator, emitting whatever it admits — the stream
--- loop's half of the deadline tests, without needing a real provider whose
--- output would race the deadline unpredictably.
-admitTelemetry :: UnknownAggregator -> (WorkerEvent -> IO ()) -> Int -> IO ()
-admitTelemetry aggregator emit count = mapM_ (const admitOne) [1 .. count]
-  where
-    admitOne = case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
-      Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
-      Right (_, streamEvents) -> mapM_ (emitStreamEvent aggregator (emit . WorkerAgentOutput)) streamEvents
 
 -- | How many raw stdout records a 'chattyProvider' run left in its session
 -- log, given the log paths the invocation reported opening. The §16 contract
@@ -543,76 +411,6 @@ isPullRequestSessionIdentifiedEvent _ = False
 isPullRequestFlowOutputEvent :: PullRequestFlowEvent -> Bool
 isPullRequestFlowOutputEvent (PullRequestFlowOutput _ _) = True
 isPullRequestFlowOutputEvent _ = False
-
--- | The cell every hand-built fixture spec records: the compiled default
--- for the solve task 'workerFixtureSpec' carries. A supervisor takes its
--- assignment from the specification it is handed and resolves nothing of its
--- own, so a fixture that writes the spec by hand has to record one or the
--- run refuses before it spawns.
-workerFixtureAssignment :: RecordedAssignment
-workerFixtureAssignment = cellOf (solveAssignment defaultRoster CodexSolver)
-
-workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
-workerFixtureSpec repository identifier issueNumber =
-  WorkerSpec
-    { workerId = identifier,
-      workerRepository = repository,
-      workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly CodexSolver),
-      workerExistingSession = Nothing,
-      workerExistingLogPath = Nothing,
-      workerResumeProvenance = ResumeAnswer,
-      workerUserMessage = "",
-      workerParent = Nothing,
-      workerCreatedAt = epoch,
-      workerMaxRuntimeSeconds = 60,
-      workerConfigPath = Nothing,
-      workerWorkflowConfig = defaultWorkflowConfig,
-      workerAssignment = Just workerFixtureAssignment,
-      workerExpectedTarget = Nothing,
-      workerInvocation = Nothing
-    }
-
--- | A finished worker, written where discovery and the cache collector find
--- one: a specification carrying @invocation@ (the mark a mission launch used
--- to leave, still decoded from records already on disk), a terminal state
--- whose heartbeat the caller chooses and which records @rawLog@ as the
--- provider's raw log, and an event stream. No process identity is recorded,
--- so nothing about a live process keeps it.
-writeTerminalWorker :: Repository -> WorkerId -> Maybe Text -> UTCTime -> Maybe FilePath -> IO WorkerDescriptor
-writeTerminalWorker repository identifier invocation heartbeat rawLog = do
-  let spec = (workerFixtureSpec repository identifier 844) {workerInvocation = invocation}
-      state =
-        (runningWorkerState identifier 999999 Nothing)
-          { workerStateStatus = WorkerTerminal SolveCompleted,
-            workerStateHeartbeatAt = heartbeat,
-            workerStateLogPath = rawLog
-          }
-  descriptor <- descriptorForSpec spec
-  createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
-  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode spec)
-  LazyByteString.writeFile descriptor.workerDescriptorStatePath (encode state)
-  ByteString.writeFile descriptor.workerDescriptorEventPath "{\"event\":\"the whole stream\"}\n"
-  pure descriptor
-
--- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and
--- 'workerMaxRuntimeSeconds' so a deadline test can construct a precise,
--- deterministic firing time.
-deadlineFixtureSpec :: Repository -> WorkerId -> Int -> UTCTime -> Int -> WorkerSpec
-deadlineFixtureSpec repository identifier issueNumber createdAt maxRuntimeSeconds =
-  (workerFixtureSpec repository identifier issueNumber)
-    { workerCreatedAt = createdAt,
-      workerMaxRuntimeSeconds = maxRuntimeSeconds
-    }
-
-waitForWorkerState :: FilePath -> (WorkerState -> Bool) -> Int -> IO WorkerState
-waitForWorkerState path predicate attempts = do
-  exists <- doesFileExist path
-  decoded <- if exists then eitherDecode <$> LazyByteString.readFile path else pure (Left "state not created")
-  case decoded of
-    Right state | predicate state -> pure state
-    _
-      | attempts <= 0 -> fail ("worker state did not reach the expected condition: " <> show decoded)
-      | otherwise -> threadDelay 100000 >> waitForWorkerState path predicate (attempts - 1)
 
 -- | A review client whose app-server stdin is a pipe this test reads, plus
 -- the events its sink recorded in order, so a response driven in through
@@ -1407,13 +1205,3 @@ canonicalSessionLogText cacheRoot = do
   let logDirectory = cacheRoot </> "kanban" </> "logs" </> "coghex-kanban"
   entries <- listDirectory logDirectory
   concat <$> mapM (readFile . (logDirectory </>)) entries
-
-isOrphaned :: WorkerState -> Bool
-isOrphaned state = case state.workerStateStatus of
-  WorkerOrphaned _ -> True
-  _ -> False
-
-isTerminal :: WorkerState -> Bool
-isTerminal state = case state.workerStateStatus of
-  WorkerTerminal _ -> True
-  _ -> False

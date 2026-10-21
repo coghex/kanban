@@ -14,7 +14,6 @@ import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
 import Kanban.ReviewToolServer (serveReviewTools)
 import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
-import Kanban.Worker (runWorker)
 import Options.Applicative (execParser)
 import System.Exit (exitFailure, exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout)
@@ -42,8 +41,8 @@ main = do
   -- The operating mode gate (§14): a mode that reaches a provider has nothing
   -- to reach when the roster loads none. Deliberately after the malformed
   -- --ping refusal above, so an unknown or repeated brand is still reported as
-  -- itself; and asked only of the modes that need one, so the dashboard and
-  -- the worker do not read models.toml twice. The decision is
+  -- itself; and asked only of the modes that need one, so the dashboard
+  -- does not read models.toml twice. The decision is
   -- 'launchModeRefusal' in the library, which the suite covers; this reports
   -- what it answered and nothing more.
   loadedRoster <-
@@ -67,11 +66,6 @@ main = do
   -- roster that loads no provider.
   let operatingMode = maybe NoAgentMode loadedOperatingMode loadedRoster
   case selectedMode of
-    WorkerMode workerSpec -> do
-      result <- runWorker workerSpec
-      case result of
-        Left message -> hPutStrLn stderr ("kanban worker: " <> Text.unpack message) >> exitFailure
-        Right () -> pure ()
     -- The re-entered review tool server (D-15): speaks MCP on this
     -- process's own stdio to the provider that spawned it and proxies over
     -- the endpoint it was handed. Everything else — configuration, roster,

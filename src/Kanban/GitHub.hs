@@ -6,8 +6,7 @@
 -- 'Kanban.GitHub.Decode' (the GraphQL response), 'Kanban.GitHub.Group'
 -- (process-group facts), 'Kanban.GitHub.Guard' (the cleanup verdict and its
 -- durable record), 'Kanban.GitHub.Run' (running @gh@),
--- 'Kanban.GitHub.Fetch' (the snapshot fetch that composes them), and
--- 'Kanban.GitHub.Precondition' (one item's live state, read on its own).
+-- and 'Kanban.GitHub.Fetch' (the snapshot fetch that composes them).
 -- This module re-exports what the rest of the build and the suite use, so no
 -- call site outside it names an implementation module.
 module Kanban.GitHub
@@ -69,7 +68,6 @@ module Kanban.GitHub
     latchingHeldBack,
     newGhFetchGuard,
     newGhRecordLock,
-    observeTargetPrecondition,
     paginationDecision,
     reclaimRecordedGhGroups,
     recordGhGroup,
@@ -182,7 +180,6 @@ import Kanban.GitHub.History
   )
 import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhEntryClass (..), GhEntryWriter (..), GhFetchGuard, GhRecordLock, GhSpawnRegistration (..), GhSpawnState, abandonGh, abandonSpawn, newGhSpawnState, classifyGhEntry, describeGhEntry, dropGhGroup, ghFetchCleanupFailure, ghGroupIsPending, ghGroupIsRecorded, latchingHeldBack, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup)
 import Kanban.GitHub.Message (classifyFailure, compactError)
-import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)
 import Kanban.GitHub.Run (GhFailurePhase (..), ghBehindBarrier, ghFailureKind)
 import Kanban.GitHub.Warnings (snapshotWarnings)
