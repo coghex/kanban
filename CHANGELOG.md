@@ -15,6 +15,22 @@ created above it.
 
 ### Unreleased
 
+- Removed the agent screens from the dashboard and the workflow action registry
+  behind them (epic #794, child 2, #796). The keys `r`, `S`, `A`, `x`, `p` and
+  `o` are unbound: the solve chooser and solve session, autosolve, the issue and
+  pull-request review sessions, the process and session inspector with its kill
+  key, and the settings overlay are gone, together with every card badge,
+  column marker and sidebar line derived from a session or worker record. Only
+  the help, details and incidents overlays remain, and the incidents panel
+  lists drainer incidents only. The dashboard starts no worker discovery,
+  worker monitor, solve, review or pull-request process or animation tick, and
+  quitting never waits on, signals or mentions an agent process. Right-clicking
+  a board card now only selects it. `Kanban.Action` and its submodules and the
+  `Kanban.UI` session, solve, review, pull-request, worker, autosolve,
+  transcript and settings modules are deleted; the PR drainer's toggle, direct
+  merge and incident projection live on in `Kanban.UI.Drainer` and
+  `Kanban.UI.Incidents`. Settings files and agent session logs on disk are
+  neither read nor deleted.
 - Removed the in-app mission coordinator and the mission runner service
   (epic #794, child 1, delivered as #802, #803 and #804). `kanban --mission`,
   `--mission-scheduler`, `--mission-result` and `--mission-invocation` no
