@@ -34,7 +34,6 @@ data Options = Options
     optionColor :: ColorPolicy,
     optionBorder :: BorderPolicy,
     optionGlyphTest :: Bool,
-    optionDoctor :: Bool,
     optionUsage :: Bool,
     optionFresh :: Bool,
     optionJson :: Bool,
@@ -74,8 +73,6 @@ data LaunchMode
     ReviewToolServerMode FilePath
   | -- | @--glyph-test@.
     GlyphTestMode
-  | -- | @--doctor@.
-    DoctorMode
   | -- | @--usage@.
     UsageQueryMode
   | -- | @--ping@, still unvalidated: 'Kanban.Ping.resolvePingBrand' decides
@@ -91,7 +88,6 @@ launchMode options = case options.optionReviewTools of
   Just endpointDirectory -> ReviewToolServerMode endpointDirectory
   Nothing
     | options.optionGlyphTest -> GlyphTestMode
-    | options.optionDoctor -> DoctorMode
     | options.optionUsage -> UsageQueryMode
     | not (null options.optionPing) -> PingQueryMode
     | otherwise -> DashboardMode
@@ -111,18 +107,15 @@ launchMode options = case options.optionReviewTools of
 -- not load, both of which need a provider set this refusal has already
 -- established is non-empty. Nothing else is: the review tool server proxies
 -- to a parent that resolved everything before launching it and likewise
--- consults no roster,
--- @--doctor@ is the read-only mode that exists to say /why/ an AI action would
--- not start and so must answer in exactly this case, @--glyph-test@ asks the
--- terminal rather than a provider, and the dashboard is a board-only Kanban in
--- this mode rather than a refused one.
+-- consults no roster, @--glyph-test@ asks the terminal rather than a
+-- provider, and the dashboard is a board-only Kanban in this mode rather than
+-- a refused one.
 launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
   PingQueryMode -> True
   ReviewToolServerMode _ -> False
   GlyphTestMode -> False
-  DoctorMode -> False
   DashboardMode -> False
 
 -- | What a mode says instead of running, given the roster the invocation
@@ -147,8 +140,8 @@ launchModeRefusal mode loaded
 -- | Whether this invocation takes the repository's board lease.
 --
 -- Only the dashboard does. Every other mode either never resolves a repository
--- (the review tool server is handed its endpoint; @--glyph-test@ and @--doctor@
--- answer from the terminal and the environment) or resolves one without becoming a board
+-- (the review tool server is handed its endpoint; @--glyph-test@ answers from
+-- the terminal) or resolves one without becoming a board
 -- (@--usage@ is global, and @--ping@ starts a quota window and exits). None of
 -- them writes the durable @gh@ record, so none of them has anything to
 -- serialise against — and a mode that took the lease would refuse to run
@@ -201,10 +194,6 @@ optionsParser =
     <*> switch
       ( long "glyph-test"
           <> help "Print vertical-line candidates without starting the dashboard"
-      )
-    <*> switch
-      ( long "doctor"
-          <> help "Report AI-action readiness read-only, then exit without starting the dashboard"
       )
     <*> switch
       ( long "usage"

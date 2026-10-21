@@ -24,7 +24,6 @@ import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.ClaudeReview as ClaudeReview
-import qualified Spec.Agent.Preflight as Preflight
 import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
@@ -231,7 +230,6 @@ suiteGroups =
     SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
-    SuiteGroup "Spec.Agent.Preflight" SupervisionLane Preflight.spec, -- 5.8s
     SuiteGroup "Spec.Suite.Assignment" PingLane (Assignment.spec suiteGroups suiteColocations)
   ]
 

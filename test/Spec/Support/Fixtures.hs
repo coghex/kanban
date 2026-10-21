@@ -325,7 +325,6 @@ testOptions =
       optionColor = ColorAuto,
       optionBorder = BorderBox,
       optionGlyphTest = False,
-      optionDoctor = False,
       optionUsage = False,
       optionFresh = False,
       optionJson = False,

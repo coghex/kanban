@@ -24,10 +24,8 @@
 --
 -- Three launchers stay outside this interface by decision (D-13) and are
 -- unchanged: "Kanban.Ping" is modelless, and "Kanban.Codex" and
--- "Kanban.Claude" are usage probes that read account status. So is
--- "Kanban.Preflight.Environment", the readiness probe that runs
--- @\<provider\> --version@ before any session starts. None of the four is an
--- agent session and none consumes a roster value.
+-- "Kanban.Claude" are usage probes that read account status. None of the
+-- three is an agent session and none consumes a roster value.
 module Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProcessRequest (..),

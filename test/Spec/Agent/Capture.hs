@@ -15,27 +15,10 @@ import Data.Time
     utcToLocalTime
   )
 import Kanban.Domain
-import Kanban.Preflight
-  ( AuthObservation (..),
-    GitHubObservation (..),
-    PreflightEnvironment (..),
-    ProviderProbe (..),
-    VersionObservation (..),
-    gatherPreflightEnvironment
-  )
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
 import Kanban.Repository (resolveRepository)
 import Spec.Support.Env (withFakeOnPath, withTemporaryCacheRoot)
 import Spec.Support.Locale (LocaleProbe (..), unicodeCheckoutName, withLocaleProbe)
-import Spec.Support.Preflight
-  ( BackendFixture (..),
-    hangingGitHubFake,
-    python3Fake,
-    readyClaudeFake,
-    readyGitHubFake,
-    undecodableCodexFake,
-    withPreflightMachine
-  )
 import System.Directory (makeAbsolute)
 import System.FilePath ((</>))
 import System.Posix.Process (getParentProcessID, getProcessID)
@@ -43,12 +26,12 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-  -- One defect class at the three remaining call sites that captured a
-  -- child's output as locale-decoded text: the process census, repository
-  -- resolution and the provider preflight probes (issue #172). Each of
-  -- these was a healthy child whose output raised an invalid-byte
-  -- IOException on the way in, before the call site's own handling of the
-  -- exit status ever ran. \377 is illegal UTF-8 under every locale, so the
+  -- One defect class at the call sites that captured a child's output as
+  -- locale-decoded text: the process census and repository resolution
+  -- (issue #172; the provider readiness probes it also named went with
+  -- the readiness mode). Each of these was a healthy child whose output
+  -- raised an invalid-byte IOException on the way in, before the call site's
+  -- own handling of the exit status ever ran. \377 is illegal UTF-8 under every locale, so the
   -- malformed-byte cases here reproduce the failure without needing one;
   -- the C-locale half of the repository case is in the locale probe, which
   -- has to re-run the test binary to establish a locale at all.
@@ -248,24 +231,6 @@ spec = do
                                  processIdentityCommand = Data.Text.pack "[kthreadd]"
                                }
                            ]
-
-    it "hands a provider probe's real exit status and replacement-decoded output to the classifier" $
-      withPreflightMachine [undecodableCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
-        \root _ -> do
-          environment <- gatherPreflightEnvironment root
-          -- Both classifications are reached only by reading what codex
-          -- actually printed and what it actually exited with; a decoder
-          -- failure would have replaced each with an unknown.
-          environment.environmentCodex.probeVersion `shouldBe` VersionSupported (Data.Text.pack "0.144.6")
-          environment.environmentCodex.probeAuth
-            `shouldBe` AuthNotAuthenticated (Data.Text.pack "codex login status exited 1 (Not logged in\65533)")
-
-    it "still times out a provider probe that never exits" $
-      withPreflightMachine [hangingGitHubFake, python3Fake] BackendInstalled $ \root _ -> do
-        environment <- gatherPreflightEnvironment root
-        case environment.environmentGitHub of
-          GitHubUnknown message -> Data.Text.unpack message `shouldContain` "timed out"
-          other -> expectationFailure ("expected a timed-out probe, got " <> show other)
 
 -- | The recorded procps capture, read relative to the package root the way
 -- the golden frames are, which is where @cabal test@ starts the suite.

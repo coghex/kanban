@@ -2,8 +2,8 @@
 -- model prompt and consumes quota (§14's deliberate-consumption class).
 --
 -- Everything else that touches a provider is an observer.  The account-status
--- probes behind the sidebar, @u@, @kanban --usage@, @--doctor@, preflight, and
--- release verification submit no prompt at all, and decision D-2 keeps it that
+-- probes behind the sidebar, @u@, @kanban --usage@, and release
+-- verification submit no prompt at all, and decision D-2 keeps it that
 -- way; a ping is the deliberate opposite, and runs only when a user asks for
 -- it by name.  Nothing in this module is reachable from any other path.
 --

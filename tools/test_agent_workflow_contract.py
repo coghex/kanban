@@ -128,7 +128,6 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # test_approval_service_dashboard_reaches_the_haskell_scans.
 SURFACE_FILES = [
     "src/Kanban/ProviderAdapter.hs",
-    "src/Kanban/Preflight/Environment.hs",
     "src/Kanban/Review.hs",
     "src/Kanban/Review/Canonical.hs",
     "src/Kanban/Review/Tools.hs",
@@ -234,19 +233,12 @@ FLOW_MODULE_PROCESS_IMPORTS = {
 
 # The modules that go on naming a provider executable beside a System.Process
 # import, and why each is outside the adapter rather than an erosion of it.
-# The first three are the exclusions issue #522 requirement 6 names, taken by
-# decision D-13: none is an agent session and none consumes a roster value.
-# The fourth is the readiness probe that the issue's own background did not
-# enumerate; it is here on the same terms and for the same reason, and it is
-# named rather than left for a reader to infer.
+# These are the exclusions issue #522 requirement 6 names, taken by decision
+# D-13: none is an agent session and none consumes a roster value.
 PROVIDER_SPAWN_EXCLUSIONS = {
     "src/Kanban/Ping.hs": "the modelless provider ping (D-2)",
     "src/Kanban/Codex.hs": "the Codex usage probe, which reads account status",
     "src/Kanban/Claude.hs": "the Claude usage probe, which reads account status",
-    "src/Kanban/Preflight/Environment.hs": (
-        "the readiness probe, which runs <provider> --version, its auth "
-        "status, and its plugin listing before any session exists"
-    ),
 }
 
 PROVIDER_LITERAL_RE = re.compile(
