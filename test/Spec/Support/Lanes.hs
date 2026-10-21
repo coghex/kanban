@@ -12,7 +12,7 @@
 --     and the @PATH@ that 'Spec.Support.Env.withFakeOnPath' puts a fake
 --     executable on;
 --   * the working directory, through @withCurrentDirectory@ in
---     "Spec.Agent.Ping" and "Spec.Agent.UsageMode";
+--     "Spec.Agent.UsageMode";
 --   * the file-creation mask, through 'Spec.Support.Env.withFileCreationMask';
 --   * the process tree itself, which every census, group sweep and
 --     \"leaves no survivor\" assertion reads.
@@ -136,16 +136,13 @@ import Text.Read (readMaybe)
 -- | One suite process. Every group names the lane it runs in, so a group
 -- cannot be added without deciding what it is allowed to overlap with.
 --
--- Each lane is named after the group that dominates it, and that is all the
--- name claims: membership is decided by measured cost and by the declared
--- 'Colocation' constraints, not by a taxonomy. Five lanes hold the suite's
--- waiting evenly enough that the longest is within about a tenth of the
--- average, and the groups whose cost is computing — the great majority of the
--- examples, and under two seconds between them — ride along wherever there is
--- room.
+-- Each lane is named after the group that dominated it when the lanes were
+-- cut, and that is all the name claims: membership is decided by measured cost
+-- and by the declared 'Colocation' constraints, not by a taxonomy. Four lanes
+-- hold the suite's waiting, and the groups whose cost is computing — the great
+-- majority of the examples — ride along wherever there is room.
 data Lane
   = DeadlineLane
-  | SupervisionLane
   | LifecycleLane
   | PingLane
   | UsageLane
@@ -187,7 +184,6 @@ allLanes = [minBound .. maxBound]
 laneName :: Lane -> String
 laneName lane = case lane of
   DeadlineLane -> "deadline"
-  SupervisionLane -> "supervision"
   LifecycleLane -> "lifecycle"
   PingLane -> "ping"
   UsageLane -> "usage"
@@ -264,8 +260,8 @@ runOneLane groups name = do
 -- One job, because overlap between lanes is the point of this harness and
 -- overlap /inside/ one is the race it exists to rule out. And a failure report
 -- of its own, because that file is the one piece of hspec's state that
--- outlives the process: five lanes writing the path @--failure-report@ named
--- would leave one lane's failures standing for all five.
+-- outlives the process: four lanes writing the path @--failure-report@ named
+-- would leave one lane's failures standing for all four.
 laneConfig :: Lane -> Config -> Config
 laneConfig lane config =
   config

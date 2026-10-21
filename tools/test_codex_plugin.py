@@ -102,11 +102,8 @@ SKILL_SIGIL = "$"
 # listing parity.
 NON_WORKFLOW_KEYWORDS = {"kanban"}
 
-REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
-# installations by one module, and Review/Canonical.hs asks it rather than
-# spelling a path -- so the location and the record's field are pinned against
-# two files below rather than one.
+# installations by one module, which the coordinator's probe is held to.
 MANAGED_PATHS_HS = REPO_ROOT / "src" / "Kanban" / "ManagedPaths.hs"
 
 # The workflows Kanban's own dashboard used to spawn by name, kept as the
@@ -739,35 +736,31 @@ class NoPersonalPathTests(unittest.TestCase):
 
 class IssueReviewBackendResolutionTests(unittest.TestCase):
     """The coordinator's approver_path() must resolve the canonical
-    issue-review backend with the same precedence
-    Kanban.Review.Canonical.resolveCanonicalIssueReviewer uses -- environment override,
-    then the installer's discovery record, then the directory that record
-    lives in -- and never a personal ~/work/approve-issues.py default."""
+    issue-review backend with one precedence -- environment override, then
+    the installer's discovery record, then the directory that record lives in
+    -- and never a personal ~/work/approve-issues.py default."""
 
-    def test_review_pr_matches_the_haskell_canonical_resolution(self):
+    def test_review_pr_matches_the_managed_record_resolution(self):
         # Both sides read one document rather than each rebuilding a default,
         # so what has to match is the record's location and the field in it.
-        review_hs_source = REVIEW_HS.read_text(encoding="utf-8")
         managed_paths_source = MANAGED_PATHS_HS.read_text(encoding="utf-8")
-        self.assertIn('lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"', review_hs_source)
         self.assertIn(
             "Library/Application Support/kanban/issue-review/config.json",
             managed_paths_source,
         )
-        self.assertIn('"backend_path"', review_hs_source)
-        # The default install directory is Python's to own now; Haskell
-        # derives it from the record's own path instead of respelling it.
-        for source in (review_hs_source, managed_paths_source):
-            self.assertNotIn(
-                "Library/Application Support/kanban/issue-review/approve_issues.py",
-                source,
-            )
+        # The default install directory is Python's to own; Haskell derives it
+        # from the record's own path instead of respelling it.
+        self.assertNotIn(
+            "Library/Application Support/kanban/issue-review/approve_issues.py",
+            managed_paths_source,
+        )
         self.assertIn(
             "/.local/share/kanban/issue-review/config.json", managed_paths_source
         )
 
         # Since issue #445 the coordinator probes both locations too, in the
-        # same order Haskell does, so both spellings must be present in it.
+        # same order the managed-paths module does, so both spellings must be
+        # present in it.
         # Asserting only the macOS one would pass against a coordinator that
         # had lost half the probe, which is the half-blind gate that issue's
         # requirement 10 forbids.
@@ -784,7 +777,7 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertNotIn('"work" / "approve-issues.py"', coordinator_source)
         self.assertIn("python3 tools/install_issue_review.py", coordinator_source)
 
-    def test_solve_gate_check_matches_the_haskell_canonical_resolution(self):
+    def test_solve_gate_check_matches_the_canonical_resolution(self):
         # solve can run against any repository Kanban is pointed at, so its
         # gate check must resolve the Kanban-managed install location
         # rather than assume the repository under review tracks
@@ -1564,9 +1557,9 @@ class SharedCoordinatorReferenceTests(unittest.TestCase):
 
 class ApproverPathResolutionTests(unittest.TestCase):
     """The coordinator's own resolution behaviour, not just its source text:
-    the same override/record/fallback precedence Kanban.Review uses, so a
-    custom installation cannot pass the dashboard's gate and fail this one
-    (issue #155).
+    the same override/record/fallback precedence the managed install record
+    defines, so a custom installation cannot pass the dashboard's gate and
+    fail this one (issue #155).
 
     These drive the `~/Library` record, which is one of the two locations
     issue #445 made this coordinator probe. Which of the two it selects, and

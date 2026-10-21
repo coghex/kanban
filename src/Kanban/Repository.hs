@@ -57,9 +57,8 @@ resolveRepository remoteName requestedPath explicitRepository = do
 -- (issue #172).
 --
 -- The directory travels as @cwd@ rather than as @git -C@'s argument, which
--- is the same channel every other consumer of a resolved root already uses
--- ("Kanban.Review" and the flow modules that used to share it). It is not a stylistic
--- choice: @System.Process@ marshals @cwd@ and the executable through
+-- is the same channel every other consumer of a resolved root already uses.
+-- It is not a stylistic choice: @System.Process@ marshals @cwd@ and the executable through
 -- 'System.Posix.Internals.withFilePath' — the filesystem encoding, with the
 -- surrogate escaping 'decodeRepositoryPath' relies on — but marshals
 -- /arguments/ through 'Foreign.C.String.withCString', the foreign encoding,
