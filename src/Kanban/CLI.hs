@@ -7,7 +7,6 @@ module Kanban.CLI
     launchMode,
     launchModeNeedsProvider,
     launchModeRefusal,
-    missionSelectionConflict,
     optionsParserInfo,
   )
 where
@@ -47,29 +46,6 @@ data Options = Options
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
-    -- | @--mission@, carrying the identifier as typed. Validated where a
-    -- mission store can be opened rather than here: "this is not a mission
-    -- identifier" and "this repository has no such mission" are the same
-    -- refusal to a parser and two different ones to the person who typed it.
-    optionMission :: Maybe String,
-    -- | @--mission-scheduler@: advance this repository's runnable missions for
-    -- one bounded pass. Repository-scoped where @--mission@ is mission-scoped,
-    -- which is why the two are refused together rather than ordered against
-    -- each other — see 'missionSelectionConflict'.
-    optionMissionScheduler :: Bool,
-    -- | @--mission-result FILE@: where a mission run writes the machine-
-    -- readable account of what it did. Internal, and the scheduler is its only
-    -- caller: a child's disposition has to be derived from a typed document
-    -- rather than from the terminal report. Naming a file also makes the run
-    -- a single step — one controller iteration — because a pass advances each
-    -- mission by at most one transition (issue #746); an invocation that names
-    -- no file writes none and behaves exactly as it always has.
-    optionMissionResult :: Maybe FilePath,
-    -- | @--mission-invocation ID@: the launch a mission result is the account
-    -- of. Internal, and written into the result document so the scheduler can
-    -- tell this launch's account from one an earlier launch left in the same
-    -- place.
-    optionMissionInvocation :: Maybe String,
     optionWorkerSpec :: Maybe FilePath,
     optionReviewTools :: Maybe FilePath
   }
@@ -110,25 +86,6 @@ data LaunchMode
     -- whether the occurrences name one brand, and a malformed one refuses
     -- ahead of every mode here.
     PingQueryMode
-  | -- | @--mission@, carrying the identifier it named.
-    --
-    -- Last before the dashboard, and deliberately so. Every mode above it
-    -- answers a question and exits without touching durable state; this one
-    -- claims a mission's advancement lease and starts registered work, so an
-    -- invocation that also names an observational mode gets the observation
-    -- and starts nothing (§5).
-    MissionMode String
-  | -- | @--mission-scheduler@: one bounded repository-wide pass.
-    --
-    -- After 'MissionMode' rather than before it, on the ordering §5 already
-    -- fixes: the modes above each answer a question and exit, @--mission@
-    -- advances the one mission it was handed, and this advances whichever of
-    -- the repository's missions are runnable. An invocation naming both is
-    -- refused outright by 'missionSelectionConflict' instead of resolving
-    -- here, because \"this mission\" and \"whichever missions\" are not two
-    -- spellings of one request and silently picking either would start work
-    -- the operator did not ask for.
-    MissionSchedulerMode
   | -- | The dashboard.
     DashboardMode
   deriving stock (Eq, Show)
@@ -142,23 +99,7 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
     | options.optionDoctor -> DoctorMode
     | options.optionUsage -> UsageQueryMode
     | not (null options.optionPing) -> PingQueryMode
-    | Just mission <- options.optionMission -> MissionMode mission
-    | options.optionMissionScheduler -> MissionSchedulerMode
     | otherwise -> DashboardMode
-
--- | Why this invocation names no single mission selection, if it names two.
---
--- Reported ahead of mode selection, exactly as a malformed @--ping@ is and for
--- the same reason: the conflict has to be reported as /itself/ rather than
--- resolved by whichever of the two the selector happens to reach first. One
--- names a mission and the other names a policy for choosing them, so there is
--- no reading under which obeying one of them is obeying the invocation.
-missionSelectionConflict :: Options -> Maybe Text
-missionSelectionConflict options
-  | Just _ <- options.optionMission,
-    options.optionMissionScheduler =
-      Just "--mission names one mission and --mission-scheduler selects them; name only one of the two"
-  | otherwise = Nothing
 
 -- | Whether this mode reaches a model provider, and so has nothing to do when
 -- the roster loads none.
@@ -181,17 +122,6 @@ missionSelectionConflict options
 -- not start and so must answer in exactly this case, @--glyph-test@ asks the
 -- terminal rather than a provider, and the dashboard is a board-only Kanban in
 -- this mode rather than a refused one.
---
--- The mission runner is the one worth stating at length, because it plainly
--- /does/ reach providers and still answers 'False'. Refusing it wholesale on
--- an install whose @models.toml@ loads nothing would make an unusable roster
--- block the reconciliation and recovery requirements 6 and 7 ask to stay
--- possible for a mission that is already under way — reattaching to a live
--- worker, resolving an unknown outcome, ending a subtree, and recording what
--- happened all need no provider at all. So the mode starts, and a transition
--- that would launch a provider-backed action worker fails there instead, in
--- the no-agent vocabulary the roster already supplies. The gate is at the
--- launch, not at the process.
 launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
@@ -200,12 +130,6 @@ launchModeNeedsProvider mode = case mode of
   ReviewToolServerMode _ -> False
   GlyphTestMode -> False
   DoctorMode -> False
-  MissionMode _ -> False
-  -- The scheduler advances missions through children that load their own
-  -- rosters, and the pass itself observes attention and notifies, neither of
-  -- which reaches a provider. Refusing it on a roster that loads nothing would
-  -- stop a pass that can still settle and report every mission it finds.
-  MissionSchedulerMode -> False
   DashboardMode -> False
 
 -- | What a mode says instead of running, given the roster the invocation
@@ -316,31 +240,6 @@ optionsParser =
           ( long "config"
               <> metavar "FILE"
               <> help "Override the global configuration path"
-          )
-      )
-    <*> optional
-      ( strOption
-          ( long "mission"
-              <> metavar "MISSION_ID"
-              <> help "Advance exactly this mission in the foreground, then exit"
-          )
-      )
-    <*> switch
-      ( long "mission-scheduler"
-          <> help "Advance this repository's runnable missions for one bounded pass, then exit"
-      )
-    <*> optional
-      ( strOption
-          ( long "mission-result"
-              <> metavar "FILE"
-              <> internal
-          )
-      )
-    <*> optional
-      ( strOption
-          ( long "mission-invocation"
-              <> metavar "ID"
-              <> internal
           )
       )
     <*> optional

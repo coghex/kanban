@@ -333,10 +333,6 @@ testOptions =
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,
-      optionMission = Nothing,
-      optionMissionScheduler = False,
-      optionMissionResult = Nothing,
-      optionMissionInvocation = Nothing,
       optionWorkerSpec = Nothing,
       optionReviewTools = Nothing
     }

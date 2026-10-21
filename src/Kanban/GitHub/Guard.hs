@@ -1,5 +1,5 @@
--- | The guard that accounts for every @gh@ a fetch starts — a dashboard's, a
--- mission runner's, or a worker's precondition read: the in-memory cleanup
+-- | The guard that accounts for every @gh@ a fetch starts — a dashboard's or a
+-- worker's precondition read: the in-memory cleanup
 -- verdict the refresh reads, the durable record on disk that every one of
 -- those readers shares and that outlives each of them, and the reclamation a
 -- later fetch performs before it is allowed to spawn anything.
@@ -87,9 +87,8 @@ data GhFetchGuard = GhFetchGuard
 -- run of the dashboard -- knows to reclaim. Each reader process holds exactly
 -- one for its whole life (§15): the dashboard's refresh coordinator owns it on
 -- behalf of the repository, so every job it schedules writes the record
--- through the same one, and a mission runner, a persistent worker, and an
--- issue-review host each mint theirs once at startup and hand it to every read
--- they take.
+-- through the same one, and a persistent worker and an issue-review host each
+-- mint theirs once at startup and hand it to every read they take.
 --
 -- The mutex below orders this process's rewrites and nothing else's. Every
 -- other reader process holds a lock of its own, so every rewrite also takes
@@ -105,9 +104,8 @@ data GhRecordLock = GhRecordLock
     -- a possibly-live group and an overlapping one — and a refusal recorded
     -- only on the guard of the job that ended dies with that job, leaving the
     -- next one to spawn freely. Every read one process takes shares this lock
-    -- -- every job the coordinator schedules, every board read and target
-    -- observation a mission runner takes, every precondition reread a worker
-    -- or an issue-review host takes -- so a refusal recorded here outlives the
+    -- -- every job the coordinator schedules, every precondition reread a
+    -- worker or an issue-review host takes -- so a refusal recorded here outlives the
     -- guard that earned it and reaches every later read, whatever kind it is.
     ghRecordHeldBack :: IORef (Maybe Text)
   }
@@ -118,8 +116,7 @@ data GhRecordLock = GhRecordLock
 --
 -- It carries no identity of its own. Which process wrote an entry is resolved
 -- afresh for each spawn ('registerSpawnedGh'), because the same record is
--- written by dashboards, mission runners, and workers' precondition reads,
--- and an identity settled once at construction would outlive nothing it
+-- written by dashboards and workers' precondition reads, and an identity settled once at construction would outlive nothing it
 -- describes.
 newGhRecordLock :: IO GhRecordLock
 newGhRecordLock = GhRecordLock <$> newMVar () <*> newIORef Nothing
@@ -152,8 +149,8 @@ withRecordLock guard repository action =
 -- The first refusal latched is the one kept. A read turned away by the latch
 -- ends 'GuardInMemoryOnly' too, carrying the latch's own message wrapped in
 -- its refusal; latching that again would wrap it once more on every refused
--- read, and a mission runner that polls for hours would grow the message
--- without bound. The group it names is the same one either way.
+-- read, and a reader that polls for hours would grow the message without
+-- bound. The group it names is the same one either way.
 holdBackUnrecordedGroup :: GhFetchGuard -> IO ()
 holdBackUnrecordedGroup guard = do
   verdict <- ghFetchCleanupFailure guard
@@ -168,9 +165,8 @@ holdBackUnrecordedGroup guard = do
 -- record lock ('holdBackUnrecordedGroup'), however the read ended.
 --
 -- For a reader that is not the dashboard's coordinator, which latches each job
--- itself once the job's thread has settled. A mission runner's board read or
--- target observation and a worker's or an issue-review host's precondition
--- reread run on the caller's own thread, so the read has fully unwound --
+-- itself once the job's thread has settled. A worker's or an issue-review
+-- host's precondition reread runs on the caller's own thread, so the read has fully unwound --
 -- its @gh@'s bounded cleanup included -- by the time this handler runs, and
 -- the verdict it reads is final whether the read returned, raised, or was
 -- interrupted.

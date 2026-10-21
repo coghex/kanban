@@ -112,12 +112,12 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 #
 # Issue #444 moved the drainer's and the issue-review backend's discovery
 # record locations out of Drainer.hs and Review/Canonical.hs into
-# Kanban.ManagedPaths, and issue #667 added the mission runner's beside them,
-# so that module is the only one under src/ that spells any of the three now.
+# Kanban.ManagedPaths, so that module is the only one under src/ that spells
+# either of the two now.
 # It is listed for
 # the home-relative reconciliation below rather than for an executable it
 # invokes -- it invokes none -- and a rewrite that took it back off this
-# list would leave the six `personal-path` tokens of MANAGED_RECORD_TOKENS
+# list would leave the four `personal-path` tokens of MANAGED_RECORD_TOKENS
 # scanned in no file at all,
 # which is what test_managed_record_locations_reach_the_home_path_scan
 # refuses.
@@ -127,15 +127,6 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # discovery record's location, and it resolves `launchctl` and `systemctl` for
 # its host-backend detection. What it contributes to each is pinned by
 # test_approval_service_dashboard_reaches_the_haskell_scans.
-#
-# Issue #668 added Kanban.MissionRunnerService, §2.12's in-app consumer, for
-# the executable half of that reconciliation alone: it resolves the same two
-# service managers and reads a launchd job through `/usr/bin/plutil`, and it
-# spells no managed location at all — its record's is Kanban.ManagedPaths'
-# answer. Both halves of that are pinned by
-# test_mission_runner_dashboard_reaches_the_haskell_scans, because a module
-# that had quietly started building a location of its own would otherwise
-# join the home-relative scan without anybody deciding to.
 SURFACE_FILES = [
     "src/Kanban/ProviderAdapter.hs",
     "src/Kanban/Preflight/Environment.hs",
@@ -149,7 +140,6 @@ SURFACE_FILES = [
     "src/Kanban/Drainer.hs",
     "src/Kanban/ManagedPaths.hs",
     "src/Kanban/ApprovalService.hs",
-    "src/Kanban/MissionRunnerService.hs",
     "src/Kanban/Process.hs",
 ]
 
@@ -170,23 +160,6 @@ APPROVAL_SERVICE_DASHBOARD_SEGMENTS = {
 }
 APPROVAL_SERVICE_DASHBOARD_EXECUTABLES = {"launchctl", "systemctl"}
 APPROVAL_SERVICE_DASHBOARD_RECORD_ROW = "issue-approval-discovery-record"
-
-# The in-app mission runner dashboard (docs/agent-workflow-contract.md §2.12)
-# and what the two Haskell extractors recover from it. Stated for the reason
-# the block above is, with one difference that is itself the assertion: this
-# module resolves its record through Kanban.ManagedPaths and spells no managed
-# location, so the home-relative extractor must recover *nothing* from it.
-# Requirement 2 of issue #668 is exactly that, and an empty expectation is only
-# worth asserting beside the non-empty executable set below, which is what
-# proves the file is being read at all.
-MISSION_RUNNER_DASHBOARD_FILE = "src/Kanban/MissionRunnerService.hs"
-MISSION_RUNNER_DASHBOARD_SEGMENTS = set()
-MISSION_RUNNER_DASHBOARD_EXECUTABLES = {"launchctl", "systemctl"}
-# The rows this module grounds a token of. `plutil-cli` joins the two service
-# managers because a launchd definition is read through `/usr/bin/plutil`
-# exactly as the other two dashboards read theirs; there is no record row,
-# because there is no record location here to ground one in.
-MISSION_RUNNER_DASHBOARD_ROWS = ("plutil-cli", "launchctl-cli", "systemctl-cli")
 
 # The modules under src/ that call one of the functions the surface comment
 # above enumerates and are deliberately not scanned. Pinned so the comment's
@@ -286,10 +259,8 @@ MANAGED_RECORD_SURFACE_FILE = "src/Kanban/ManagedPaths.hs"
 MANAGED_RECORD_TOKENS = {
     "/Library/Application Support/kanban/issue-review/config.json",
     "/Library/Application Support/kanban/pr-drainer/config.json",
-    "/Library/Application Support/kanban/mission-runner/config.json",
     "/.local/share/kanban/issue-review/config.json",
     "/.local/share/kanban/pr-drainer/config.json",
-    "/.local/share/kanban/mission-runner/config.json",
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
@@ -2431,66 +2402,6 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
         )
 
-    def test_mission_runner_dashboard_reaches_the_haskell_scans(self):
-        # Requirement 12 of issue #668, and the same reasoning
-        # test_approval_service_dashboard_reaches_the_haskell_scans records:
-        # being listed is what puts the module inside the completeness loops,
-        # and what it contributes to each loop is pinned here, because a loop
-        # over a module the extractors recover nothing from reports no
-        # undeclared segment and no undocumented command for the same reason a
-        # loop over nothing does.
-        self.assertIn(
-            MISSION_RUNNER_DASHBOARD_FILE,
-            SURFACE_FILES,
-            f"{MISSION_RUNNER_DASHBOARD_FILE} resolves both service managers "
-            "and reads a launchd job, so it must be scanned",
-        )
-        content = (REPO_ROOT / MISSION_RUNNER_DASHBOARD_FILE).read_text(
-            encoding="utf-8"
-        )
-        self.assertEqual(
-            discovered_executables(content),
-            MISSION_RUNNER_DASHBOARD_EXECUTABLES,
-            "the executable extractor no longer recovers exactly the two "
-            f"service managers from {MISSION_RUNNER_DASHBOARD_FILE}",
-        )
-        # Requirement 2: this module obtains its record's location from
-        # Kanban.ManagedPaths rather than spelling one, which is what keeps it
-        # out of the home-relative reconciliation entirely. A location built
-        # here would need a personal-path row of its own -- and a second
-        # spelling of a location that already has one.
-        self.assertEqual(
-            home_relative_segments(content),
-            MISSION_RUNNER_DASHBOARD_SEGMENTS,
-            f"{MISSION_RUNNER_DASHBOARD_FILE} now builds a home-relative path "
-            "of its own; it is supposed to ask Kanban.ManagedPaths instead",
-        )
-        personal_tokens = [
-            row["token"] for row in self.manifest if row["kind"] == "personal-path"
-        ]
-        self.assertEqual(
-            [],
-            undeclared_home_segments(
-                MISSION_RUNNER_DASHBOARD_FILE, content, personal_tokens
-            ),
-        )
-
-    def test_the_mission_runner_dashboard_is_declared_by_every_row_it_grounds(self):
-        # The other direction, exactly as the approval dashboard's own pin
-        # below: the manifest naming this module as a file its token is
-        # grounded in, which
-        # test_manifest_entries_are_grounded_in_their_declared_files then holds
-        # the module to.
-        rows = {row["id"]: row for row in self.manifest}
-        for row_id in MISSION_RUNNER_DASHBOARD_ROWS:
-            with self.subTest(row=row_id):
-                self.assertIn(
-                    MISSION_RUNNER_DASHBOARD_FILE,
-                    rows[row_id]["files"],
-                    f"{row_id} is grounded in {MISSION_RUNNER_DASHBOARD_FILE} "
-                    "and must declare it",
-                )
-
     def test_the_dashboard_is_declared_by_every_row_it_grounds(self):
         # Requirements 3 and 5. Being scanned documents what the module uses;
         # these rows are the other direction — the manifest naming the module
@@ -3442,22 +3353,19 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 entry = by_id[row_id]
                 self.assertEqual(entry["kind"], "executable")
                 self.assertEqual(entry["token"], token)
-                # Three files since issue #668, and pinned as the exact list so
-                # a fourth cannot be added without saying so here: the backend
-                # is the only tracked component that manages a job with either
-                # command, and the §2.8 and §2.12 dashboards each resolve both
-                # with `findExecutable` to detect the host's manager (spawning
-                # only `systemctl`, for a version read — and the §2.12 one
-                # spawns it through the §2.8 module's own probe rather than a
-                # second copy). Both spellings are recovered from each by the
-                # Haskell extractor, so both rows owe each a files entry the
-                # way `plutil-cli` already does.
+                # Two files, and pinned as the exact list so a third cannot be
+                # added without saying so here: the backend is the only tracked
+                # component that manages a job with either command, and the
+                # §2.8 dashboard resolves both with `findExecutable` to detect
+                # the host's manager (spawning only `systemctl`, for a version
+                # read). Both spellings are recovered from it by the Haskell
+                # extractor, so both rows owe it a files entry the way
+                # `plutil-cli` already does.
                 self.assertEqual(
                     entry["files"],
                     [
                         SERVICE_MANAGER_BACKEND_PATH,
                         APPROVAL_SERVICE_DASHBOARD_FILE,
-                        MISSION_RUNNER_DASHBOARD_FILE,
                     ],
                 )
                 # mandatory: no, matching §2.6 — the drainer is an optional
@@ -3477,16 +3385,14 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     tool_surface_findings(without),
                     [(SERVICE_MANAGER_BACKEND_PATH, token)],
                 )
-                for dashboard_file in (
+                dashboard = (REPO_ROOT / APPROVAL_SERVICE_DASHBOARD_FILE).read_text(
+                    encoding="utf-8"
+                )
+                self.assertEqual(
+                    sorted(discovered_executables(dashboard) - without),
+                    [token],
                     APPROVAL_SERVICE_DASHBOARD_FILE,
-                    MISSION_RUNNER_DASHBOARD_FILE,
-                ):
-                    dashboard = (REPO_ROOT / dashboard_file).read_text(encoding="utf-8")
-                    self.assertEqual(
-                        sorted(discovered_executables(dashboard) - without),
-                        [token],
-                        dashboard_file,
-                    )
+                )
 
     def test_service_manager_artifacts_are_confined_to_the_backend(self):
         # Grounded against the tracked tree rather than a fixture, and in both

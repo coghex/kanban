@@ -85,7 +85,7 @@ module Spec.Support.Process
     canonicalSessionLogText,
     fakeController,
     fakeApprovalController,
-    writeTerminalMissionWorker
+    writeTerminalWorker
   )
 where
 
@@ -575,13 +575,13 @@ workerFixtureSpec repository identifier issueNumber =
     }
 
 -- | A finished worker, written where discovery and the cache collector find
--- one: a specification carrying @invocation@ (the mark a mission launch leaves,
--- or 'Nothing' for a worker no mission started), a terminal state whose
--- heartbeat the caller chooses and which records @rawLog@ as the provider's
--- raw log, and an event stream. No process identity is recorded, so nothing
--- about a live process keeps it.
-writeTerminalMissionWorker :: Repository -> WorkerId -> Maybe Text -> UTCTime -> Maybe FilePath -> IO WorkerDescriptor
-writeTerminalMissionWorker repository identifier invocation heartbeat rawLog = do
+-- one: a specification carrying @invocation@ (the mark a mission launch used
+-- to leave, still decoded from records already on disk), a terminal state
+-- whose heartbeat the caller chooses and which records @rawLog@ as the
+-- provider's raw log, and an event stream. No process identity is recorded,
+-- so nothing about a live process keeps it.
+writeTerminalWorker :: Repository -> WorkerId -> Maybe Text -> UTCTime -> Maybe FilePath -> IO WorkerDescriptor
+writeTerminalWorker repository identifier invocation heartbeat rawLog = do
   let spec = (workerFixtureSpec repository identifier 844) {workerInvocation = invocation}
       state =
         (runningWorkerState identifier 999999 Nothing)

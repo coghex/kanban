@@ -137,15 +137,12 @@ library kanban-internal
     Kanban.GitHub
     Kanban.Layout
     Kanban.ManagedPaths
-    Kanban.Mission
-    Kanban.MissionRunnerService
     Kanban.Models
     Kanban.Paths
     Kanban.Ping
     Kanban.Preflight
     Kanban.Process
     Kanban.Provider
-    Kanban.ProviderLimit
     Kanban.PullRequestFlow
     Kanban.Repository
     Kanban.Repository.Authority
@@ -207,23 +204,6 @@ library kanban-internal
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
-    Kanban.Mission.Admission
-    Kanban.Mission.Control
-    Kanban.Mission.Controller
-    Kanban.Mission.Digest
-    Kanban.Mission.Invocation
-    Kanban.Mission.Journal
-    Kanban.Mission.Lease
-    Kanban.Mission.Notify
-    Kanban.Mission.Pass
-    Kanban.Mission.Paths
-    Kanban.Mission.Reconcile
-    Kanban.Mission.Runner
-    Kanban.Mission.Scheduler
-    Kanban.Mission.Seal
-    Kanban.Mission.Session
-    Kanban.Mission.Store
-    Kanban.Mission.Types
     Kanban.ServiceProcess
     Kanban.Preflight.Environment
     Kanban.Preflight.Readiness

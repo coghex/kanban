@@ -352,10 +352,10 @@ repositoryLeasePath repository = ghGroupPath repository ".lock"
 -- | The file every read-modify-write of one repository's @gh@ record is
 -- serialised on, across processes.
 --
--- The lease cannot do this job. It is held by one dashboard, and the mission
--- runner and a worker's precondition reread both rewrite the record from
--- processes that hold no lease and are meant to run beside it (§15). This lock
--- is taken by every one of those rewrites instead, whoever holds the lease.
+-- The lease cannot do this job. It is held by one dashboard, and a worker's
+-- precondition reread rewrites the record from a process that holds no lease
+-- and is meant to run beside it (§15). This lock is taken by every one of
+-- those rewrites instead, whoever holds the lease.
 --
 -- A third file rather than either of the other two, for the reasons
 -- 'repositoryLeasePath' gives twice over. It cannot be the record, which
@@ -623,8 +623,8 @@ legacyGhGroupRecordCandidates repository = do
 --
 -- Run once, by the dashboard that holds the repository's lease, before the
 -- first refresh. The lease does not make that read-merge-write safe: it keeps
--- out a second board, not the mission runner or a worker's precondition
--- reread, which rewrite the canonical record without it. What does is
+-- out a second board, not a worker's precondition reread, which rewrites the
+-- canonical record without it. What does is
 -- 'withGhGroupRecordLock', held across the whole of it -- the canonical read,
 -- the legacy reads, the canonical write and the legacy unlinks -- as it is
 -- across every other rewrite of the record, so no rewrite can land between

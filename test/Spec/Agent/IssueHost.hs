@@ -117,7 +117,7 @@ import Kanban.Worker
   )
 import Spec.Support.Env (permissionsOf, withEnvironmentValue, withFileCreationMask, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, realProcessSnapshotTool, withPreflightMachine)
-import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell)
+import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell, writeTerminalWorker)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeFile)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -2088,6 +2088,36 @@ collectionSpec = describe "collecting host and child records" $ do
       collectWorkerCache testRepository
       doesFileExist child.workerDescriptorCommandPath `shouldReturn` False
       doesFileExist child.workerDescriptorHandoffPath `shouldReturn` False
+
+  -- A worker a mission once dispatched carries the mark in its specification
+  -- and is otherwise an ordinary terminal worker: the cache no longer reads a
+  -- mission store, so an expired one is collected even where that store
+  -- cannot be read at all (it used to be kept, as the only copy of a
+  -- mission's history), and one inside its retention window is kept by the
+  -- same rule as every other worker.
+  it "collects an expired worker a mission once dispatched without consulting mission state" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        let unreadableStore = temporaryRoot </> "state"
+        writeFile unreadableStore "not a directory\n"
+        withEnvironmentValue "XDG_STATE_HOME" unreadableStore $ do
+          expired <- expiredHeartbeat
+          launched <- writeTerminalWorker testRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+          ordinary <- writeTerminalWorker testRepository (WorkerId "solve-845-0001") Nothing expired Nothing
+          collectWorkerCache testRepository
+          mapM_ (\path -> doesFileExist path `shouldReturn` False) (recordsOf launched)
+          mapM_ (\path -> doesFileExist path `shouldReturn` False) (recordsOf ordinary)
+
+  it "keeps a worker a mission once dispatched while it is inside its retention window and unacknowledged" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        now <- getCurrentTime
+        launched <- writeTerminalWorker testRepository (WorkerId "solve-844-0001") (Just "solve-844-1") now Nothing
+        collectWorkerCache testRepository
+        mapM_ (\path -> doesFileExist path `shouldReturn` True) (recordsOf launched)
+  where
+    recordsOf descriptor =
+      [descriptor.workerDescriptorSpecPath, descriptor.workerDescriptorStatePath, descriptor.workerDescriptorEventPath]
 
 -- ---------------------------------------------------------------------------
 -- Durable-record compatibility
