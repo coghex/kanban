@@ -5,6 +5,7 @@ module Spec.Agent.UsageMode (spec) where
 
 import Control.Exception (IOException, finally, try)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
+import Data.Foldable (toList)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
@@ -55,10 +56,12 @@ import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, get
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
 import Spec.Support.Fixtures (testResolvedConfig)
 import Spec.Support.UsageWriters (UsageWriter (..), usageWriterCommand)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, removePathForcibly, withCurrentDirectory)
+import System.Environment (getEnvironment)
 import System.FilePath ((</>))
 import System.Exit (ExitCode (..))
 import System.IO (IOMode (..), hClose, hFlush, openFile, readFile', stdout)
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import Test.Hspec
 
 spec :: Spec
@@ -394,6 +397,37 @@ spec = do
               (produced, written) <- captureStdout (root </> "stdout.json") (runUsageMode jsonMode (resolveGlobalConfig rawConfig))
               (produced, providerKeys written) `shouldBe` (True, ["claude", "codex"])
 
+    -- The built executable, not the library: 'app/Main.hs' is where a read of
+    -- @models.toml@, a configuration warning on standard error or a failing
+    -- exit would be reintroduced, and nothing above this runs it. The
+    -- executable comes from @build-tool-depends@ in @kanban.cabal@, so this
+    -- needs the suite run through @cabal test@. Every environment input is
+    -- this example's own: the configuration root, the cache root, a malformed
+    -- @models.toml@ at the default lookup location, and providers that answer.
+    it "runs the built executable to exit 0 with the fixture usage and no warnings" $
+      withUsageCacheRoot $ \root -> do
+        codexScript <- recordingProvider root "codex" 71
+        claudeScript <- recordingProvider root "claude" 22
+        withModelsFile root (Just "this is [not toml") $ do
+          configPath <- defaultConfigPath
+          TextIO.writeFile configPath (scriptOwnedConfig [] codexScript claudeScript)
+          executable <- findExecutable "kanban"
+          case executable of
+            Nothing -> expectationFailure "no `kanban` executable on PATH; run this suite through `cabal test`"
+            Just path -> do
+              inherited <- getEnvironment
+              let isolated =
+                    [("XDG_CONFIG_HOME", root </> "config"), ("XDG_CACHE_HOME", root)]
+                      <> [(name, value) | (name, value) <- inherited, name `notElem` ["XDG_CONFIG_HOME", "XDG_CACHE_HOME"]]
+              (exitCode, standardOutput, standardError) <-
+                readCreateProcessWithExitCode
+                  (proc path ["--usage", "--json", "--fresh"]) {env = Just isolated}
+                  ""
+              (exitCode, standardError) `shouldBe` (ExitSuccess, "")
+              providerKeys standardOutput `shouldBe` ["claude", "codex"]
+              reportWindowsOf standardOutput
+                `shouldBe` [("claude", "claude-window", 22), ("codex", "codex-window", 71)]
+
     -- The negative control: the same file with one misspelled script-owned key
     -- must report it, so the empty warning list above is a reading of the
     -- loader rather than a property of the fixture.
@@ -686,6 +720,23 @@ scriptOwnedConfig topLevel codexScript claudeScript =
          "coordination_paths = [1]",
          "direct_publication_paths = [\"\"]"
          ]
+
+-- | Each provider's windows in a @--usage --json@ document, as (provider,
+-- label, percent left), sorted.
+reportWindowsOf :: String -> [(Text, Text, Int)]
+reportWindowsOf written = case decode (LazyChar8.pack written) of
+  Just (Object document)
+    | Just (Object providers) <- KeyMap.lookup "providers" document ->
+        sort
+          [ (Key.toText provider, label, percent)
+          | (provider, Object entry) <- KeyMap.toList providers,
+            Just (Array windows) <- [KeyMap.lookup "windows" entry],
+            Object window <- toList windows,
+            Just (String label) <- [KeyMap.lookup "label" window],
+            Just (Number percentNumber) <- [KeyMap.lookup "pct_left" window],
+            let percent = round percentNumber
+          ]
+  _ -> []
 
 -- | Global-only configuration: no repository section for an override to come
 -- from, which is the state the mode resolves against.

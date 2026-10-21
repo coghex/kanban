@@ -1262,27 +1262,22 @@ reimplement the removal, and `--check` remains read-only.
   definition per
   canonical GitHub repository, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized
-  identity. The controller names none of them: it selects this repository's entry in
-  the discovery record `tools/drain_prs_service.py` writes — at that module's
-  own resolved location, which is `~/Library/Application Support/kanban/pr-drainer/config.json`
-  on macOS and the XDG one on Linux (§5) — resolves the
-  definition's path from that entry, then reads the command out of the
-  definition itself — `ProgramArguments` from the plist, `ExecStart` from the
-  unit file — which stays
-  authoritative for what the service manager will actually run. Which location
-  that is, `tools/kanban_config.py` answers for every Python component: it
-  probes the XDG location and then the `~/Library` one, on both platforms, and
-  is the one place either is written down. That entry is a
-  discriminated union: it names the `backend` that wrote it, and carries that
-  backend's own `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`.
-  An entry naming no backend at all is the shape written before that field
-  existed, which makes it launchd's and is why a macOS drainer installed before
-  this survives with no reinstall and no manual edit; an unknown backend name,
-  an entry mixing one backend's keys with the other's, and an entry naming a
-  backend without its identifier or an absolute definition path all fail closed
-  with reinstall guidance rather than being resolved as launchd. So does a
-  record describing the manager the reading host does not have, which is a
-  record that travelled between hosts rather than an install. A caller
+  identity. The controller does not look a definition up: `job_for_identity` in
+  `tools/drain_prs_service.py` derives the job from the normalized identity
+  alone — the identifier and the definition path through the selected
+  `tools/service_manager.py` backend, the runtime and log directories from the
+  identity's slug. The one thing it reads from the discovery record
+  `tools/drain_prs_service.py` writes — at that module's own resolved location,
+  which is `~/Library/Application Support/kanban/pr-drainer/config.json` on
+  macOS and the XDG one on Linux (§5) — is that repository's optional
+  `config_path`, from the entry its identity selects. Which location that is,
+  `tools/kanban_config.py` answers for every Python component: it probes the
+  XDG location and then the `~/Library` one, on both platforms, and is the one
+  place either is written down. The installer writes each entry as a
+  discriminated union naming the `backend` that wrote it and that backend's own
+  `launchd_label`/`plist_path` or `systemd_unit`/`unit_path`; an entry naming no
+  backend is the shape written before that field existed, which makes it
+  launchd's. A caller
   passes its repository identity as `--repo OWNER/NAME` alongside
   `--path`; the controller resolves the checkout's own remote and refuses any
   identity but that one, including another remote of the same checkout, so

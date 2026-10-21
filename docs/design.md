@@ -1527,6 +1527,44 @@ opened, its details and item URL remain readable, and `w` still opens that URL.
 Nothing on the board launches, merges, or edits the work behind any card,
 settled or live.
 
+## 9. Pull-request readiness and outline colors
+
+Done cards enter the column with a yellow outline. They become green only when
+the current head is cleanly mergeable with the current base and CI has
+succeeded.
+
+Priority from strongest to weakest:
+
+1. Red: merge conflict.
+2. Red: failed, timed-out, cancelled, action-required, or startup-failed CI.
+3. Red or amber: explicit blocking state such as `reviewed:changes`; exact
+   severity is configurable, with red as the default.
+4. Yellow: approval exists but checks are pending, queued, or in progress.
+5. Yellow: approval exists but the branch is behind, non-mergeably blocked, or
+   GitHub is still calculating mergeability.
+6. Green: approval exists, the PR is cleanly mergeable/current (including a
+   `MERGEABLE` head reported `BLOCKED` only by repository policy and handled by
+   the configured admin drainer), and the latest unique checks are successful.
+   The latest unique checks are the rollup after §13's selection: checks from
+   a GitHub Actions workflow run that a newer run of the same workflow and
+   event replaced on the head do not count, and the rest are deduplicated to
+   their newest rerun. A cancelled check in a replaced run is not priority 2's
+   cancelled CI; one in the newest run is.
+7. Green: approval exists and the PR is cleanly mergeable/current when the
+   repository has no checks configured.
+
+The implementation uses GitHub's `mergeable`, `mergeStateStatus`, and
+`statusCheckRollup` fields. A `CONFLICTING` mergeability result is always red.
+`MERGEABLE` plus `BLOCKED` is rendered `protected`, distinguishing an
+admin-drainer-ready policy block from a conflict. An `UNKNOWN` result remains
+yellow until a later user-requested refresh; the application does not poll for
+GitHub's background mergeability calculation.
+
+An open PR without a linked issue remains in Reviewing or Done but receives an
+amber `UNLINKED` warning.
+
+## 10. Visual language
+
 ### Borders
 
 - The optional `--border open` renderer avoids long vertical glyph runs. It uses
@@ -1539,14 +1577,12 @@ settled or live.
   drawing continuously.
 - Cards: rounded, `╭─╮│╰─╯`.
 - Tracker headers: heavy accent, for example `┏━┓┃┗━┛` or a compact `◆` row.
-- A nested sidebar control — the update button, the issue approval button, the
-  drainer button — draws with its panel's inner-border style: heavy Unicode
-  (`┏━┓┃┗━┛`) in the default and open-border renderers, ASCII (`+-|`) under
-  `--ascii`. Such a control draws its own box rather than wrapping its label in
-  a border widget, so every glyph keeps the control's status color. A control
-  that carries a service status takes its color from that service's own state:
-  neutral when off, green when on, amber while starting, stopping, or holding
-  at a warning, and red on error.
+- The sidebar's nested control, the update button, draws with its panel's
+  inner-border style: heavy Unicode (`┏━┓┃┗━┛`) in the default and open-border
+  renderers, ASCII (`+-|`) under `--ascii`. Such a control draws its own box
+  rather than wrapping its label in a border widget, so every glyph keeps the
+  control's color; the update button carries no status and draws in the neutral
+  color.
 - Avoid emoji and ambiguous-width decorative characters. Prefer stable
   single-cell symbols such as `✓`, `×`, `!`, `●`, `◐`, and `◆`.
 
@@ -3034,37 +3070,30 @@ above are unchanged, and persistence the user switched off is not a failure.
   repositories from one checkout. The `--config` still decides everything its
   drainer runs with, including the remote its default-branch check and merges
   use.
-- The PR drainer controller discovers the installed job through the
-  record its installer writes as `config.json` in the drainer's own resolved
-  directory — `~/Library/Application Support/kanban/pr-drainer` on macOS and
+- The PR drainer controller derives the installed job from the repository's
+  normalized identity alone: `job_for_identity` in `tools/drain_prs_service.py`
+  takes the identifier and the definition path from the selected
+  service-manager backend and the runtime and log directories from the
+  identity's slug. The one thing it reads from the installer's discovery record
+  — `config.json` in the drainer's own resolved directory,
+  `~/Library/Application Support/kanban/pr-drainer` on macOS and
   `$XDG_DATA_HOME/kanban/pr-drainer` (`~/.local/share` when that variable is
   unset, empty, or not absolute) on every other platform, resolved for every
   Python component by one module and probed XDG-first so an installation made
-  under either spelling is found where it already is. Its
-  `repositories` table holds one entry per installed repository naming the
-  backend that wrote it, that job's identifier, the definition's absolute path,
-  and the installed checkout. The controller selects the entry by the
-  repository's normalized identity, reads the definition's path from that
-  entry, and reads the controller command from the definition —
-  `ProgramArguments` from a plist, `ExecStart` from a unit file — which stays
-  authoritative for what the service manager runs. That entry is a
-  discriminated union on its `backend`, and an entry naming none is the shape
-  written before that field existed, so it is read as launchd and a macOS
-  drainer installed before this keeps working with no reinstall and no manual
-  edit. Each way that lookup can fail — a host with no supported service
-  manager, no document, no entry for this repository, an entry that does not
-  name a job, an entry whose backend is unknown or whose keys mix the two, an
-  entry describing the manager this host does not have, or a definition that
-  cannot be read — is reported as its own status naming the remediation, never
-  as a raw exception. Every controller call includes both a repository root
-  and a repository identity; the controller resolves the checkout's own remote
-  and refuses any identity but that one — including another remote of the same
-  checkout, since a fork's upstream is a different canonical repository.
-  Neither `--repo OWNER/NAME` nor a `--config` naming another remote can
-  therefore select or create another repository's drainer. The refusal names
-  the shared configuration's `remote_name`, and re-running the installer, as
-  what moves the caller and the drainer together. The application itself
-  neither discovers nor drives the job.
+  under either spelling is found where it already is — is that repository's
+  optional `config_path`. The record's `repositories` table holds one entry per
+  installed repository naming the backend that wrote it, that job's identifier,
+  the definition's absolute path, and the installed checkout, written as a
+  discriminated union on `backend`; an entry naming none is the shape written
+  before that field existed, which makes it launchd's. Every controller call
+  includes both a repository root and a repository identity; the controller
+  resolves the checkout's own remote and refuses any identity but that one —
+  including another remote of the same checkout, since a fork's upstream is a
+  different canonical repository. Neither `--repo OWNER/NAME` nor a `--config`
+  naming another remote can therefore select or create another repository's
+  drainer. The refusal names the shared configuration's `remote_name`, and
+  re-running the installer, as what moves the caller and the drainer together.
+  The application itself neither discovers nor drives the job.
 - The installed definition records the identity its identifier was derived
   from, and the
   managed runner is held to it by the same check. A definition outlives the

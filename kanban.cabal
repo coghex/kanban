@@ -209,6 +209,7 @@ test-suite kanban-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Spec.hs
+  build-tool-depends: kanban:kanban
   other-modules:
     Spec.Agent.Capture
     Spec.Agent.ManagedProcess
