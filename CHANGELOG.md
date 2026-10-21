@@ -15,15 +15,16 @@ created above it.
 
 ### Unreleased
 
-- Removed the persistent worker backend (epic #794, child 3, #797; the readiness
-  probe behind `kanban --doctor` follows in #811). `kanban --worker-spec` no longer
-  exists: the parser refuses it as an unknown option, and no mode reads a worker
-  specification. `Kanban.Worker` and its submodules (the solve, pull-request and
-  issue-host workers with their specifications, journals, leases, census, monitor
-  and termination) and `Kanban.GitHub.Precondition` are deleted, with the tests
-  and Python assertions that pinned them. `kanban --doctor` is unchanged for now.
-  `timeouts.worker_deadline_seconds` still parses, unused, and worker records on
-  disk are neither read nor deleted.
+- Removed the persistent worker backend and the readiness probe (epic #794,
+  child 3, #797 and #811). `kanban --worker-spec` and `kanban --doctor` no longer
+  exist: the parser refuses each as an unknown option, alone and beside `--usage`,
+  and `--help` lists neither; no mode reads a worker specification or reports
+  AI-action readiness. `Kanban.Worker` and its submodules (the solve, pull-request
+  and issue-host workers with their specifications, journals, leases, census,
+  monitor and termination), `Kanban.GitHub.Precondition`, and `Kanban.Preflight`
+  with its `Environment` and `Readiness` submodules are deleted, with the tests
+  and Python assertions that pinned them. `timeouts.worker_deadline_seconds` still
+  parses, unused, and worker records on disk are neither read nor deleted.
 - Removed the agent screens from the dashboard and the workflow action registry
   behind them (epic #794, child 2, #796). The keys `r`, `S`, `A`, `x`, `p` and
   `o` are unbound: the solve chooser and solve session, autosolve, the issue and
