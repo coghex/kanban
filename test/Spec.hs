@@ -29,6 +29,7 @@ import qualified Spec.Agent.Protocol as Protocol
 import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
 import qualified Spec.Agent.Solve as Solve
+import qualified Spec.Agent.Supervision as Supervision
 import qualified Spec.Agent.ToolReentry as ToolReentry
 import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
@@ -159,13 +160,15 @@ main = do
 -- reason 'suiteColocations' states rather than for its cost.
 suiteGroups :: [SuiteGroup]
 suiteGroups =
-  [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec,
+  [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
+    SuiteGroup "Spec.Agent.Supervision" SupervisionLane Supervision.spec, -- 72.6s
     SuiteGroup "Spec.Agent.Protocol" LifecycleLane Protocol.spec, -- 8.5s
-    -- Beside "Spec.Agent.Preflight" rather than spread for cost: it spawns a
-    -- fake provider per example and sleeps inside several of them, and that
-    -- lane holds the subprocess-deadline assertions its churn would be
-    -- measured against. Groups in one lane are serialised, so the two cannot
-    -- overlap at all, at a cost of about 22 of this lane's seconds.
+    -- Beside "Spec.Agent.Supervision" rather than spread for cost: it
+    -- spawns a fake provider per example and sleeps inside several of them,
+    -- and that lane holds the subprocess-deadline assertions its churn would
+    -- be measured against. Groups in one lane are serialised, so the two
+    -- cannot overlap at all — the same reasoning 'suiteColocations' records
+    -- for the pair it names, at a cost of about 22 of this lane's seconds.
     SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
     SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s

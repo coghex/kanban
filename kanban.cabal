@@ -255,6 +255,7 @@ test-suite kanban-test
     Spec.Agent.PullRequestFlow
     Spec.Agent.Roster
     Spec.Agent.Solve
+    Spec.Agent.Supervision
     Spec.Agent.ToolReentry
     Spec.Agent.Transcript
     Spec.Agent.Usage

@@ -3597,15 +3597,19 @@ runs) parses the manifest in §4 and:
   `proc`/`findExecutable`/`readProcessWithExitCode`, a literal name passed to
   `Kanban.Drainer`'s timed `runProcess` helper, a `findExecutable` argument a
   `case` or `if` binds to string literals, and a location spelled as one
-  literal hung off a `getHomeDirectory` result. Three other modules call one of
+  literal hung off a `getHomeDirectory` result. Five other modules call one of
   those functions and are deliberately out, because none of them writes a name
   or a path any extractor could recover: `ServiceProcess.hs` and
   `UsageCommand.hs` are spawn helpers that pass `proc` an
-  executable *value* their caller computed, and `Ping.hs` resolves
+  executable *value* their caller computed; `Ping.hs` resolves
   `findExecutable (pingExecutableName brand)`, whose argument is a
   two-equation top-level function rather than the `case`/`if` binding the
   indirect extractor reads, and builds its scratch directory with
-  `getXdgDirectory` rather than `getHomeDirectory`. Listing any of the three
+  `getXdgDirectory` rather than `getHomeDirectory`; and `Solve.hs` and
+  `PullRequestFlow.hs` (since issue #522) still resolve an executable with
+  `findExecutable`, but the name they resolve is `adapter.adapterExecutable`
+  rather than a literal they spell, so the literal lives in `ProviderAdapter.hs`,
+  which is scanned. Listing any of the five
   would add a member the extractors recover nothing from, which is a surface
   entry that scans nothing rather than coverage; the `codex` and `claude` that
   `Ping.hs` ultimately runs carry `executable` rows grounded in
