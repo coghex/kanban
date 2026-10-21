@@ -157,8 +157,8 @@ that is itself the repository to drain. Installing a second repository adds its
 entry beside the first; it never replaces it.
 
 Rerun the installer after moving the repository checkout. Rerun it as well if
-Kanban reports that the drainer is not installed for this repository or that its
-install record is unreadable — an installation predating the record is repaired
+the controller's `status` reports that the drainer is not installed for this
+repository or that its install record is unreadable — an installation predating the record is repaired
 in place, with no uninstall first and no change to the job's identity. A record
 written before the drainer gained a systemd backend names no backend at all; it
 is read as launchd, so an existing macOS install keeps working untouched.
