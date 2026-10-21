@@ -58,8 +58,9 @@ update spends no quota (section 14).
 - Drag-and-drop, hover actions, mouse-driven column navigation, and general
   pointer interaction beyond the deliberately small contract in section 7.
 - Drag-and-drop workflow mutation.
-- Direct board editing and drag/drop mutation. Review and solve workflows may
-  perform their explicitly documented GitHub mutations.
+- Direct board editing and drag/drop mutation. The board makes no GitHub
+  change; the skills and scripts outside the application make their own
+  documented ones.
 - Implementing a merge. Kanban merges nothing: no board action starts a merge
   and every GitHub request it makes is a read; the PR drainer under `tools/`
   runs outside the application.
