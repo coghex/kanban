@@ -16,13 +16,11 @@ import Kanban.Domain (Freshness (..))
 import Kanban.GitHub (shutdownRefreshCoordinator)
 import Kanban.UI (enableFocusIfSupported)
 import Kanban.UI.Refresh (focusRefreshDue)
-import Kanban.Models (loadedOperatingMode)
 import Kanban.UI.Types (AppEvent (..), AppState (..), Overlay (..))
 import Spec.Support.App (testAppState)
 import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
 import Spec.Support.Fixtures (epoch, fixtureBoard)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Roster (noAgentRoster)
 import Spec.Support.Render (frameRowText)
 import Test.Hspec
 
@@ -131,7 +129,7 @@ second :: Word64
 second = 1000 * 1000 * 1000
 
 boardState :: IO AppState
-boardState = (\state -> state {appOperatingMode = loadedOperatingMode (Right noAgentRoster)}) <$> testAppState (fixtureBoard [])
+boardState = testAppState (fixtureBoard [])
 
 run :: AppState -> [ScriptStep] -> IO DashboardRun
 run state steps =

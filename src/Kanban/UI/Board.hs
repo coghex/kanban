@@ -36,7 +36,6 @@ module Kanban.UI.Board
     overlayHintLine,
     searchFooterHintLine,
     trackerHeaderText,
-    updateLabel,
     usageAgeText,
     usageBarWidth,
     usageLabelField,
@@ -103,9 +102,8 @@ import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
-import Kanban.Models (OperatingMode (..))
 import Kanban.Usage (usageProviders)
-import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, excerptFooterHint, footerHint, footerHintRow, modeScopeBindings)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, excerptFooterHint, footerHint, footerHintRow, scopeBindings)
 import Kanban.UI.Incidents (incidentsFooterHints)
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -169,40 +167,20 @@ drawUsage state
         . padLeftRight 1
         $ usageContents
   where
-    -- With no provider loaded there are no windows to draw and no issue
-    -- approval service to start, so §6's box, ` USAGE ` heading, and 28-cell
-    -- width keep only the two controls that still mean something: the update
-    -- `u` and `↻` share, which still refreshes the board, and the PR
-    -- drainer, which merges pull requests and spawns no model.
-    --
-    -- The approval control going with the provider blocks is what closes its
-    -- click route: brick registers a clickable extent only for a widget that
-    -- was drawn, so a press cannot reach 'ApprovalButton' when this branch
-    -- draws none -- and `a` itself refuses through
-    -- 'Kanban.UI.Keys.agentSurfaceRefusal' whether or not it is on screen.
-    --
-    -- Above that floor it is one block per provider this install actually
-    -- reads, taken from the same list the refreshes are started from rather
-    -- than from a pair written here, so the sidebar can never show a window
-    -- for an account 'Kanban.UI.Refresh.startUsageRefreshes' never probes --
-    -- which in single-agent mode would be a stale cached entry for the
-    -- unloaded brand presented as this install's own reading.
-    usageContents = case usageProviders state.appOperatingMode of
-      [] ->
-        vBox
-          [ drawUpdateButton state,
-            padTop Max (drawDrainerButton state)
-          ]
-      providers ->
-        vBox
-          [ vBox (intersperse (txt "") (map (drawProvider state) providers)),
-            drawUpdateButton state,
-            -- One padded stack rather than two, so the pair stays together at
-            -- the sidebar's foot: padding each separately would push the
-            -- approval control up to the update button and leave the gap
-            -- between two service controls that belong beside each other.
-            padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
-          ]
+    -- One block per provider, taken from the same list the refreshes are
+    -- started from rather than from a pair written here, so the sidebar can
+    -- never show a window for an account
+    -- 'Kanban.UI.Refresh.startUsageRefreshes' never probes.
+    usageContents =
+      vBox
+        [ vBox (intersperse (txt "") (map (drawProvider state) usageProviders)),
+          drawUpdateButton state,
+          -- One padded stack rather than two, so the pair stays together at
+          -- the sidebar's foot: padding each separately would push the
+          -- approval control up to the update button and leave the gap
+          -- between two service controls that belong beside each other.
+          padTop Max (vBox [drawApprovalButton state, drawDrainerButton state])
+        ]
 
 -- | One nested sidebar control, drawn under §10's convention: its own box out
 -- of 'innerBorderStyle' rather than the label wrapped in Brick's
@@ -1585,15 +1563,15 @@ drawFooter state =
 -- reaching the keyboard are the overlay's, and the row has to name those.
 boardHintLine :: AppState -> Text
 boardHintLine state = case state.appOverlay of
-  Just overlay -> overlayHintLine state overlay
+  Just overlay -> overlayHintLine overlay
   Nothing
     | isJust (filterPanelFocusedBox state) -> filterFooterHintLine
     | isJust (focusedSearch state) -> searchFooterHintLine
-    | otherwise -> boardFooterHintLine state.appOperatingMode (boardMarks state)
+    | otherwise -> boardFooterHintLine (boardMarks state)
 
 -- | The hint line an open overlay shows in place of the board's.
-overlayHintLine :: AppState -> Overlay -> Text
-overlayHintLine state = footerHintRow . overlayHintChips state
+overlayHintLine :: Overlay -> Text
+overlayHintLine = footerHintRow . overlayHintChips
 
 -- | Each overlay's own hint chips, from the module that answers those keys.
 --
@@ -1603,12 +1581,12 @@ overlayHintLine state = footerHintRow . overlayHintChips state
 -- decoder. What is here is the routing and nothing else -- the same reason the
 -- help overlay's rows are assembled rather than transcribed.
 --
--- The two scopes of the base table follow the operating mode exactly as the
--- board's own line does, and for the same reason.
-overlayHintChips :: AppState -> Overlay -> [Text]
-overlayHintChips state = \case
-  HelpOverlay -> map footerHint (modeScopeBindings state.appOperatingMode HelpScope)
-  DetailsOverlay _ -> map footerHint (modeScopeBindings state.appOperatingMode DetailsScope)
+-- The two scopes of the base table project exactly as the board's own line
+-- does.
+overlayHintChips :: Overlay -> [Text]
+overlayHintChips = \case
+  HelpOverlay -> map footerHint (scopeBindings HelpScope)
+  DetailsOverlay _ -> map footerHint (scopeBindings DetailsScope)
   IncidentsOverlay -> incidentsFooterHints
 
 -- | The hint line a focused filter panel shows in place of the board's.
@@ -1640,11 +1618,10 @@ filterFooterHintLine =
 -- clipped. The help overlay behind @?@ is, as before, the complete list, and
 -- is the one that has to stay readable.
 --
--- This is the dual-mode line, which is every chip the table declares. The mode
--- is a parameter of 'boardFooterHintLine' rather than of this alias because a
--- board that loads no provider draws a shorter one.
+-- This is the line with the default marks, which is every chip the table
+-- declares.
 footerHintLine :: Text
-footerHintLine = boardFooterHintLine DualMode defaultBoardMarks
+footerHintLine = boardFooterHintLine defaultBoardMarks
 
 -- | The same line with the filter chip marked while the criteria are hiding
 -- cards.
@@ -1654,14 +1631,9 @@ footerHintLine = boardFooterHintLine DualMode defaultBoardMarks
 -- say so somewhere that is always on screen. It marks the existing chip rather
 -- than adding one, so the line's inventory still comes from the table.
 --
--- The inventory follows the operating mode, through 'modeScopeBindings'
--- rather than a second list here: a board that loads no provider offers none
--- of the four agent bindings, so naming them along the bottom of the screen
--- would advertise four keys that answer with a refusal. They are still
--- dispatched -- 'Kanban.UI.Events.boardActionGate' is where a press on one
--- lands -- so this hides a chip and never a key.
-boardFooterHintLine :: OperatingMode -> BoardMarks -> Text
-boardFooterHintLine mode marks = footerHintRow (map chip (modeScopeBindings mode BoardScope))
+-- The inventory comes from 'scopeBindings' rather than a second list here.
+boardFooterHintLine :: BoardMarks -> Text
+boardFooterHintLine marks = footerHintRow (map chip (scopeBindings BoardScope))
   where
     chip candidate = case candidate.bindingAction of
       ShowFilter | marks.marksFiltering -> footerHint candidate <> "*"
@@ -1672,8 +1644,7 @@ boardFooterHintLine mode marks = footerHintRow (map chip (modeScopeBindings mode
       ToggleExcerpts -> excerptFooterHint marks.marksExcerptsVisible
       _ -> footerHint candidate
 
--- | The board state the footer's own chips reflect, beside the operating mode
--- that decides which chips there are at all.
+-- | The board state the footer's own chips reflect.
 --
 -- One value rather than two positional flags: both are Booleans read off the
 -- same board, so a call site that swapped them would still typecheck and

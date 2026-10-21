@@ -38,7 +38,6 @@ import Kanban.Domain
 import Kanban.Filter (FilterCriteria (..), LifecycleFacet (..))
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.Layout (responsiveColumnWidths)
-import Kanban.Models (OperatingMode (..))
 import Kanban.UI (drawApplication)
 import Kanban.UI.Board
   ( BoardMarks (..),
@@ -59,12 +58,10 @@ import Kanban.UI.Keys
   ( BindingScope (..),
     BoardAction (..),
     KeyBinding (..),
-    agentSurfaceRefusal,
     binding,
     boardAction,
     excerptFooterHint,
     footerHint,
-    requiresLoadedAgent,
   )
 import Kanban.UI.Overlay (helpLines)
 import Kanban.UI.Search (columnItemsIn, entriesFor, expandedTrackersFor)
@@ -89,15 +86,13 @@ spec = describe "card excerpt toggle" $ do
           | scope <- [DetailsScope, HelpScope, OverlayScope]
         ]
 
-    -- The three total predicates that decide where a binding is live, and the
+    -- The two total predicates that decide where a binding is live, and the
     -- gate they compose into. Requirement 2 and the review's input-precedence
-    -- amendment between them say this key reaches no card and needs no
-    -- provider, so none of the three may claim it.
-    it "needs no provider, reaches no card, and is not inert under the blocker" $ do
-      requiresLoadedAgent ToggleExcerpts `shouldBe` False
+    -- amendment between them say this key reaches no card, so neither may
+    -- claim it.
+    it "reaches no card and is not inert under the blocker" $ do
       mutatesSelectedWork ToggleExcerpts `shouldBe` False
       blockedByCompletedLoad ToggleExcerpts `shouldBe` False
-      agentSurfaceRefusal NoAgentMode ToggleExcerpts `shouldBe` Nothing
       state <- excerptState 12
       boardActionGate state ToggleExcerpts `shouldBe` DispatchBoardAction
       boardActionGate (blockedOnCompletedLoad state) ToggleExcerpts `shouldBe` DispatchBoardAction
@@ -283,8 +278,8 @@ spec = describe "card excerpt toggle" $ do
     it "names the state the board is in, and tells the two apart" $ do
       excerptFooterHint True `shouldBe` footerHint (binding ToggleExcerpts)
       excerptFooterHint False `shouldNotBe` excerptFooterHint True
-      let drawn = boardFooterHintLine DualMode defaultBoardMarks
-          brief = boardFooterHintLine DualMode defaultBoardMarks {marksExcerptsVisible = False}
+      let drawn = boardFooterHintLine defaultBoardMarks
+          brief = boardFooterHintLine defaultBoardMarks {marksExcerptsVisible = False}
       chipsOf drawn `shouldSatisfy` elem (excerptFooterHint True)
       chipsOf brief `shouldSatisfy` elem (excerptFooterHint False)
       -- One chip re-spelled, and the line's inventory otherwise unchanged.
@@ -293,15 +288,15 @@ spec = describe "card excerpt toggle" $ do
 
     it "shows the board's own line whichever state it is in" $ do
       state <- excerptState 12
-      boardHintLine state `shouldBe` boardFooterHintLine DualMode defaultBoardMarks
+      boardHintLine state `shouldBe` boardFooterHintLine defaultBoardMarks
       boardHintLine (toggleCardExcerpts state)
-        `shouldBe` boardFooterHintLine DualMode defaultBoardMarks {marksExcerptsVisible = False}
+        `shouldBe` boardFooterHintLine defaultBoardMarks {marksExcerptsVisible = False}
 
     -- Requirement 5's other two surfaces are projections, so they need nothing
     -- here beyond the row appearing: "Spec.UI.Keys" holds the description and
     -- the §7 contract against each other and against the document.
     it "gives the binding a help row of its own" $
-      helpLines DualMode `shouldSatisfy` any (Text.isInfixOf (binding ToggleExcerpts).bindingDescription)
+      helpLines `shouldSatisfy` any (Text.isInfixOf (binding ToggleExcerpts).bindingDescription)
 
   -- Requirement 1's last clause and the review's amendment on it: the overlay
   -- renders the whole body, and opening it neither reads nor moves the board's

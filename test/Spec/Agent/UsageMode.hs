@@ -3,16 +3,20 @@
 -- spawned and what reaches the snapshot cache.
 module Spec.Agent.UsageMode (spec) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, finally, try)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.ByteString.Lazy.Char8 as LazyChar8
+import Data.List (isInfixOf, sort)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, hoursToTimeZone)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
-import Kanban.CLI (Options (..), optionsParserInfo)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, optionsParserInfo)
 import Kanban.Cache (UsageCacheLoad (..), UsageCommit (..), commitUsageSnapshots, loadUsageCache, usageCacheLockPath, usageCachePath)
 import Kanban.Config
   ( RawConfig (..),
@@ -29,26 +33,29 @@ import Kanban.Config
     usageSolveRoundEstimates,
   )
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
-import Kanban.Models (OperatingMode (..))
 import Kanban.Usage
   ( UsageAcquisition (..),
+    UsageMode (..),
     UsageOutcome (..),
     UsageReport (..),
     acquireUsageReport,
     formatUsageDuration,
     renderUsageReport,
+    runUsageMode,
     usageDurationDayBound,
+    usageProviders,
     usageReportDocument,
     usageReportProduced,
     usageSolveRoundsLeft,
   )
-import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
+import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, getParseResult, renderFailure)
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue, withTemporaryCacheRoot, writeExecutableScript)
 import Spec.Support.Fixtures (testResolvedConfig)
 import Spec.Support.UsageWriters (UsageWriter (..), usageWriterCommand)
-import System.Directory (doesFileExist, removePathForcibly, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly, withCurrentDirectory)
 import System.FilePath ((</>))
-import System.IO (readFile')
+import System.Exit (ExitCode (..))
+import System.IO (IOMode (..), hClose, hFlush, openFile, readFile', stdout)
 import Test.Hspec
 
 spec :: Spec
@@ -271,6 +278,92 @@ spec = do
         Just options -> options.optionConfig `shouldBe` Just "/somewhere/config.toml"
         Nothing -> expectationFailure "expected --usage --config to parse"
 
+  -- Each of these modes was removed with the code behind it, and the parser
+  -- is the boundary that stops a launch: @app/Main.hs@ parses before it
+  -- dispatches, and a spelling the parser does not know reaches nothing.
+  describe "the modes that no longer exist" $ do
+    it "refuses each removed option as an unknown one, naming it, alone and beside a mode that remains" $
+      sequence_
+        [ (arguments, refusalOf flag arguments) `shouldBe` (arguments, Just (ExitFailure 1, True))
+          | (flag, arguments) <-
+              [ ("--ping", ["--ping"]),
+                ("--ping", ["--ping", "codex"]),
+                ("--ping", ["--ping", "codex", "--usage"]),
+                ("--ping", ["--usage", "--ping", "claude"]),
+                ("--ping", ["--ping", "codex", "--ping", "claude"]),
+                ("--review-tools", ["--review-tools", "/tmp/endpoint"]),
+                ("--review-tools", ["--usage", "--review-tools", "/tmp/endpoint"]),
+                ("--mission", ["--mission", "mission-0001"]),
+                ("--mission-scheduler", ["--mission-scheduler"]),
+                ("--mission-result", ["--mission-result", "/tmp/result.json"]),
+                ("--mission-invocation", ["--mission-invocation", "invocation-1"]),
+                ("--worker-spec", ["--worker-spec", "/tmp/spec.json"]),
+                ("--worker-spec", ["--usage", "--worker-spec", "/tmp/spec.json"]),
+                ("--doctor", ["--doctor"]),
+                ("--doctor", ["--doctor", "--usage"]),
+                ("--doctor", ["--usage", "--doctor"])
+              ]
+        ]
+
+    it "lists none of them in --help, and still lists --usage" $
+      case execParserPure defaultPrefs optionsParserInfo ["--help"] of
+        Failure failure -> do
+          let (message, code) = renderFailure failure "kanban"
+          code `shouldBe` ExitSuccess
+          message `shouldSatisfy` isInfixOf "--usage"
+          sequence_
+            [ (flag, flag `isInfixOf` message) `shouldBe` (flag, False)
+              | flag <- ["--ping", "--review-tools", "--mission", "--worker-spec", "--doctor"]
+            ]
+        _ -> expectationFailure "--help did not render help"
+
+    it "selects only the glyph test, the usage report and the dashboard" $
+      map
+        launchMode
+        [ (fromParsed ["--glyph-test"]),
+          (fromParsed ["--usage"]),
+          (fromParsed ["--usage", "--fresh", "--json"]),
+          (fromParsed [])
+        ]
+        `shouldBe` [GlyphTestMode, UsageQueryMode, UsageQueryMode, DashboardMode]
+
+  -- The usage surface used to narrow to the providers a roster loaded and to
+  -- refuse a roster that loaded none. The application no longer reads
+  -- @models.toml@ at all, so nothing in it can change what is reported.
+  describe "the provider set, whatever models.toml holds" $ do
+    it "is both providers, Codex first" $
+      usageProviders `shouldBe` [Codex, Claude]
+
+    it "reports both providers for a models.toml that is absent, unparseable, empty or names one provider" $
+      sequence_
+        [ do
+            outcome <- withUsageCacheRoot $ \root -> do
+              codexScript <- recordingProvider root "codex" 71
+              withModelsFile root contents $ do
+                (produced, written) <- captureStdout (root </> "stdout.json") (runUsageMode jsonMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture"))
+                pure (produced, providerKeys written)
+            (label, outcome) `shouldBe` (label, (True, ["claude", "codex"]))
+          | (label, contents) <-
+              [ ("absent" :: String, Nothing),
+                ("unparseable", Just "this is [not toml"),
+                ("empty agents", Just "agents = []\n"),
+                ("one provider", Just "agents = [\"claude\"]\n")
+              ]
+        ]
+
+    -- The exit rule is the one the mode has always had: success when at least
+    -- one provider produced windows. Both providers are still represented
+    -- when neither did.
+    it "still fails, with both providers represented, when neither produced windows" $
+      withUsageCacheRoot $ \root -> do
+        (produced, written) <-
+          withModelsFile root (Just "this is [not toml") $
+            captureStdout
+              (root </> "stdout.json")
+              (runUsageMode jsonMode (configuredWith "/nonexistent/kanban-usage-mode-fixture" "/nonexistent/kanban-usage-mode-fixture"))
+        produced `shouldBe` False
+        providerKeys written `shouldBe` ["claude", "codex"]
+
   describe "configuration resolved without a repository" $ do
     it "keeps the global usage commands, timeouts, and cache setting" $ do
       let resolved = resolveGlobalConfig globalOnlyRawConfig
@@ -291,7 +384,7 @@ spec = do
         outsideRepository <- createTemporaryDirectory
         report <-
           withCurrentDirectory outsideRepository $
-            fst <$> acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript claudeScript)
+            fst <$> acquireUsageReport UsageCacheFirst False (configuredWith codexScript claudeScript)
         removePathForcibly outsideRepository
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
@@ -303,7 +396,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        (report, warnings) <- acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript claudeScript)
+        (report, warnings) <- acquireUsageReport UsageCacheFirst False (configuredWith codexScript claudeScript)
         warnings `shouldBe` []
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
@@ -319,7 +412,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("cached", 12)]),
                        (Claude, Right [("cached", 12)])
@@ -331,7 +424,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("cached", 12)]),
                        (Claude, Right [("claude-window", 22)])
@@ -343,7 +436,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, UsageSnapshot [] (instant "2026-07-16T11:30:00Z")), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("cached", 12)])
@@ -355,7 +448,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageForceFresh True (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("claude-window", 22)])
@@ -365,7 +458,7 @@ spec = do
     it "reports one provider's failure without suppressing the other's windows" $
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
-        (report, _) <- acquireUsageReport UsageCacheFirst False DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, _) <- acquireUsageReport UsageCacheFirst False (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         case reportWindows report of
           [(Codex, Right windows), (Claude, Left message)] -> do
             windows `shouldBe` [("codex-window", 71)]
@@ -377,7 +470,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        _ <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript claudeScript)
         stored <- storedCache
         fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [71]), (Claude, [22])]
 
@@ -385,7 +478,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         seedCache (Map.fromList [(Claude, cachedSnapshot)])
-        _ <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        _ <- acquireUsageReport UsageForceFresh True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         stored <- storedCache
         fmap (map (.usagePercentLeft) . (.usageWindows)) stored `shouldBe` Map.fromList [(Codex, [71]), (Claude, [12])]
 
@@ -395,7 +488,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         seedCache (Map.fromList [(Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, _) <- acquireUsageReport UsageForceFresh True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         case lookup Claude report.usageReportEntries of
           Just (UsageFailed _) -> pure ()
           other -> expectationFailure ("expected the live failure to be reported, got " <> show other)
@@ -405,7 +498,7 @@ spec = do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
         seedCache (Map.fromList [(Codex, cachedSnapshot), (Claude, cachedSnapshot)])
-        (report, _) <- acquireUsageReport UsageForceFresh False DualMode (configuredWith codexScript claudeScript)
+        (report, _) <- acquireUsageReport UsageForceFresh False (configuredWith codexScript claudeScript)
         reportWindows report
           `shouldBe` [ (Codex, Right [("codex-window", 71)]),
                        (Claude, Right [("claude-window", 22)])
@@ -423,7 +516,7 @@ spec = do
       withUsageCacheRoot $ \root -> do
         codexScript <- recordingProvider root "codex" 71
         claudeScript <- recordingProvider root "claude" 22
-        _ <- acquireUsageReport UsageForceFresh False DualMode (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageForceFresh False (configuredWith codexScript claudeScript)
         snapshotPath <- usageCachePath
         lockPath <- usageCacheLockPath
         doesFileExist snapshotPath `shouldReturn` False
@@ -431,7 +524,7 @@ spec = do
         -- The paired positive control: the same fixture, caching on, creates
         -- both. Without it "did not create" would pass on a run that could
         -- not have created anything anyway.
-        _ <- acquireUsageReport UsageForceFresh True DualMode (configuredWith codexScript claudeScript)
+        _ <- acquireUsageReport UsageForceFresh True (configuredWith codexScript claudeScript)
         doesFileExist snapshotPath `shouldReturn` True
         doesFileExist lockPath `shouldReturn` True
 
@@ -459,7 +552,7 @@ spec = do
             (root </> "writers")
             (UsageWriter "outside-claude" Claude (UsageSnapshot [UsageWindow "outside-window" 99 laterInstant] laterInstant))
         codexScript <- providerCommittingFirst root "codex" 71 outsideCommit
-        (report, warnings) <- acquireUsageReport UsageCacheFirst True DualMode (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
+        (report, warnings) <- acquireUsageReport UsageCacheFirst True (configuredWith codexScript "/nonexistent/kanban-usage-mode-fixture")
         warnings `shouldBe` []
         lookup Codex (reportWindows report) `shouldBe` Just (Right [("codex-window", 71)])
         stored <- storedCache
@@ -467,6 +560,55 @@ spec = do
 
 parseOptions :: [String] -> Maybe Options
 parseOptions arguments = getParseResult (execParserPure defaultPrefs optionsParserInfo arguments)
+
+-- | The options of arguments the parser accepts; the example fails on one it
+-- does not, because every caller names arguments that must parse.
+fromParsed :: [String] -> Options
+fromParsed arguments = case parseOptions arguments of
+  Just options -> options
+  Nothing -> error ("arguments the parser refused: " <> unwords arguments)
+
+-- | The exit code and whether the diagnostic names the flag, when the parser
+-- turns the arguments away; 'Nothing' when it accepts them.
+refusalOf :: String -> [String] -> Maybe (ExitCode, Bool)
+refusalOf flag arguments = case execParserPure defaultPrefs optionsParserInfo arguments of
+  Failure failure ->
+    let (message, code) = renderFailure failure "kanban"
+     in Just (code, ("Invalid option `" <> flag <> "'") `isInfixOf` message)
+  _ -> Nothing
+
+-- | The mode as @--usage --json --fresh@ builds it: forced live, no cache,
+-- one JSON document on standard output.
+jsonMode :: UsageMode
+jsonMode = UsageMode {usageModeAcquisition = UsageForceFresh, usageModeCache = False, usageModeJson = True}
+
+-- | Runs the action with @XDG_CONFIG_HOME@ pointing at a directory that holds
+-- the given @kanban/models.toml@, or none at all for 'Nothing'.
+withModelsFile :: FilePath -> Maybe ByteString.ByteString -> IO result -> IO result
+withModelsFile root contents action = do
+  let configRoot = root </> "config"
+  createDirectoryIfMissing True (configRoot </> "kanban")
+  mapM_ (ByteString.writeFile (configRoot </> "kanban" </> "models.toml")) contents
+  withEnvironmentValue "XDG_CONFIG_HOME" configRoot action
+
+-- | What the action wrote to standard output, which the run-and-exit mode
+-- writes directly. The descriptor is restored whatever the action does.
+captureStdout :: FilePath -> IO result -> IO (result, String)
+captureStdout path action = do
+  hFlush stdout
+  saved <- hDuplicate stdout
+  target <- openFile path WriteMode
+  hDuplicateTo target stdout
+  hClose target
+  result <- action `finally` (hFlush stdout >> hDuplicateTo saved stdout >> hClose saved)
+  written <- readFile' path
+  pure (result, written)
+
+-- | The provider names a @--usage --json@ document keys, sorted.
+providerKeys :: String -> [Text]
+providerKeys written = case decode (LazyChar8.pack written) of
+  Just (Object document) | Just (Object providers) <- KeyMap.lookup "providers" document -> sort (map Key.toText (KeyMap.keys providers))
+  other -> ["not a usage document: " <> Text.pack (show other)]
 
 -- | Global-only configuration: no repository section for an override to come
 -- from, which is the state the mode resolves against.

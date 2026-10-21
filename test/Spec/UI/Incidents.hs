@@ -13,7 +13,6 @@ import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
-import Kanban.Models (OperatingMode (..))
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Overlay (InteriorExtent (..), OverlayGeometry (..), drawIncidents, drawOverlay, overlayGeometryFor)
 import Kanban.UI.Incidents
@@ -687,7 +686,7 @@ spec = do
     -- consulted for the help overlay's measured box, so any of them answers
     -- for this one.
     panelInterior extent width =
-      (overlayGeometryFor DualMode IncidentsOverlay (extent == FullscreenPanel) width 80 0).overlayGeometryWidth
+      (overlayGeometryFor IncidentsOverlay (extent == FullscreenPanel) width 80 0).overlayGeometryWidth
         - panelChrome
 
     -- The border the box draws and the padding inside it, one cell each side

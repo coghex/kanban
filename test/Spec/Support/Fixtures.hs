@@ -331,6 +331,11 @@ testOptions =
       optionConfig = Nothing
     }
 
+-- | Defaults throughout, except that both usage providers are pointed at a
+-- command that does not exist. The dashboard probes both providers on every
+-- refresh and no longer has a configuration that turns that off, so a state
+-- built on the real defaults would launch the developer's own @codex@ and
+-- @claude@ from any example that presses @u@ or regains focus.
 testResolvedConfig :: ResolvedConfig
 testResolvedConfig =
   ResolvedConfig
@@ -339,7 +344,11 @@ testResolvedConfig =
       resolvedWorkflow = defaultWorkflowConfig,
       resolvedLimits = defaultLimitsConfig,
       resolvedTimeouts = defaultTimeoutsConfig,
-      resolvedUsage = defaultUsageConfig,
+      resolvedUsage =
+        defaultUsageConfig
+          { usageCodexCommand = Just (UsageCommandConfig ["/nonexistent/kanban-test-codex-usage"]),
+            usageClaudeCommand = Just (UsageCommandConfig ["/nonexistent/kanban-test-claude-usage"])
+          },
       resolvedMissions = defaultMissionsConfig
     }
 

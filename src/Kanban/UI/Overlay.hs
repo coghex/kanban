@@ -21,14 +21,13 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
 import Kanban.Card (boundedLines, elide, wrappedLines)
-import Kanban.Models (OperatingMode)
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Keys
   ( HelpEntry (..),
     bindingHelpEntry,
     gestureHelpEntry,
     helpRows,
-    modeBoardBindings,
+    boardBindings,
   )
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -46,9 +45,8 @@ data InteriorExtent
     -- it.
     BoundedInterior
   | -- | A fullscreen box: the interior takes every row the chrome around it
-    -- leaves. That is what makes a taller box show more of a transcript, of
-    -- the process and incident lists, and of the settings roster, rather than
-    -- the same fixed number of rows with a gap underneath — and it keeps the
+    -- leaves. That is what makes a taller box show more of the incident list,
+    -- rather than the same fixed number of rows with a gap underneath — and it keeps the
     -- rows below the interior, a rule and an input line, pinned to the bottom
     -- of the box where they belong.
     GreedyInterior
@@ -81,14 +79,12 @@ fullscreenSideMargin = 1
 
 -- | The box an overlay draws in when it is windowed, which is the size it has
 -- always had.
-windowedOverlayBox :: OperatingMode -> Overlay -> (Int, Int)
-windowedOverlayBox mode overlay = (overlayWidth, overlayHeight)
+windowedOverlayBox :: Overlay -> (Int, Int)
+windowedOverlayBox overlay = (overlayWidth, overlayHeight)
   where
     -- The rows the help overlay is about to draw, which is what both of its
-    -- dimensions are measured from. Taken once here rather than twice below,
-    -- because the list follows the operating mode and a box sized from a
-    -- different one would clip its own contents.
-    rows = helpLines mode
+    -- dimensions are measured from. Taken once here rather than twice below.
+    rows = helpLines
     overlayWidth = case overlay of
       IncidentsOverlay -> 100
       -- Wide enough for the list it draws, for the same reason its height is:
@@ -125,13 +121,13 @@ fullscreenOverlayBox terminalWidth terminalHeight reservedRows (windowedWidth, w
 
 -- | The geometry one overlay is drawn at: its windowed box, or the fullscreen
 -- one when the flag is set.
-overlayGeometryFor :: OperatingMode -> Overlay -> Bool -> Int -> Int -> Int -> OverlayGeometry
-overlayGeometryFor mode overlay fullscreen terminalWidth terminalHeight reservedRows
+overlayGeometryFor :: Overlay -> Bool -> Int -> Int -> Int -> OverlayGeometry
+overlayGeometryFor overlay fullscreen terminalWidth terminalHeight reservedRows
   | fullscreen =
       uncurry OverlayGeometry (fullscreenOverlayBox terminalWidth terminalHeight reservedRows windowed) GreedyInterior
   | otherwise = uncurry OverlayGeometry windowed BoundedInterior
   where
-    windowed = windowedOverlayBox mode overlay
+    windowed = windowedOverlayBox overlay
 
 -- | The one geometry seam every layered overlay draws through.
 --
@@ -152,7 +148,7 @@ drawOverlay state overlay = Widget Greedy Greedy $ do
   -- measurement renders the footer a second time, so a windowed frame does
   -- not pay for it.
   reservedRows <- if fullscreen then baseFooterRows state terminalWidth else pure 0
-  let geometry = overlayGeometryFor state.appOperatingMode overlay fullscreen terminalWidth terminalHeight reservedRows
+  let geometry = overlayGeometryFor overlay fullscreen terminalWidth terminalHeight reservedRows
   render (drawOverlayBox state overlay geometry)
 
 -- | The box itself. Everything fullscreen changes about it is read back off
@@ -169,7 +165,7 @@ drawOverlayBox state overlay geometry =
     . padAll 1
     . fillBox
     $ case overlay of
-      HelpOverlay -> drawHelp state
+      HelpOverlay -> drawHelp
       IncidentsOverlay -> drawIncidents interior state
       DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
   where
@@ -196,8 +192,8 @@ drawOverlayBox state overlay geometry =
       IncidentsOverlay -> " NEEDS ATTENTION "
       DetailsOverlay item -> " " <> itemHeading item <> " "
 
-drawHelp :: AppState -> Widget Name
-drawHelp state = vBox (map txt (helpLines state.appOperatingMode))
+drawHelp :: Widget Name
+drawHelp = vBox (map txt helpLines)
 
 -- | The complete binding list, in two blocks: every base-board binding in
 -- §7's order, then the mouse.
@@ -207,13 +203,9 @@ drawHelp state = vBox (map txt (helpLines state.appOperatingMode))
 -- dispatch does not have — which is exactly how it came to omit @?@, its own
 -- binding, before this list was derived.
 --
--- The board block follows the operating mode through 'modeBoardBindings', so
--- a board that loads no provider lists no @a@ here either -- the help overlay
--- and the footer hide the same set, because both project from that one
--- decision.
-helpLines :: OperatingMode -> [Text]
-helpLines mode =
-  helpRows (map bindingHelpEntry (modeBoardBindings mode) <> mouseHelpEntries)
+helpLines :: [Text]
+helpLines =
+  helpRows (map bindingHelpEntry boardBindings <> mouseHelpEntries)
 
 -- | The gestures no key covers, so no binding defines them. Mouse policy
 -- lives in @Kanban.UI.Events@ rather than in a table, and this is prose about

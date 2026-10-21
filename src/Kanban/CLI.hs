@@ -5,20 +5,10 @@ module Kanban.CLI
     Options (..),
     acquiresRepositoryLease,
     launchMode,
-    launchModeNeedsProvider,
-    launchModeRefusal,
     optionsParserInfo,
   )
 where
 
-import Data.Text (Text)
-import Kanban.Models
-  ( ModelRoster,
-    RosterLoadError,
-    agentsLoaded,
-    loadedOperatingMode,
-    noAgentModeMessage,
-  )
 import Options.Applicative
 
 data ColorPolicy = ColorAuto | ColorTruecolor | Color256 | ColorNever
@@ -52,8 +42,8 @@ data Options = Options
 -- only in @app\/Main.hs@ is unreachable from every example.
 --
 -- The order is @main@'s: the observational modes answer without needing
--- configuration or a repository (§5), and 'DashboardMode' is what is left,
--- which is why it is last.
+-- configuration or a repository, and 'DashboardMode' is what is left, which is
+-- why it is last.
 data LaunchMode
   = -- | @--glyph-test@.
     GlyphTestMode
@@ -69,47 +59,13 @@ launchMode options
   | options.optionUsage = UsageQueryMode
   | otherwise = DashboardMode
 
--- | Whether this mode reaches a model provider, and so has nothing to do when
--- the roster loads none.
---
--- Total in 'LaunchMode', so a mode added above cannot run without a decision
--- about whether a Kanban that spawns nothing may take it.
---
--- Only @--usage@ does: it reads the loaded providers' account status, so it
--- answers about something a no-agent install does not have. Which providers
--- those are is the mode's own question and is asked past this gate:
--- 'Kanban.Usage.usageProviders' narrows the report to a provider set this
--- refusal has already established is non-empty. Nothing else is:
--- @--glyph-test@ asks the terminal rather than a provider, and the dashboard
--- is a board-only Kanban in this mode rather than a refused one.
-launchModeNeedsProvider :: LaunchMode -> Bool
-launchModeNeedsProvider mode = case mode of
-  UsageQueryMode -> True
-  GlyphTestMode -> False
-  DashboardMode -> False
-
--- | What a mode says instead of running, given the roster the invocation
--- loaded, or 'Nothing' when it may run.
---
--- The complete load result rather than a mode, because 'loadedOperatingMode'
--- is where a @models.toml@ that will not load at all becomes no-agent: a
--- @Left@ has no @agents@ list to count, and refusing it here is what keeps an
--- unusable file from being answered as though it had loaded two providers.
-launchModeRefusal :: LaunchMode -> Either RosterLoadError ModelRoster -> Maybe Text
-launchModeRefusal mode loaded
-  | launchModeNeedsProvider mode,
-    not (agentsLoaded (loadedOperatingMode loaded)) =
-      Just noAgentModeMessage
-  | otherwise = Nothing
-
 -- | Whether this invocation takes the repository's board lease.
 --
 -- Only the dashboard does. Every other mode either never resolves a repository
 -- (@--glyph-test@ answers from the terminal) or resolves one without becoming
--- a board (@--usage@ is global). None of
--- them writes the durable @gh@ record, so none of them has anything to
--- serialise against — and a mode that took the lease would refuse to run
--- beside an open board for no reason at all.
+-- a board (@--usage@ is global). None of them writes the durable @gh@ record,
+-- so none of them has anything to serialise against — and a mode that took
+-- the lease would refuse to run beside an open board for no reason at all.
 acquiresRepositoryLease :: Options -> Bool
 acquiresRepositoryLease = (== DashboardMode) . launchMode
 
