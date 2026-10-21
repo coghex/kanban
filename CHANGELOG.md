@@ -16,19 +16,21 @@ created above it.
 ### Unreleased
 
 - Removed the in-app mission coordinator and the mission runner service
-  (child 1 of #794). `kanban --mission`, `--mission-scheduler`,
-  `--mission-result` and `--mission-invocation` no longer exist: the parser
-  refuses each as an unknown option and starts nothing, and `kanban --help`
-  lists none. The mission runner service script, its installer
-  and their tests are deleted, with the CI
-  step and systemd harness files that exercised the runner; the drainer's
-  lifecycle check stays. A repository's worker cache no longer consults a
-  mission store, so terminal workers a mission once dispatched are collected
-  under the ordinary retention rules. The `[missions]` configuration tables
-  still load unchanged, and mission state already on disk
-  (`<XDG state>/kanban/missions/`) is neither read nor deleted. An installed
-  mission runner job is not removed by this release; stop and uninstall it
-  with the installer before updating, or delete its unit or LaunchAgent by hand.
+  (epic #794, child 1, delivered as #802, #803 and #804). `kanban --mission`,
+  `--mission-scheduler`, `--mission-result` and `--mission-invocation` no
+  longer exist: the parser refuses each as an unknown option and starts
+  nothing, and `kanban --help` lists none. The mission runner service script,
+  its installer, the Haskell mission modules (`Kanban.Mission` and its
+  submodules, `Kanban.MissionRunnerService`, `Kanban.ProviderLimit`) and the
+  tests of all of them are deleted, with the CI step and systemd harness files
+  that exercised the runner; the drainer's lifecycle check stays. A
+  repository's worker cache no longer consults a mission store, so terminal
+  workers a mission once dispatched are collected under the ordinary retention
+  rules. The `[missions]` configuration tables still load unchanged, and
+  mission state already on disk (`<XDG state>/kanban/missions/`) is neither
+  read nor deleted. An installed mission runner job is not removed by this
+  release; stop and uninstall it with the installer before updating, or
+  delete its unit or LaunchAgent by hand.
 - Removed `/project-review` and `/auto-project-review` (Codex: `$project-review`,
   `$auto-project-review`), with their ledger helper, session liveness adapter and
   the lifecycle hooks that ran it. Both bundles now ship no hooks. `/janitor`'s
