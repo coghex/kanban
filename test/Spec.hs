@@ -37,6 +37,7 @@ import qualified Spec.Agent.ToolReentry as ToolReentry
 import qualified Spec.Agent.Transcript as Transcript
 import qualified Spec.Agent.Usage as Usage
 import qualified Spec.Agent.UsageMode as UsageMode
+import qualified Spec.Agent.WorkerPrecondition as WorkerPrecondition
 import qualified Spec.Board.Tracker as Tracker
 import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
@@ -54,12 +55,6 @@ import qualified Spec.GitHub.ConcurrentReaders as ConcurrentReaders
 import qualified Spec.GitHub.RecordLock as RecordLock
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
-import qualified Spec.Mission as Mission
-import qualified Spec.Mission.Admission as MissionAdmission
-import qualified Spec.Mission.Runner as MissionRunner
-import qualified Spec.Mission.Scheduler as MissionScheduler
-import qualified Spec.MissionRunnerService as MissionRunnerService
-import qualified Spec.ProviderLimit as ProviderLimit
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -72,13 +67,9 @@ import Spec.Support.Lanes
     SuiteGroup (..),
     runSuiteInLanes,
   )
-import Spec.Support.AgentSlots (admissionProbeVariable, runAdmissionProbe)
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
-import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
-import Spec.Support.NotifyProbe (notifyProbeVariable, runNotifyProbe)
 import Spec.Support.ReaderProbes (readerProbeVariable, runReaderProbe)
 import Spec.Support.RecordWriters (recordWriterVariable, runRecordWriter)
-import Spec.Support.SchedulerProbe (runSchedulerProbe, schedulerProbeVariable)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
@@ -110,7 +101,7 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stdin, stdout)
 
--- | Ordinarily the suite. Nine markers divert it instead, and each names a
+-- | Ordinarily the suite. Five markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
@@ -122,33 +113,13 @@ import System.IO (stdin, stdout)
 -- would prove the opposite), 'recordWriterVariable' makes it one of the
 -- independent processes rewriting a repository's durable @gh@ record (see
 -- "Spec.Support.RecordWriters" for why threads would exercise the wrong lock),
--- and 'missionProbeVariable' makes it one of the
--- independent processes acting on a mission store (see
--- "Spec.Support.MissionProbes" for the two things a thread cannot stage there:
--- a reader sharing nothing with the writer, and a lease holder there is
--- something to kill).
---
--- 'notifyProbeVariable' makes it one running a notification command, which is
--- the one thing this process starts in a process group of its own and
--- therefore the one thing a stop cannot reach by signalling this group (see
--- "Spec.Support.NotifyProbe").
---
--- 'schedulerProbeVariable' makes it a @kanban --mission-scheduler@ invocation,
--- because requirement 7's claim is about a process: what reaches stdout, what
--- reaches stderr, and what the process exits with (see
--- "Spec.Support.SchedulerProbe").
---
--- 'readerProbeVariable' makes it one reader process of a repository's durable
--- @gh@ record -- a dashboard, a mission runner, a worker, or an issue-review
--- host -- holding the one record lock that kind of process holds for its life
--- (see "Spec.Support.ReaderProbes" for why a thread would share the pid every
+-- and 'readerProbeVariable' makes it one reader process of a repository's
+-- durable @gh@ record -- a dashboard, a worker, or an issue-review host --
+-- holding the one record lock that kind of process holds for its life (see
+-- "Spec.Support.ReaderProbes" for why a thread would share the pid every
 -- claim there is about).
 --
--- 'admissionProbeVariable' makes it one process holding or asking for one of a
--- repository's agent slots, because whether a holder is gone is asked of its
--- process identifier, which every thread shares (see "Spec.Support.AgentSlots").
---
--- All nine are asked about before the suite and deliberately so: a lane
+-- All five are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -171,22 +142,14 @@ main = do
       usageWriter <- lookupEnv usageWriterVariable
       leaseProbe <- lookupEnv leaseProbeVariable
       recordWriter <- lookupEnv recordWriterVariable
-      missionProbe <- lookupEnv missionProbeVariable
-      notifyProbe <- lookupEnv notifyProbeVariable
-      schedulerProbe <- lookupEnv schedulerProbeVariable
       readerProbe <- lookupEnv readerProbeVariable
-      admissionProbe <- lookupEnv admissionProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, recordWriter, missionProbe, notifyProbe, schedulerProbe, readerProbe, admissionProbe) of
-        (Just probeRoot, _, _, _, _, _, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _, _, _, _, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _, _, _, _, _, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath, _, _, _, _, _) -> runRecordWriter planPath
-        (Nothing, Nothing, Nothing, Nothing, Just planPath, _, _, _, _) -> runMissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Just directory, _, _, _) -> runNotifyProbe directory
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just argv, _, _) -> runSchedulerProbe argv
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just planPath, _) -> runReaderProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just planPath) -> runAdmissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+      case (localeProbe, usageWriter, leaseProbe, recordWriter, readerProbe) of
+        (Just probeRoot, _, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath, _) -> runRecordWriter planPath
+        (Nothing, Nothing, Nothing, Nothing, Just planPath) -> runReaderProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -220,10 +183,6 @@ suiteGroups =
     SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
     SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
-    -- Beside the solve group it borrows its machinery from: every mechanism
-    -- example runs a fake provider through the real solve reader, and some
-    -- answer an app-server account read as well.
-    SuiteGroup "Spec.ProviderLimit" LifecycleLane ProviderLimit.spec,
     SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,
@@ -247,6 +206,9 @@ suiteGroups =
     -- which is process state -- but a lane is a process of its own running its
     -- own examples one at a time, so that costs it no colocation.
     SuiteGroup "Spec.GitHub.Precondition" DeadlineLane GitHubPrecondition.spec, -- 3.4s
+    -- Beside the reader it exercises: one real @gh@ that never answers, held
+    -- until its one-second budget runs out.
+    SuiteGroup "Spec.Agent.WorkerPrecondition" DeadlineLane WorkerPrecondition.spec,
     SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
     SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
@@ -261,25 +223,6 @@ suiteGroups =
     -- they hold -- and the swept-process assertions in this lane are measured
     -- against that churn. Its own cost is a few seconds of forced cleanup.
     SuiteGroup "Spec.GitHub.ConcurrentReaders" UsageLane ConcurrentReaders.spec,
-    -- Beside the other group that starts suite processes of its own, and for
-    -- the same reason 'suiteColocations' records for the pair it names: the
-    -- assertions in @UsageLane@ about a swept process being gone are measured
-    -- against this lane's churn, and groups in one lane are serialised so
-    -- neither can overlap the other. Its own cost is small enough to ride
-    -- along anywhere.
-    SuiteGroup "Spec.Mission" UsageLane Mission.spec,
-    -- Filesystem and pure work only: the controller's one contact with the
-    -- outside world is staged, so this group starts no process and reads no
-    -- network and can ride in the cheapest lane.
-    SuiteGroup "Spec.Mission.Runner" PingLane MissionRunner.spec,
-    -- The scheduler group does start processes -- fake @kanban@ children and
-    -- fake notification commands -- so it sits beside the other groups whose
-    -- churn the swept-process assertions are measured against, for the reason
-    -- @Spec.Mission@'s comment above gives.
-    SuiteGroup "Spec.Mission.Scheduler" UsageLane MissionScheduler.spec,
-    -- Beside the scheduler for the same reason: its process examples start
-    -- suite processes of their own, the admission probes.
-    SuiteGroup "Spec.Mission.Admission" UsageLane MissionAdmission.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
@@ -288,11 +231,6 @@ suiteGroups =
     SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,
     SuiteGroup "Spec.SingleAgentMode" PingLane SingleAgentMode.spec,
     SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
-    -- Beside the other managed service's dashboard group, whose lane
-    -- conventions it follows: both stand fake controllers up in a temporary
-    -- directory and let one of them wedge, so both spend most of their time
-    -- waiting out a bounded invocation rather than computing.
-    SuiteGroup "Spec.MissionRunnerService" DeadlineLane MissionRunnerService.spec,
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,

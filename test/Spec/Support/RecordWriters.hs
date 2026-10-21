@@ -5,7 +5,7 @@
 -- the same time.
 --
 -- The defect issue #720 reports is a lost update between two Kanban processes
--- -- a dashboard and a mission runner, say -- each holding an in-process record
+-- -- a dashboard and a worker, say -- each holding an in-process record
 -- lock of its own. Nothing inside one suite process can stage that: threads
 -- that shared a 'Kanban.GitHub.Guard.GhRecordLock' would be ordered by its
 -- mutex, which is not the lock under test, and the production failure is two
@@ -242,8 +242,8 @@ reapHandle handle = do
 
 -- | The child half, reached from @main@ when 'recordWriterVariable' is set.
 --
--- One guard for the whole run, minted in this process, as a mission runner or a
--- worker's precondition reread would mint one: it shares nothing with the
+-- One guard for the whole run, minted in this process, as a worker's
+-- precondition reread would mint one: it shares nothing with the
 -- other writer but the files under the cache root.
 runRecordWriter :: FilePath -> IO ()
 runRecordWriter planPath = do

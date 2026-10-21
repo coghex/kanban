@@ -4605,277 +4605,6 @@ class WorkerDeadlineBoundaryTests(unittest.TestCase):
         )
 
 
-# The mission modules that start a process, and are therefore excused from the
-# "reaches the outside only through its driver" scan above. Both arrived with
-# issue #666's repository scheduler, and neither is a widening of what a
-# mission may do:
-#
-# * `Scheduler.hs` advances each admitted mission by re-executing *this*
-#   binary as `kanban --mission <id>`, so the work still happens inside a
-#   mission controller that dispatches through the action registry. What it
-#   starts is that controller, not an action.
-# * `Notify.hs` runs the command an operator configured to be told that a
-#   mission is waiting on them, through the same bounded capture seam
-#   `Kanban.UsageCommand` uses. It performs no workflow effect at all.
-#
-# An entry here buys nothing on its own: three assertions below pin what each
-# of the two may start, and a fourth refuses an entry naming a module that no
-# longer spawns.
-MISSION_SCHEDULER_MODULE = "src/Kanban/Mission/Scheduler.hs"
-MISSION_NOTIFIER_MODULE = "src/Kanban/Mission/Notify.hs"
-MISSION_SPAWNING_MODULES = (MISSION_SCHEDULER_MODULE, MISSION_NOTIFIER_MODULE)
-
-
-class MissionRunnerAuthorityTests(unittest.TestCase):
-    """Issue #595 requirement 18: the runner broadens nothing.
-
-    A mission controller dispatches through the workflow action registry and
-    holds no authority of its own. The registry already refuses to merge, to
-    apply a verdict label, and to promote an indeterminate result, and the
-    point of these assertions is that the mission layer cannot quietly acquire
-    any of those by reaching past it -- which would look like an ordinary new
-    helper right up until a mission merged something.
-    """
-
-    def test_the_mission_layer_names_no_merge_or_label_authority(self):
-        forbidden = {
-            "mergePullRequest": "merging is the PR drainer's, and only the drainer's",
-            "drain_prs.py": "invoking the drainer is a deliberate manual step",
-            "--add-label": "a verdict label is the canonical review's to apply",
-            "--remove-label": "a verdict label is the canonical review's to remove",
-            "approve_issues.py": "the canonical issue gate is reached through the registry",
-        }
-        modules = sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs"))
-        # The negative control: a glob that matched nothing would pass every
-        # assertion below by iterating an empty list.
-        self.assertTrue(modules, "no mission modules were found to scan")
-        for path in modules:
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            content = path.read_text(encoding="utf-8")
-            for needle, reason in sorted(forbidden.items()):
-                with self.subTest(module=relative, needle=needle):
-                    self.assertNotIn(
-                        needle,
-                        content,
-                        f"{relative} names {needle!r}; {reason} (issue #595 "
-                        "requirement 18)",
-                    )
-
-    def test_the_controller_reaches_the_outside_only_through_its_driver(self):
-        # Every process this codebase starts goes through System.Process. A
-        # mission module importing it would be a spawn the action registry's
-        # launch boundary never saw -- with the two exceptions below, each of
-        # which is pinned by an assertion of its own rather than excused.
-        scanned = 0
-        for path in sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs")):
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            if relative in MISSION_SPAWNING_MODULES:
-                continue
-            scanned += 1
-            content = path.read_text(encoding="utf-8")
-            with self.subTest(module=relative):
-                self.assertEqual(
-                    haskell_import_names(content, "System.Process"),
-                    set(),
-                    f"{relative} imports System.Process; a mission's work is "
-                    "started through the workflow action registry, which is "
-                    "where the spawn boundary and its readiness gate live",
-                )
-        # A carve-out that grew to cover the whole directory would leave the
-        # loop above asserting nothing.
-        self.assertGreater(scanned, len(MISSION_SPAWNING_MODULES))
-
-    def test_every_carved_out_mission_module_is_still_there(self):
-        # The other half of the carve-out. A module that stopped spawning, or
-        # that was renamed, has to leave this tuple rather than sit in it
-        # excusing a file that no longer exists.
-        for relative in MISSION_SPAWNING_MODULES:
-            with self.subTest(module=relative):
-                path = REPO_ROOT / relative
-                self.assertTrue(path.is_file(), f"{relative} is not in the tree")
-                self.assertNotEqual(
-                    haskell_import_names(path.read_text(encoding="utf-8"), "System.Process"),
-                    set(),
-                    f"{relative} no longer starts a process; take it out of "
-                    "MISSION_SPAWNING_MODULES rather than leaving an excuse "
-                    "nothing needs",
-                )
-
-    def test_the_two_spawning_mission_modules_name_no_executable(self):
-        # What makes the carve-out safe rather than a hole. Issue #666's
-        # scheduler starts one child per admitted mission and its notifier
-        # starts whatever the operator configured, and neither may name a
-        # program: the scheduler re-executes *this* process's own binary, which
-        # `System.Environment.getExecutablePath` answers, and the notifier runs
-        # an argv that came out of the configuration file. A literal executable
-        # name appearing in either is a mission module that acquired the
-        # ability to run something the action registry never saw.
-        for relative in MISSION_SPAWNING_MODULES:
-            with self.subTest(module=relative):
-                content = (REPO_ROOT / relative).read_text(encoding="utf-8")
-                self.assertEqual(
-                    discovered_executables(content),
-                    set(),
-                    f"{relative} names an executable; a mission module may "
-                    "re-execute Kanban itself or run the operator's own "
-                    "configured command, and nothing else",
-                )
-
-    def test_the_scheduler_re_executes_kanban_rather_than_naming_it(self):
-        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
-        self.assertIn(
-            "getExecutablePath",
-            content,
-            f"{MISSION_SCHEDULER_MODULE} must resolve the binary it re-executes "
-            "from this process rather than from a name",
-        )
-        self.assertIn(
-            '"--mission"',
-            content,
-            f"{MISSION_SCHEDULER_MODULE} must advance a mission through the "
-            "foreground mission runner it re-executes",
-        )
-
-    def test_the_scheduler_reads_no_standard_input(self):
-        # Issue #666 requirement 5: a scheduler invoked directly from a
-        # terminal must not prompt. `kanban --mission` decides whether it has
-        # an operator by asking about *its own* standard input, so the way a
-        # pass keeps that promise is by never having a console at all —
-        # neither reading the descriptor nor building the seam that would.
-        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
-        for forbidden in ("stdin", "MissionConsole", "terminalMissionConsole"):
-            with self.subTest(needle=forbidden):
-                self.assertNotIn(
-                    forbidden,
-                    content,
-                    f"{MISSION_SCHEDULER_MODULE} names {forbidden!r}; a pass has "
-                    "no operator console and must not acquire one",
-                )
-        # And the children it starts are handed a descriptor that is readable
-        # and is not a terminal, rather than a closed one: a closed descriptor
-        # makes `hIsTerminalDevice` raise instead of answering.
-        self.assertIn('openFile "/dev/null" ReadMode', content)
-
-    def test_the_notifier_runs_its_command_through_the_bounded_seam(self):
-        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
-        self.assertIn(
-            "Kanban.CommandCapture",
-            content,
-            f"{MISSION_NOTIFIER_MODULE} must run the operator's command through "
-            "the bounded command-capture seam (issue #666 requirement 14)",
-        )
-
-    def notifier_command_body(self):
-        """The whole of `runMissionNotificationCommand`, `where` clause and all."""
-        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
-        start = content.find("runMissionNotificationCommand :: ")
-        self.assertNotEqual(
-            start,
-            -1,
-            f"{MISSION_NOTIFIER_MODULE} no longer declares runMissionNotificationCommand",
-        )
-        # To the next top-level declaration, or the end of the module. Searched
-        # from the line after the signature, so this declaration's own name
-        # does not end the span it opens. The `where` bindings are part of this
-        # function and every assertion below is about one of them, so the span
-        # has to include them.
-        opened = content.index("\n", start) + 1
-        following = re.search(r"^[a-z][A-Za-z0-9_']* ::", content[opened:], re.MULTILINE)
-        end = len(content) if following is None else opened + following.start()
-        return content[start:end]
-
-    def test_the_notifier_guards_its_command_for_the_whole_of_its_life(self):
-        # A notification command is the one thing the scheduler starts in a
-        # process group of its own, which is exactly what the supervisor's
-        # signal to the scheduler's group cannot reach. So the scheduler has to
-        # end it itself, on every way out of that call, and *which* ways are
-        # covered is the whole of the guarantee. An examination of the
-        # structure rather than of behaviour, because the alternative is a test
-        # per exit that has to win a race: a stop landing during setup, a
-        # failure while the output is read, a caller's bound expiring — none of
-        # those gaps is reliably reproducible from outside.
-        body = self.notifier_command_body()
-        # The signal handler is installed outside everything, because a stop
-        # arriving during setup or teardown is still a stop.
-        self.assertIn(
-            "withStopSweep (sweepRecorded live) $",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must install its stop handler around the "
-            "whole of the command's life",
-        )
-        # And the sweep is a bracket's release rather than a line on the happy
-        # path, which is what makes a synchronous or asynchronous exception
-        # end the group too.
-        self.assertIn(
-            "bracket (spawn live directory) (const (retire live))",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must acquire the command and release it "
-            "through bracket, so every exit sweeps",
-        )
-        retire = re.search(r"^    retire live = do\n((?:      .*\n)+)", body, re.MULTILINE)
-        self.assertIsNotNone(
-            retire, f"{MISSION_NOTIFIER_MODULE} no longer declares the bracket's release"
-        )
-        self.assertIn(
-            "sweepRecorded live",
-            retire.group(1),
-            f"{MISSION_NOTIFIER_MODULE}'s bracket release must sweep the command's group",
-        )
-        # The acquisition starts the command; `register` records what a stop
-        # has to end. Bracket runs no release for an acquisition that threw,
-        # so that span is covered twice: masked, so there is no delivery point
-        # in it, and guarded, so a delivery point an unrelated edit introduces
-        # still ends the process rather than stranding it.
-        #
-        # `mask_` rather than `mask`: a restore across the spawn would reopen
-        # exactly this window, and it buys nothing — the POSIX signal mask a
-        # child inherits across exec is a different thing from Haskell's
-        # asynchronous-exception mask, so holding the latter cannot make the
-        # notifier immune to the signal used to stop it.
-        spawn = re.search(
-            r"^    spawn live directory = mask_ \$ do\n((?:      .*\n)+)",
-            body,
-            re.MULTILINE,
-        )
-        self.assertIsNotNone(
-            spawn,
-            f"{MISSION_NOTIFIER_MODULE} must acquire under mask_, or a cancellation "
-            "between the spawn and the registration leaks the command",
-        )
-        self.assertIn("createProcess (spec directory)", spawn.group(1))
-        self.assertNotIn(
-            "restore",
-            spawn.group(1),
-            f"{MISSION_NOTIFIER_MODULE} must not restore across the spawn; that is "
-            "the window an unrecorded notifier escapes through",
-        )
-        self.assertIn(
-            "`onException` sweepUnrecorded processHandle",
-            spawn.group(1),
-            f"{MISSION_NOTIFIER_MODULE} must end a command it created but has not "
-            "yet recorded, since bracket's release will not run for it",
-        )
-        register = re.search(
-            r"^    register live outputHandle errorHandle processHandle = do\n((?:      .*\n)+)",
-            body,
-            re.MULTILINE,
-        )
-        self.assertIsNotNone(
-            register,
-            f"{MISSION_NOTIFIER_MODULE} no longer declares the acquisition's registration",
-        )
-        self.assertIn("writeIORef live (NotifierLive", register.group(1))
-        # Nothing sweeps inline. `sweepCommandGroup` belongs to `sweepRecorded`
-        # alone, so there is one sweep on one path and no second spelling to
-        # drift from it.
-        self.assertNotIn(
-            "sweepCommandGroup",
-            body,
-            f"{MISSION_NOTIFIER_MODULE} must sweep only through its bracket release; "
-            "an inline sweep is skipped by every exception",
-        )
-
-
 # --- The dashboard's recurring local status checks (issue #668) -------------
 #
 # `docs/design.md` §15 states the dashboard's whole recurring-timer inventory:
@@ -4884,11 +4613,10 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
 # reader could have grown a follower thread of its own with every other gate
 # green -- and requirement 11 of issue #668 is that this one did not.
 #
-# Two assertions, because the inventory can grow from either end. The launches
-# are named here, so a third monitor forked beside them is a reviewed edit to
-# this list; and the reader module is held to spelling no thread, no sleep and
-# no timer at all, so a follower cannot appear inside the thing being read
-# either.
+# The launches are named here, so a third monitor forked beside them is a
+# reviewed edit to this list, and the follower vocabulary is held against the
+# dashboard that does fork them so the list cannot drift into naming nothing
+# real.
 DASHBOARD_MONITOR_FILE = "src/Kanban/UI.hs"
 DASHBOARD_MONITORS = ("monitorApprovalService", "monitorDrainer")
 DASHBOARD_MONITOR_RE = re.compile(r"\bmonitor[A-Z][A-Za-z0-9_']*")
@@ -4905,18 +4633,17 @@ FOLLOWER_SPELLINGS = (
     "threadDelay",
 )
 # The subset of those the dashboard that *does* fork the two monitors spells,
-# which is the negative control: a spelling list that matched nothing would
-# pass the reader assertion while asserting nothing at all.
+# which is the negative control: a spelling list that matched nothing real
+# would assert nothing at all.
 MONITOR_FOLLOWER_SPELLINGS = ("Control.Concurrent", "forever", "forkIO", "threadDelay")
 
 
 class RecurringTimerInventoryTests(unittest.TestCase):
-    """Issue #668 requirement 11: the mission runner's reader is a reader.
+    """The dashboard's recurring timers are the two issue #668 pinned.
 
-    It is driven by its caller and owns no cadence, so the dashboard's
-    recurring timers are the two they already were. What a persistent follower
-    would cost is not hypothetical: each of those two is a ten-second poll that
-    spawns a controller, and §15 records the idle cost of the pair.
+    What a persistent follower would cost is not hypothetical: each of those
+    two is a ten-second poll that spawns a controller, and §15 records the idle
+    cost of the pair.
     """
 
     def test_the_dashboard_launches_exactly_the_monitors_it_already_did(self):
@@ -4929,25 +4656,11 @@ class RecurringTimerInventoryTests(unittest.TestCase):
             "here and there, not a site-local decision",
         )
 
-    def test_the_mission_runner_reader_starts_no_thread_and_installs_no_timer(self):
-        content = (REPO_ROOT / MISSION_RUNNER_DASHBOARD_FILE).read_text(
-            encoding="utf-8"
-        )
-        for spelling in FOLLOWER_SPELLINGS:
-            with self.subTest(spelling=spelling):
-                self.assertNotIn(
-                    spelling,
-                    content,
-                    f"{MISSION_RUNNER_DASHBOARD_FILE} names {spelling!r}; this "
-                    "slice starts no thread, installs no timer, and performs no "
-                    "periodic poll (issue #668 requirement 11)",
-                )
-
     def test_the_follower_spellings_are_ones_a_follower_really_uses(self):
-        # The negative control over the assertion above: these are recovered
-        # from the module that genuinely forks the two monitors, so a list that
-        # had drifted into naming nothing real is reported rather than passing
-        # quietly.
+        # The negative control over the follower vocabulary: these are
+        # recovered from the module that genuinely forks the two monitors, so a
+        # list that had drifted into naming nothing real is reported rather
+        # than passing quietly.
         content = (REPO_ROOT / DASHBOARD_MONITOR_FILE).read_text(encoding="utf-8")
         self.assertEqual(
             sorted(

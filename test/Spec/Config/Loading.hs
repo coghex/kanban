@@ -1,6 +1,8 @@
 -- | Loading configuration and resolving the remote it names.
 module Spec.Config.Loading (spec) where
 
+import Control.Monad (forM_)
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text
@@ -24,6 +26,7 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+  preservedTablesSpec
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
       withTemporaryCacheRoot $ \configRoot ->
@@ -560,3 +563,87 @@ gitCheckout root name remote = do
   _ <- readProcessWithExitCode "git" ["-C", checkout, "init", "--quiet"] ""
   _ <- readProcessWithExitCode "git" ["-C", checkout, "remote", "add", "origin", remote] ""
   pure checkout
+
+-- | The tables the mission runner read and the app no longer does, which the
+-- configuration still decodes exactly as before: the scripts under @tools/@
+-- and the file's own users keep those keys valid, and trimming them is a later
+-- change. These examples were first written beside the runner that consumed
+-- them and are the part of that coverage that outlived it.
+preservedTablesSpec :: Spec
+preservedTablesSpec = describe "the configuration tables the app no longer consumes" $ do
+  describe "the notification table" $ do
+    it "is off with no command by default" $ do
+      defaultMissionNotificationConfig.missionNotificationEnabled `shouldBe` False
+      defaultMissionNotificationConfig.missionNotificationCommand `shouldBe` Nothing
+      missionNotificationRefusal defaultMissionNotificationConfig `shouldBe` Nothing
+
+    it "decodes the documented table" $
+      case decodeConfigText "[missions.notifications]\nenabled = true\ncommand = [\"notify-send\", \"kanban\"]\n" of
+        Left message -> expectationFailure (Data.Text.unpack message)
+        Right (config, warnings) -> do
+          warnings `shouldBe` []
+          config.rawMissions.missionsNotifications.missionNotificationEnabled `shouldBe` True
+          config.rawMissions.missionsNotifications.missionNotificationCommand
+            `shouldBe` Just (MissionNotificationCommand ["notify-send", "kanban"])
+
+    -- Unknown keys warn, exactly as every other table's do, rather than
+    -- failing the load or being silently accepted.
+    it "warns about an unknown key rather than failing" $
+      case decodeConfigText "[missions.notifications]\nenabled = false\nwhenever = true\n" of
+        Left message -> expectationFailure (Data.Text.unpack message)
+        Right (config, warnings) -> do
+          length warnings `shouldBe` 1
+          config.rawMissions.missionsNotifications.missionNotificationEnabled `shouldBe` False
+
+    it "refuses an empty command array" $
+      case decodeConfigText "[missions.notifications]\ncommand = []\n" of
+        Left message -> ("non-empty" `Data.Text.isInfixOf` message) `shouldBe` True
+        Right _ -> expectationFailure "an empty command array was accepted"
+
+    it "names the refusal an enabled table with no command earns" $
+      missionNotificationRefusal (MissionNotificationConfig True Nothing)
+        `shouldBe` Just "missions.notifications.enabled is true and missions.notifications.command is not set, so there is nothing to run"
+
+    -- A command written down and left switched off is how an operator tries
+    -- one out, so it must not become a refusal.
+    it "leaves a configured command switched off without refusing" $
+      missionNotificationRefusal (MissionNotificationConfig False (Just (MissionNotificationCommand ["notify"]))) `shouldBe` Nothing
+
+  describe "the agent ceiling" $ do
+    let ceilingOf text = (.missionsAgentCeiling) . (.rawMissions) . fst <$> decodeConfigText text
+        refusalOf configured = missionAgentCeilingRefusal defaultMissionsConfig {missionsAgentCeiling = configured}
+
+    it "defaults to two and takes a positive whole number" $ do
+      ceilingOf "" `shouldBe` Right (MissionAgentCeiling defaultMissionAgentCeiling)
+      defaultMissionAgentCeiling `shouldBe` 2
+      ceilingOf "[missions]\nagent_ceiling = 5\n" `shouldBe` Right (MissionAgentCeiling 5)
+
+    it "refuses zero, a negative number, a fraction, and anything else by name" $
+      forM_ ["0", "-1", "1.5", "\"two\"", "true"] $ \written -> do
+        let configured = ceilingOf ("[missions]\nagent_ceiling = " <> written <> "\n")
+        (written, fmap (fmap (Data.Text.isInfixOf "missions.agent_ceiling") . refusalOf) configured)
+          `shouldBe` (written, Right (Just True))
+
+  describe "the worker deadline" $ do
+    it "preserves the four-hour default when the setting is omitted" $ do
+      defaultWorkerDeadlineSeconds `shouldBe` 14400
+      defaultTimeoutsConfig.timeoutsWorkerDeadlineSeconds `shouldBe` 14400
+      case decodeConfigText "[timeouts]\ngithub_seconds = 30\n" of
+        Left message -> expectationFailure (Data.Text.unpack message)
+        Right (config, _) -> config.rawTimeouts.timeoutsWorkerDeadlineSeconds `shouldBe` 14400
+
+    it "documents one finite maximum and rejects everything outside the range" $ do
+      maximumWorkerDeadlineSeconds `shouldBe` 7 * 24 * 60 * 60
+      sequence_
+        [ (value, decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> value <> "\n"))
+            `shouldSatisfy` (\(_, decoded) -> either (const True) (const False) decoded)
+          | value <- ["0", "-1", Data.Text.pack (show (maximumWorkerDeadlineSeconds + 1))]
+        ]
+      case decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> Data.Text.pack (show maximumWorkerDeadlineSeconds) <> "\n") of
+        Left message -> expectationFailure (Data.Text.unpack message)
+        Right (config, _) -> config.rawTimeouts.timeoutsWorkerDeadlineSeconds `shouldBe` maximumWorkerDeadlineSeconds
+
+    it "names the ceiling in the message an over-maximum value fails with" $
+      case decodeConfigText ("[timeouts]\nworker_deadline_seconds = " <> Data.Text.pack (show (maximumWorkerDeadlineSeconds + 1)) <> "\n") of
+        Right _ -> expectationFailure "an over-maximum deadline loaded"
+        Left message -> Data.Text.unpack message `shouldSatisfy` (show maximumWorkerDeadlineSeconds `isInfixOf`)

@@ -19,7 +19,7 @@ import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, secondsToDiffTime)
 import Kanban.Action
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..), ApprovalUnavailable (..))
 import Kanban.Domain
@@ -72,7 +72,10 @@ import Kanban.Worker
     acquireWorkerLease,
     descriptorForSpec,
     discoverWorkers,
+    workerDeadlineReason,
     workerDirectory,
+    workerStaleTargetReason,
+    workerUnverifiedTargetReason,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import qualified Data.Map.Strict as Map
@@ -98,6 +101,7 @@ import Kanban.UI.Types
     SolveDetail (..),
     SolvePhase (..),
   )
+import Spec.Support.Process (workerFixtureSpec)
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -187,6 +191,9 @@ attributionOf known brand =
 
 spec :: Spec
 spec = do
+  handleRebuildSpec
+  settledWorkerSpec
+  preconditionComparisonSpec
   describe "the registered action kinds" $ do
     -- Pinned by value rather than by count or distinctness: a rename that kept
     -- eight unique kinds would pass either of those and change what a durable
@@ -1703,6 +1710,137 @@ workerStateReviewTurn = Nothing,
 workerStateReviewRequest = Nothing
           }
     )
+
+-- | Rebuilding an action's handle from a worker's own durable record, which is
+-- what lets a later observation judge a finished worker without the caller
+-- that launched it. These cases were first written against the mission
+-- runner's driver and are the part of that coverage that outlived it: the
+-- driver is gone, and the rebuild is the registry's.
+handleRebuildSpec :: Spec
+handleRebuildSpec = describe "who judges a finished worker" $ do
+  it "rebuilds a provider turn's handle from what its own record wrote down" $ do
+    descriptor <- descriptorForSpec (attributedSpec (WorkerId "solve-844-0001"))
+    case observableActionHandle SolveIssue resolvedFixtureIssue descriptor of
+      Just (WorkerActionHandle kind _ held attribution) -> do
+        kind `shouldBe` SolveIssue
+        held.workerDescriptorSpec.workerId `shouldBe` WorkerId "solve-844-0001"
+        -- The baseline is the one that run began from, never this caller's.
+        attributionKnownPullRequests attribution `shouldBe` Set.fromList [900, 901]
+        attributionSolverBrand attribution `shouldBe` ClaudeSolver
+      other -> expectationFailure ("unexpected handle: " <> show (fmap actionHandleKind other))
+
+  -- The absence is the fail-closed half. A run whose record cannot say what
+  -- baseline it began from is one no other caller may speak for: judging it
+  -- against a baseline taken now would credit it with a pull request somebody
+  -- else opened, or refuse it the one it opened itself.
+  it "refuses to rebuild a handle the worker's record cannot supply" $ do
+    unattributed <- descriptorForSpec (workerFixtureSpec repositoryUnderTest (WorkerId "solve-844-0002") 844)
+    (actionHandleKind <$> observableActionHandle SolveIssue resolvedFixtureIssue unattributed)
+      `shouldBe` Nothing
+    -- And the repository's review host owns no action of its own.
+    host <-
+      descriptorForSpec
+        ( (workerFixtureSpec repositoryUnderTest (WorkerId "issue-host-0001") 844)
+            {workerTask = IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")}
+        )
+    (actionHandleKind <$> observableActionHandle ReviewIssue resolvedFixtureIssue host) `shouldBe` Nothing
+
+  -- An issue action's handle carries the stage, because the stage is what
+  -- decides which published evidence its result is read from.
+  it "carries the stage an issue action's own record names" $ do
+    descriptor <-
+      descriptorForSpec
+        ( (workerFixtureSpec repositoryUnderTest (WorkerId "issue-844-0001") 844)
+            { workerTask =
+                IssueActionWorkerTaskKind
+                  ( IssueActionWorkerTask
+                      { issueActionIssueNumber = 844,
+                        issueActionStage = IssueRereview,
+                        issueActionHost = WorkerId "issue-host-0001",
+                        issueActionOrigin = IssueOriginClaude
+                      }
+                  )
+            }
+        )
+    case observableActionHandle ReviewIssue resolvedFixtureIssue descriptor of
+      Just (IssueActionHandle kind _ stage _) -> do
+        kind `shouldBe` ReviewIssue
+        stage `shouldBe` IssueRereview
+      other -> expectationFailure ("unexpected handle: " <> show (fmap actionHandleKind other))
+
+-- | How a settled worker's failure detail is read, which every observation path
+-- that meets a terminal @SolveFailed@ shares. These classifications were first
+-- written against the mission runner's reconciliation and are the part of that
+-- coverage that outlived it: the classifier is the registry's, and the
+-- dispatch and autosolve paths still consume it.
+settledWorkerSpec :: Spec
+settledWorkerSpec = describe "how a settled worker's failure is read" $ do
+  -- The deadline is its own result, reached from the very sentence the
+  -- watchdog writes, and never mistaken for a generic failure.
+  it "reads a deadline out of a settled worker and an ordinary failure as one" $ do
+    settledWorkerFailure workerDeadlineReason `shouldBe` ActionDeadlineExceeded workerDeadlineReason
+    settledWorkerFailure "the provider exited 1" `shouldBe` ActionFailed "the provider exited 1"
+
+  it "reads a turn refused for a moved target as the target having moved" $ do
+    let refusal = workerStaleTargetReason <> ": #844 changed"
+    settledWorkerFailure refusal `shouldBe` ActionTargetMoved refusal
+
+  -- A turn refused because the target could not be read at all mutated nothing
+  -- and learned nothing, so it must not settle as a failure.
+  it "reads an unreadable-target refusal as a stop, not a failure" $ do
+    let refusal = workerUnverifiedTargetReason <> ": gh: could not connect"
+    settledWorkerFailure refusal `shouldBe` ActionStopped refusal
+
+-- | Whether a recorded target precondition still describes the live target,
+-- which the owning action compares at the last instruction before a spawn.
+preconditionComparisonSpec :: Spec
+preconditionComparisonSpec = describe "the precondition comparison" $
+  it "holds only when every fact still agrees, and says nothing was dispatched when not" $ do
+    let recorded = comparedPrecondition ["a", "b"]
+    targetPreconditionHolds recorded (comparedPrecondition ["b", "a"]) `shouldBe` True
+    targetPreconditionHolds recorded (comparedPrecondition ["a"]) `shouldBe` False
+    targetPreconditionHolds recorded ((comparedPrecondition ["a", "b"]) {preconditionState = "closed"})
+      `shouldBe` False
+    Text.unpack (targetPreconditionMessage recorded (comparedPrecondition ["a"]))
+      `shouldSatisfy` isInfixOf "nothing was dispatched"
+
+-- | Issue 844, open, with these labels.
+comparedPrecondition :: [Text] -> TargetPrecondition
+comparedPrecondition labels =
+  TargetPrecondition
+    { preconditionItem = IssueId 844,
+      preconditionUpdatedAt = UTCTime (fromGregorian 2026 9 4) (secondsToDiffTime 120),
+      preconditionHead = Nothing,
+      preconditionLabels = labels,
+      preconditionState = "open"
+    }
+
+-- | A worker specification whose record names the baseline its run began from.
+attributedSpec :: WorkerId -> WorkerSpec
+attributedSpec identifier =
+  (workerFixtureSpec repositoryUnderTest identifier 844)
+    { workerParent =
+        Just
+          WorkerParent
+            { workerParentIssueNumber = 844,
+              workerParentReviewRound = 0,
+              workerParentSolverBrand = ClaudeSolver,
+              workerParentSolverSession = Nothing,
+              workerParentSolverLogPath = Nothing,
+              workerParentStartedAt = epoch,
+              workerParentKnownPullRequests = Set.fromList [900, 901],
+              workerParentPullRequest = Nothing,
+              workerParentSolverAssignment = Nothing
+            }
+    }
+
+-- | The resolution a handle is rebuilt against, produced by the registry's own
+-- resolution rather than assembled here.
+resolvedFixtureIssue :: ResolvedTarget
+resolvedFixtureIssue =
+  case itemTarget (resolveIn (catalogOf [baseIssue 844 []] [] emptyHistory) (TargetByKind ActionTargetIssue 844)) of
+    Just resolved -> resolved
+    Nothing -> error "the fixture issue did not resolve"
 
 -- | The durable state a supervisor would have written, hand-placed so
 -- observation can be exercised against every status without one.

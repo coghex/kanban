@@ -1,11 +1,11 @@
 -- | One @gh@ record lock per reader process (issue #742), and the arc's proof
--- that a dashboard, a mission runner, and a worker read one repository
+-- that a dashboard, an issue-review host, and a worker read one repository
 -- together (epic #642, GHR-3).
 --
 -- Every example here runs its readers as processes of their own, through
 -- "Spec.Support.ReaderProbes", because each claim is about a process: three
 -- readers that share nothing but the files under the cache root, a refusal
--- that has to outlive one read within the process that took it, and a runner
+-- that has to outlive one read within the process that took it, and a worker
 -- that dies with its @gh@'s group still running.
 module Spec.GitHub.ConcurrentReaders (spec) where
 
@@ -40,11 +40,11 @@ spec = describe "one gh record lock per reader process" $ do
   -- them takes finds the other two's entries on the record, from processes
   -- that are running and still hold their claims. Those are live work, never
   -- ghosts, so nothing refuses and nothing is signalled.
-  it "lets a dashboard, a mission runner, and a worker read one repository at once from separate processes" $
+  it "lets a dashboard, an issue-review host, and a worker read one repository at once from separate processes" $
     withReaderFixture 3 $ \fixture -> do
       probes <-
         forM
-          [("dashboard", DashboardReader), ("runner", RunnerBoardReader), ("worker", WorkerReader)]
+          [("dashboard", DashboardReader), ("host", WorkerReader), ("worker", WorkerReader)]
           (\(name, role) -> startIn fixture name role [] [])
       outcomes <- mapM awaitReaderOutcome probes
       forM_ (zip probes outcomes) $ \(probe, outcome) ->
@@ -69,12 +69,6 @@ spec = describe "one gh record lock per reader process" $ do
     -- -- runs in that restored environment under a lock nothing has read
     -- through and succeeds: so a later read turned away here is turned away
     -- by this process's lock and by nothing ambient.
-    it "turns away a runner's later target observation and board read after its board read" $
-      void (latchedWithin (LatchSequence ReadBoard [ReadTarget, ReadBoard]))
-
-    it "turns away a runner's later board read and target observation after its target observation" $
-      void (latchedWithin (LatchSequence ReadTarget [ReadBoard, ReadTarget]))
-
     -- The issue-review host rereads the precondition of every child it
     -- adopts through its one lock, so a group one child's reread held back
     -- turns away the next child's -- as the unverified refusal the host
@@ -84,16 +78,16 @@ spec = describe "one gh record lock per reader process" $ do
       forM_ (consumersOf steps) $ \step ->
         workerPreconditionRefusal step.readerStepDetail `shouldBe` Just workerUnverifiedTargetReason
 
-  -- A runner killed while its gh's group is still running leaves that group
+  -- A worker killed while its gh's group is still running leaves that group
   -- to whoever reads next. What makes a group reclaimable rather than only
   -- watched is a census (design Hazard B: a group recorded while its gh is
-  -- still running is never signalled by anybody), and the runner writes one
-  -- when its gh exits and leaves a process behind in the group. The runner is
+  -- still running is never signalled by anybody), and the worker writes one
+  -- when its gh exits and leaves a process behind in the group. The worker is
   -- killed right after that, while its own cleanup of the survivor is held
   -- on its first process snapshot. The next dashboard refresh finds the entry
   -- of a writer that has exited and reclaims it with the existing verified
   -- escalation: the survivor ignores TERM, so only the KILL empties the group.
-  it "reclaims, on the next dashboard refresh, the group an abandoned runner's gh left running" $
+  it "reclaims, on the next dashboard refresh, the group an abandoned worker's gh left running" $
     withReaderFixture 1 $ \fixture -> do
       let survivorPath = fixture.fixtureRoot </> "survivor.pid"
           heldPath = fixture.fixtureRoot </> "ps-held.pid"
@@ -122,27 +116,27 @@ spec = describe "one gh record lock per reader process" $ do
       heldPs <- newIORef (Nothing :: Maybe Int)
       let killRecorded ref = readIORef ref >>= mapM_ (\pid -> void (try @IOException (signalProcess sigKILL (fromIntegral pid))))
       ( do
-          runner <- startIn fixture "runner" RunnerBoardReader [psBin] [("READER_LEAVE_SURVIVOR", "1")]
-          awaitProbeFile runner "hold its own cleanup of the group its gh left" heldPath
+          worker <- startIn fixture "worker" WorkerReader [psBin] [("READER_LEAVE_SURVIVOR", "1")]
+          awaitProbeFile worker "hold its own cleanup of the group its gh left" heldPath
           readPid heldPath >>= writeIORef heldPs . Just
           survivorPid <- readPid survivorPath
           writeIORef survivor (Just survivorPid)
           -- The staging is what it claims: one censused entry, marked
-          -- pending, written by the runner, naming the group the survivor is
+          -- pending, written by the worker, naming the group the survivor is
           -- still in.
-          runnerPid <- fmap fromIntegral <$> getPid runner.readerProbeHandle
+          workerPid <- fmap fromIntegral <$> getPid worker.readerProbeHandle
           recorded <- recordAfter fixture
           case recorded of
             GhGroupRecordLoaded [entry] -> do
               entry.ownedProcessGroupCensused `shouldBe` True
               entry.ownedProcessGroupCleanupPending `shouldBe` True
-              fmap (.processIdentityPid) entry.ownedProcessGroupOwner `shouldBe` runnerPid
+              fmap (.processIdentityPid) entry.ownedProcessGroupOwner `shouldBe` workerPid
               map (.processIdentityPid) entry.ownedProcessGroupMembers `shouldContain` [survivorPid]
-            other -> expectationFailure ("the runner did not leave one censused entry: " <> show other)
+            other -> expectationFailure ("the worker did not leave one censused entry: " <> show other)
           -- Abandoned: killed outright, so nothing it would have done next
           -- happens, and the snapshot it was held on goes with it.
-          mapM_ (signalProcess sigKILL . fromIntegral) runnerPid
-          void (waitForProcess runner.readerProbeHandle)
+          mapM_ (signalProcess sigKILL . fromIntegral) workerPid
+          void (waitForProcess worker.readerProbeHandle)
           killRecorded heldPs
           alive survivorPid `shouldReturn` True
           (outcome, _) <-
