@@ -370,6 +370,66 @@ spec = do
         message `shouldMention` "Check the issue's current comments and labels"
         message `shouldNotMention` "this tool"
 
+    -- The Claude reviewer was the third short-lived runner in this module and
+    -- the one #15 never enumerated, so it kept the very hGetContents-plus-
+    -- takeMVar shape that fix existed to remove (issue #154). Its answer is
+    -- prose read by a model rather than a URL or a JSON verdict, so unlike the
+    -- two runners above a truncated capture stays a *success* carrying what
+    -- arrived -- but it is never a timeout, and never outcome-unknown.
+    it "round-trips an ordinary fast claude reviewer call unchanged" $
+      withFakeClaudeCli ["printf '%s' 'reviewer answer'"] injectedBounds $ \_ client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        result `shouldBe` Right "reviewer answer"
+
+    it "returns the prefix captured before the grace expired when a forked child holds claude's stdout open, never a timeout" $
+      withFakeClaudeCli
+        [ "sleep 30 &",
+          "echo $! > \"$CLAUDE_CHILD_MARKER\"",
+          "printf '%s' 'partial verdict'",
+          "exit 0"
+        ]
+        injectedBounds
+        $ \markerPath client -> do
+          result <- runBoundedClaudeCall boundedCallMicros client "review this"
+          output <- requireRight "expected a clean exit with truncated stdout to keep what was captured" result
+          output `shouldMention` "partial verdict"
+          output `shouldMention` "Incomplete output"
+          output `shouldMention` "still incomplete after"
+          output `shouldNotMention` "timed out"
+          -- The marker this path must not carry: 'CommandExited' already
+          -- established the exit, and the run is read-only, so there is
+          -- neither an unknown outcome nor anything to re-verify.
+          output `shouldNotMention` "outcome is unknown"
+          output `shouldNotMention` "may already have completed"
+          markerPath `shouldRecordASweptProcess` "the child holding claude's stdout open"
+
+    it "describes an incomplete capture that yielded nothing as incomplete rather than as no output" $
+      withFakeClaudeCli
+        [ "sleep 30 &",
+          "echo $! > \"$CLAUDE_CHILD_MARKER\"",
+          "exit 0"
+        ]
+        injectedBounds
+        $ \_ client -> do
+          result <- runBoundedClaudeCall boundedCallMicros client "review this"
+          output <- requireRight "expected an empty truncated capture to still be reported as incomplete" result
+          output `shouldMention` "Incomplete output"
+          output `shouldMention` "nothing had been captured"
+          output `shouldNotMention` "Claude returned no reviewer output"
+          output `shouldNotMention` "timed out"
+
+    it "still reports a claude reviewer that outlives its own deadline as a timeout, sweeping its process group" $
+      withFakeClaudeCli ["echo $$ > \"$CLAUDE_CHILD_MARKER\"", "sleep 30"] injectedBounds $ \markerPath client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        message <- requireLeft "expected a claude reviewer past its deadline to time out" result
+        message `shouldBe` ("Claude " <> claudeRevisionDisplay <> " revision agent timed out after ten minutes")
+        markerPath `shouldRecordASweptProcess` "the claude reviewer that outlived its deadline"
+
+    it "still succeeds unchanged when only claude's stderr is held open past the grace" $
+      withFakeClaudeCli ["sleep 30 >/dev/null &", "printf '%s' 'complete verdict'", "exit 0"] injectedBounds $ \_ client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        result `shouldBe` Right "complete verdict"
+
     it "keeps an observed nonzero claude exit a status failure carrying whatever prefixes were captured" $
       withFakeClaudeCli ["sleep 30 &", "printf 'boom\\n' >&2", "exit 3"] injectedBounds $ \_ client -> do
         result <- runBoundedClaudeCall boundedCallMicros client "review this"
