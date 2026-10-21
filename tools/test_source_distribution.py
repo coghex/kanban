@@ -74,10 +74,12 @@ tracked file has none:
   what that version contains without consulting the upstream repository.
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
-  configuration requirement 2 excludes; `.gitignore`, `.github/workflows/`, and
-  `.github/ISSUE_TEMPLATE/`, which only do anything in the upstream Git
+  configuration requirement 2 excludes; `.gitignore`, `.ignore` (which only
+  hides `docs/archive/` from a search of the checkout), `.github/workflows/`,
+  and `.github/ISSUE_TEMPLATE/`, which only do anything in the upstream Git
   repository; and the development
-  audit reports, design documents, and coordination notes
+  audit reports, design documents, finished records under `docs/archive/`, and
+  coordination notes
   `EXCLUDED_TRACKED_PATHS` declares — each by exact path, or whole directories
   through a trailing-slash entry such as `docs/coordination/` that covers
   every tracked descendant by whole path component — which no runtime, setup,
@@ -240,6 +242,8 @@ EXCLUDED_TRACKED_PATHS = (
     ".github/workflows/release.yml",
     ".github/workflows/review-gate.yml",
     ".gitignore",
+    ".ignore",
+    "docs/archive/",
     "docs/code-health-report.md",
     "docs/coordination/",
     "docs/designs/",
