@@ -1,7 +1,5 @@
 module Kanban.UI.Util
   ( absoluteTime,
-    agentFailureNotice,
-    agentSessionLabelFor,
     allColumns,
     cacheEnabled,
     columnName,
@@ -10,16 +8,11 @@ module Kanban.UI.Util
     directMergeReportAfterRefresh,
     entriesForBoard,
     entryPrimaryTrackerNumber,
-    failureActivity,
-    formatElapsed,
-    isDeadlineOutcome,
     itemBody,
     itemHeading,
     itemMetadata,
     itemStatusText,
     itemUrl,
-    launchAssignment,
-    liveAssignmentDisplay,
     mergeText,
     noticeActivityLive,
     noticeCleared,
@@ -38,64 +31,26 @@ module Kanban.UI.Util
     shownNotice,
     startupReportApplied,
     primaryTrackerNumber,
-    pullRequestActionText,
-    pullRequestSessionLabel,
     relativeAge,
-    resolvedRosterCellFor,
     rightOrNothing,
     safeIndex,
     safeLast,
     selectedRow,
-    shortSessionId,
     showText,
-    solveReviewerDisplay,
-    solveSessionLabel,
-    timedActivity,
     unknownAssigneesText,
     unknownLinksText,
-    workflowTitle,
   )
 where
 
-
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime, defaultTimeLocale, diffUTCTime, formatTime, utcToZonedTime)
 import Kanban.Config (cacheEnabled)
 import Kanban.Domain
-import Kanban.Models
-  ( AssignmentUnavailable,
-    ModelRoster,
-    RecordedAssignment (..),
-    RosterLoadError,
-    assignmentUnavailableMessage,
-    rosterErrorMessage,
-    unavailableAssignmentDisplay,
-  )
-import Kanban.Preflight
-  ( preflightDiagnosticDetail
-    )
-import Kanban.PullRequestFlow
-  ( PullRequestAction (..),
-    PullRequestOrigin,
-    pullRequestAssignment,
-    solveReviewerAssignment
-    )
-import Kanban.Solve
-  ( SolveOutcome (..),
-    SolveWorkflow (..),
-    SolverBrand (..),
-    assignmentLabel,
-    brandForProvider,
-    solveAssignment
-  )
 import Kanban.Text (sanitizeText)
 import Kanban.Workflow (itemLifecycleBadge)
-import Kanban.Worker
-  ( workerDeadlineReason
-  )
 import Kanban.UI.Notice
 import Kanban.UI.Types
 
@@ -103,22 +58,6 @@ overflowText :: Int -> Text
 overflowText count
   | count > 0 = " +" <> showText count
   | otherwise = ""
-
-formatElapsed :: UTCTime -> UTCTime -> Text
-formatElapsed now startedAt
-  | seconds < 60 = showText seconds <> "s"
-  | seconds < 3600 = showText (seconds `div` 60) <> "m " <> twoDigits (seconds `mod` 60) <> "s"
-  | otherwise = showText (seconds `div` 3600) <> "h " <> twoDigits ((seconds `div` 60) `mod` 60) <> "m"
-  where
-    seconds = max 0 (floor (diffUTCTime now startedAt) :: Int)
-    twoDigits value
-      | value < 10 = "0" <> showText value
-      | otherwise = showText value
-
-shortSessionId :: Text -> Text
-shortSessionId sessionId
-  | Text.length sessionId <= 12 = sessionId
-  | otherwise = Text.take 8 sessionId <> "…"
 
 -- | A timestamp in the viewer's own zone, always naming that zone so a bare
 -- wall-clock reading is never ambiguous.
@@ -171,109 +110,6 @@ entryPrimaryTrackerNumber (TrackerHeader tracker) = Just tracker.trackerIssue.is
 
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
-
-workflowTitle :: SolveWorkflow -> Text
-workflowTitle SolveOnly = "SOLVE"
-workflowTitle AutoSolve = "AUTOSOLVE"
-
-pullRequestActionText :: PullRequestAction -> Text
-pullRequestActionText PullRequestReview = "review"
-pullRequestActionText PullRequestRevision = "revision"
-pullRequestActionText PullRequestRereview = "rereview"
-pullRequestActionText PullRequestRepair = "repair"
-
--- | The model-and-effort portion a surface shows for a cell it resolves
--- live, or the shared stand-in when the roster cannot supply it.
---
--- For the surfaces that name no session: a chooser row offering a brand,
--- and the autosolve reviewer line naming a review that has not started. A
--- session's own surfaces go through 'agentSessionLabelFor' instead, because
--- a session may hold a recorded assignment that outranks the live cell.
---
--- Polymorphic in the cell so the one that carries its provider
--- ('Kanban.Models.RecordedAssignment', from the task-routing resolvers) and
--- the bare 'Kanban.Models.Assignment' the review cells yield share this
--- resolution rather than each getting a near-copy of it.
-liveAssignmentDisplay ::
-  (cell -> Text) ->
-  (ModelRoster -> Either AssignmentUnavailable cell) ->
-  Either RosterLoadError ModelRoster ->
-  Text
-liveAssignmentDisplay display cell =
-  either (const unavailableAssignmentDisplay) (display . snd) . resolvedRosterCellFor cell
-
--- | What a session surface calls its agent: the brand, then the display of
--- the assignment actually in force.
---
--- The assignment is 'launchAssignment''s, so the ordering is the launch's
--- own (D-7): a recorded assignment is replayed whatever the roster now says,
--- and only a session that has none -- a fresh one before its first launch,
--- or one recovered from a specification written before the field existed --
--- resolves the live cell.
---
--- The brand comes from the resolved assignment wherever there is one, since
--- a record carries the provider it was read for and that is what the
--- supervisor actually spawns. The routing's own brand stands in only for the
--- refusal, which has no assignment to read a provider from; requirement 6
--- keeps the surrounding text, so only the model-and-effort portion is
--- replaced.
-agentSessionLabelFor ::
-  SolverBrand ->
-  Maybe RecordedAssignment ->
-  (ModelRoster -> Either AssignmentUnavailable RecordedAssignment) ->
-  Either RosterLoadError ModelRoster ->
-  Text
-agentSessionLabelFor brand recorded cell rosterResult =
-  case launchAssignment recorded cell rosterResult of
-    Left _ -> assignmentLabel brand unavailableAssignmentDisplay
-    Right resolved ->
-      assignmentLabel
-        (brandForProvider resolved.recordedAssignmentProvider)
-        resolved.recordedAssignmentDisplay
-
--- | 'agentSessionLabelFor' for a pull-request session, whose cell is chosen
--- by origin and action: @pr_review@ for the canonical review and rereview,
--- @pr_revise@ for the author-side revision and repair. That split is
--- 'Kanban.PullRequestFlow.pullRequestRole''s, consulted here rather than
--- restated, so the label can no longer name the solve assignment for an
--- own-brand action the flow actually runs on @pr_revise@.
-pullRequestSessionLabel ::
-  Maybe RecordedAssignment ->
-  PullRequestOrigin ->
-  PullRequestAction ->
-  SolverBrand ->
-  Either RosterLoadError ModelRoster ->
-  Text
-pullRequestSessionLabel recorded origin action brand =
-  agentSessionLabelFor brand recorded (\roster -> pullRequestAssignment roster origin action)
-
--- | The assignment naming a solve session's own agent: the one its last
--- worker recorded, and only for a session that has none the live @solve@
--- cell its brand selects.
-solveSessionLabel :: Either RosterLoadError ModelRoster -> SolveSession -> Text
-solveSessionLabel rosterResult session =
-  agentSessionLabelFor
-    brand
-    session.sessionDetail.solveSessionAssignment
-    (`solveAssignment` brand)
-    rosterResult
-  where
-    brand = session.sessionDetail.solveSessionBrand
-
--- | The reviewer an autosolve run will hand its pull request to: the
--- opposite brand's @pr_review@ display, resolved live because that review
--- has no worker yet to have recorded anything.
-solveReviewerDisplay :: Either RosterLoadError ModelRoster -> SolverBrand -> Text
-solveReviewerDisplay rosterResult brand =
-  liveAssignmentDisplay (.recordedAssignmentDisplay) (`solveReviewerAssignment` brand) rosterResult
-
--- | An activity line with its elapsed time, for a live session that keeps an
--- activity clock at all. A kind that records no start time shows the bare
--- activity, which is what it showed before the clock became a shared field.
-timedActivity :: UTCTime -> Bool -> Maybe UTCTime -> Text -> Text
-timedActivity now isLive (Just startedAt) activity
-  | isLive = activity <> " · " <> formatElapsed now startedAt
-timedActivity _ _ _ activity = activity
 
 itemHeading :: BoardItem -> Text
 itemHeading (IssueItem issue) = "#" <> showText issue.issueNumber <> "  " <> sanitizeText issue.issueTitle
@@ -549,68 +385,3 @@ recordStartupShown state =
         (\report -> report {startupReportShownInstance = fromMaybe (-1) (currentNoticeInstance state.appNotice)})
           <$> state.appStartupReport
     }
-
--- | The activity text for a terminal or pending 'SolveFailed' outcome,
--- distinguishing the persistent-worker deadline and a preflight-detected
--- setup gap from a generic provider failure, so the process inspector and
--- session/card projection never collapse them.
-failureActivity :: Text -> Text
-failureActivity message
-  | isDeadlineOutcome (SolveFailed message) = "deadline exceeded"
-  | isJust (preflightDiagnosticDetail message) = "setup required"
-  | otherwise = "failed"
-
--- | How a terminal agent failure is announced. A preflight diagnostic means
--- the agent never ran: naming the missing component and its install command
--- is the whole point, so it must not be reported as another opaque failure.
-agentFailureNotice :: Text -> Text -> Text
-agentFailureNotice subject message = case preflightDiagnosticDetail message of
-  Just remediation -> subject <> " cannot start — " <> sanitizeText remediation
-  Nothing -> subject <> " failed: " <> sanitizeText message
-
--- | The roster an agent-starting path may launch against and the cell it
--- resolved from it, or the refusal it must show instead.
---
--- The one place the startup 'Either' is unwrapped, and the one place the
--- selected cell is checked, so every spawn boundary refuses on the same two
--- terms: a present-but-unusable @models.toml@ (D-3 — the message names the
--- file and the defect), and a valid roster that does not cover the cell this
--- run's routing selected. Neither falls back to the compiled defaults; an
--- absent file already yielded them inside 'Kanban.Models.loadModelRoster'.
---
--- Both halves come back because the two kinds of caller need different ones:
--- a worker launch records the cell in the specification it persists, while
--- the embedded review backend hands the whole roster to a client that reads
--- more than one of its cells over that client's life.
-resolvedRosterCellFor :: (ModelRoster -> Either AssignmentUnavailable cell) -> Either RosterLoadError ModelRoster -> Either Text (ModelRoster, cell)
-resolvedRosterCellFor cell rosterResult = case rosterResult of
-  Left loadError -> Left (rosterErrorMessage loadError)
-  Right roster -> case cell roster of
-    Left unavailable -> Left (assignmentUnavailableMessage unavailable)
-    Right resolved -> Right (roster, resolved)
-
--- | What a worker launch runs on, as one total decision (D-7, MODEL-7).
---
--- A session whose previous worker recorded an assignment replays it
--- unchanged and consults no roster at all: not the cell, not the loaded
--- provider set, and not the startup 'Either' — so a resume still launches
--- after the operator has edited a model out of @models.toml@, or left the
--- file unusable. If the provider has genuinely retired that model the CLI
--- fails visibly at resume, which is the honest outcome; silently moving a
--- live provider session onto a different model is not.
---
--- Only a launch that is not a replay resolves, and it refuses on exactly the
--- terms 'resolvedRosterCellFor' states. That covers a fresh start and the
--- first resume of a session whose worker predates the recorded field.
-launchAssignment ::
-  Maybe RecordedAssignment ->
-  (ModelRoster -> Either AssignmentUnavailable RecordedAssignment) ->
-  Either RosterLoadError ModelRoster ->
-  Either Text RecordedAssignment
-launchAssignment recorded cell rosterResult = case recorded of
-  Just replayed -> Right replayed
-  Nothing -> snd <$> resolvedRosterCellFor cell rosterResult
-
-isDeadlineOutcome :: SolveOutcome -> Bool
-isDeadlineOutcome (SolveFailed message) = message == workerDeadlineReason
-isDeadlineOutcome _ = False

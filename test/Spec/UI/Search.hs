@@ -32,14 +32,14 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerBackend (..), DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
 import Kanban.UI.Approval (approvalTogglePress)
-import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction, boardMousePress)
+import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, boardMouseAction, boardMousePress)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, noticeSet, safeIndex, selectedRow, shownNotice)
-import Spec.Support.App (testAppState, withReviewSession)
+import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (baseIssue)
 import Test.Hspec
 
@@ -647,13 +647,12 @@ transferSpec = describe "transferring to another column" $ do
     -- what the row draws and what acting on it acts on.
     identityIn moved Active `shouldBe` Just "#731  Reattach an orphaned worker"
 
-  it "does nothing else: no overlay, no epic toggled, no session touched" $ do
+  it "does nothing else: no overlay, no epic toggled" $ do
     searching <- transferring
     let moved = transferSearchTo Active searching
     moved.appOverlay `shouldBe` Nothing
     moved.appExpandedTrackers `shouldBe` searching.appExpandedTrackers
     expandedTrackersFor moved Active `shouldBe` expandedTrackersFor searching Active
-    Map.keys moved.appReviewSessions `shouldBe` Map.keys searching.appReviewSessions
     moved.appBoard `shouldBe` searching.appBoard
 
   it "keeps the query, the selection, and a notice when it cannot move" $ do
@@ -693,14 +692,14 @@ transferSpec = describe "transferring to another column" $ do
 
 -- | A live search on Issues, with everything a transfer into Active must
 -- either move or leave alone: the second result selected in the searched
--- column, a live review session on Active's standalone card, and Active
--- remembering its collapsed epic's header rather than its first row.
+-- column, and Active remembering its collapsed epic's header rather than its
+-- first row.
 transferring :: IO AppState
 transferring = do
   searching <- searchingFor "cache"
   let onSecondResult = applySearchInput (SearchMove 1) searching
       seated = onSecondResult {appSelectedRows = Map.insert Active 1 onSecondResult.appSelectedRows}
-  pure (withReviewSession (titledIssue 799 "Repair stale world cache invalidation") ReviewRunning seated)
+  pure seated
 
 visibleIn :: AppState -> BoardColumn -> [Text]
 visibleIn state column = map entryIdentityText (entriesFor state column)
@@ -739,9 +738,7 @@ precedenceSpec = describe "key precedence" $ do
       [ (character, searchInput liveSearch event, boardAction BoardScope event)
           `shouldBe` (character, Just (SearchInsert character), Just action)
       | (character, action) <-
-          [ ('r', ReviewSelection),
-            ('S', SolveSelection),
-            ('u', RefreshAll),
+          [ ('u', RefreshAll),
             ('a', ToggleApproval),
             ('d', ToggleDrainer),
             ('e', ToggleEpic),
@@ -752,14 +749,18 @@ precedenceSpec = describe "key precedence" $ do
             ('g', FirstItem),
             ('G', LastItem),
             ('i', ShowIncidents),
-            ('p', ShowProcesses),
             ('c', ToggleSidebar),
-            ('o', ShowSettings),
             ('m', MergeDoneCard),
-            ('x', KillWorking),
-            ('A', AutoSolveSelection),
             ('?', ShowHelp)
           ],
+        let event = Vty.EvKey (Vty.KChar character) []
+      ]
+
+  it "types the letters whose board shortcuts were removed, and the board claims none of them" $
+    sequence_
+      [ (character, searchInput liveSearch event, boardAction BoardScope event)
+          `shouldBe` (character, Just (SearchInsert character), Nothing)
+      | character <- "rSAxpo",
         let event = Vty.EvKey (Vty.KChar character) []
       ]
 
@@ -895,7 +896,7 @@ mouseSpec = describe "mouse precedence" $ do
     -- And that meaning is an action, not the absence of one, for the three
     -- presses §7 gives the searched column.
     boardMouseAction searching (CardTarget Issues 0) Vty.BLeft [] `shouldBe` Just (SelectOrOpenCardAt Issues 0)
-    boardMouseAction searching (CardTarget Issues 0) Vty.BRight [] `shouldBe` Just (OpenRunningProcessAt Issues 0)
+    boardMouseAction searching (CardTarget Issues 0) Vty.BRight [] `shouldBe` Just (SelectCardOnlyAt Issues 0)
     boardMouseAction searching (EpicTarget Issues 1 700) Vty.BLeft [] `shouldBe` Just (ToggleEpicFromClick Issues 1 700)
 
   it "keeps the wheel scrolling the column under it, searched or not" $ do
@@ -1047,8 +1048,7 @@ mouseSpec = describe "mouse precedence" $ do
     (flip selectedRow Issues <$> ordinary) `shouldBe` Just 0
 
   -- The other half of requirement 2, for the press that does transfer: the
-  -- epic header a transferring click landed on is not toggled, and the live
-  -- session under a right click is not opened.
+  -- epic header a transferring click landed on is not toggled.
   it "consumes the action a transferring press would ordinarily have performed" $ do
     searching <- transferring
     let onEpic = transferSearchTo Active searching
@@ -1056,12 +1056,9 @@ mouseSpec = describe "mouse precedence" $ do
     Set.member 706 (expandedTrackersFor onEpic Active) `shouldBe` False
     onEpic.appOverlay `shouldBe` Nothing
     -- What the same press would have done without the transfer, so the case
-    -- above is a real constraint: the epic expands, and the right click on
-    -- Active's card opens its live session.
+    -- above is a real constraint: the card click opens details.
     let toggled = applyCardClick Active 0 (applyCardClick Active 0 searching {appSearch = Nothing})
-        opened = applyRunningProcessClick Active 0 searching {appSearch = Nothing}
     toggled.appOverlay `shouldBe` Just (DetailsOverlay (IssueItem (titledIssue 799 "Repair stale world cache invalidation")))
-    opened.appOverlay `shouldBe` Just (ReviewOverlay 799)
 
   it "selects without ending search when the click only selects" $ do
     searching <- searchingFor "cache"
@@ -1078,17 +1075,9 @@ mouseSpec = describe "mouse precedence" $ do
     opened.appSearch `shouldBe` Nothing
     selectedRow opened Issues `shouldBe` 3
 
-  it "ends search when a right click opens a live session's overlay" $ do
+  it "leaves search running when a right click only selects the card" $ do
     searching <- searchingFor "cache"
-    let withSession = withReviewSession (titledIssue 901 "Add repository snapshot cache") ReviewRunning searching
-        clicked = applyRunningProcessClick Issues 1 withSession
-    clicked.appOverlay `shouldBe` Just (ReviewOverlay 901)
-    clicked.appSearch `shouldBe` Nothing
-    selectedRow clicked Issues `shouldBe` 3
-
-  it "leaves search running when a right click found no live session" $ do
-    searching <- searchingFor "cache"
-    let clicked = applyRunningProcessClick Issues 1 searching
+    let clicked = boardMousePress (SelectCardOnlyAt Issues 1) searching
     clicked.appOverlay `shouldBe` Nothing
     clicked.appSearch `shouldBe` searching.appSearch
     selectedRow clicked Issues `shouldBe` 1

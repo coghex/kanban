@@ -56,7 +56,7 @@ import Kanban.Filter (FilterCriteria (..), LifecycleFacet (..))
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Events (BoardActionGate (..), blockedByCompletedLoad, boardActionGate, mutatesSelectedWork)
 import Kanban.UI.Keys (BoardAction (..), requiresLoadedAgent)
-import Kanban.UI.Session (selectedReviewItem)
+import Kanban.UI.Selection (selectedBoardItem)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, itemUrl, selectedRow, shownNotice)
 import Kanban.Workflow (entryItem)
@@ -359,7 +359,7 @@ keySpec = describe "the w binding" $ do
           Deliver (PageOpenFinished cardUrl (Just (OpenerUnresolved NoOpener))),
           quitStep
         ]
-    itemUrl <$> selectedReviewItem run.runState `shouldBe` Just otherCardUrl
+    itemUrl <$> selectedBoardItem run.runState `shouldBe` Just otherCardUrl
     shownNotice run.runState `shouldBe` Just (openFailureNotice cardUrl (OpenerUnresolved NoOpener))
     shownNotice run.runState `shouldSatisfy` maybe False (Text.isInfixOf cardUrl)
     shownNotice run.runState `shouldSatisfy` maybe False (not . Text.isInfixOf otherCardUrl)

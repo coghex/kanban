@@ -113,9 +113,8 @@ newReviewCommandId = do
 
 -- | Every input the review overlay can send, and no others.
 --
--- Closed for the reason 'Kanban.Action.Types.WorkflowActionKind' is: a
--- seventh input is a compile error in the host that has to apply it, not a
--- record it silently ignores.
+-- Closed on purpose: a seventh input is a compile error in the host that has
+-- to apply it, not a record it silently ignores.
 --
 -- Each carries what the /overlay/ showed, alongside what the provider needs,
 -- because the transcript entry a delivered command writes is part of the

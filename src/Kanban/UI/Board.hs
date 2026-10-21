@@ -24,7 +24,6 @@ module Kanban.UI.Board
     drawBase,
     drawCardFrame,
     drawFooter,
-    drawLiveActivity,
     emptyColumnText,
     filterChipText,
     filterFooterHintLine,
@@ -36,12 +35,6 @@ module Kanban.UI.Board
     overlayHintChips,
     overlayHintLine,
     searchFooterHintLine,
-    pullRequestPhaseGlyph,
-    pullRequestPhaseGlyphFor,
-    reviewPhaseGlyph,
-    reviewPhaseGlyphFor,
-    solvePhaseGlyph,
-    solvePhaseGlyphFor,
     trackerHeaderText,
     updateLabel,
     usageAgeText,
@@ -70,7 +63,6 @@ import Brick.Widgets.Border.Style
 import qualified Brick.Types as BrickTypes
 import qualified Graphics.Vty as Vty
 import Data.List (intersperse, sortOn)
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -114,11 +106,7 @@ import Kanban.UI.Types
 import Kanban.Models (OperatingMode (..))
 import Kanban.Usage (usageProviders)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, excerptFooterHint, footerHint, footerHintRow, modeScopeBindings)
-import Kanban.UI.SessionCore
-import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
-import Kanban.UI.SessionEvents (pullRequestSessionOps, reviewSessionOps, sessionOverlayHints, solveSessionOps)
-import Kanban.UI.Settings (settingsFooterHints)
-import Kanban.UI.Solve (solveChooserFooterHints)
+import Kanban.UI.Incidents (incidentsFooterHints)
 import Kanban.UI.Util
 import Kanban.UI.Theme
 import Kanban.UI.Search
@@ -1031,7 +1019,7 @@ columnItemHeight state columnWidth = \case
 -- to, and 'drawCard'\'s row of padding beneath it.
 cardHeight :: AppState -> Int -> ColumnEntry -> Int
 cardHeight state columnWidth entry =
-  length (cardLines (cardEnv state) False entry (cardInnerWidth state columnWidth entry)) + 3
+  length (cardLines (cardEnv state) False entry (cardInnerWidth columnWidth entry)) + 3
 
 -- | An epic header's rows: the row 'drawTrackerHeader' pads above it, and the
 -- rows its text wraps to at the width the marker and badges leave.
@@ -1039,7 +1027,7 @@ trackerHeaderHeight :: AppState -> Int -> Tracker -> Bool -> Int
 trackerHeaderHeight state columnWidth tracker expanded =
   1 + max 1 (length (wrapTextToLines defaultWrapSettings headerWidth headerText))
   where
-    headerWidth = max 0 (columnWidth - columnRowOverhead - badgeCells state (IssueItem tracker.trackerIssue))
+    headerWidth = max 0 (columnWidth - columnRowOverhead)
     headerText = trackerHeaderText state.appOptions.optionAscii expanded tracker
 
 -- | Cells every card and header row spends before its own content: the
@@ -1053,24 +1041,17 @@ columnRowOverhead = 3
 branchPrefixWidth :: Int
 branchPrefixWidth = 3
 
--- | The width a card lays its interior out at, once the marker, the badges,
--- the branch glyph, and the frame have taken theirs.
-cardInnerWidth :: AppState -> Int -> ColumnEntry -> Int
-cardInnerWidth state columnWidth entry = max 0 (cardFrameWidth - cardFrameOverhead)
+-- | The width a card lays its interior out at, once the marker, the branch
+-- glyph, and the frame have taken theirs.
+cardInnerWidth :: Int -> ColumnEntry -> Int
+cardInnerWidth columnWidth entry = max 0 (cardFrameWidth - cardFrameOverhead)
   where
     cardFrameWidth =
-      max 0 (columnWidth - columnRowOverhead - badgeCells state (entryItem entry) - branchCells)
+      max 0 (columnWidth - columnRowOverhead - branchCells)
     branchCells = case entry of
       Tracked _ _ -> branchPrefixWidth
       Standalone _ -> 0
       TrackerHeader _ -> 0
-
--- | Cells the solve and review badges beside one item take together.
-badgeCells :: AppState -> BoardItem -> Int
-badgeCells state item = badgeWidth (solveBadgePart state item) + badgeWidth (reviewBadgePart state item)
-
-badgeWidth :: Maybe (AttrName, Text) -> Int
-badgeWidth = maybe 0 (displayWidth . snd)
 
 -- | Rows one wheel press moves a column, as
 -- "Kanban.UI.Events" dispatches it. Named here because the frame has to know
@@ -1083,7 +1064,7 @@ columnScrollStep = 3
 -- must lay the column out itself.
 --
 -- Recomputing the signature is a handful of comparisons -- an 'Int', a query,
--- the expanded set, and the badge widths of the live sessions -- and never a
+-- and the expanded set -- and never a
 -- pass over the column, which is what makes checking cheaper than trusting.
 -- The deadline is the other half: every card was measured with one @now@, and
 -- a measurement outlives its own relative ages only until the earliest of
@@ -1110,23 +1091,18 @@ columnSignature state column columnWidth =
 
 -- | The board-wide inputs a column measurement is taken under.
 --
--- Every part of it is read in constant time -- three roster sizes and two
--- settings -- so collecting it costs the same on a dashboard holding one
--- agent session and one holding a thousand. It is still collected here rather
--- than in a frame's own check so that a frame compares one 'Int'
--- ('appLayoutEpoch') rather than a record, and so that the reasoning behind
--- the counts ('Kanban.UI.Types.ColumnBadges') lives in one place.
+-- Every part of it is read in constant time -- two settings -- and it is
+-- collected here rather than in a frame's own check so that a frame compares
+-- one 'Int' ('appLayoutEpoch') rather than a record.
 layoutInputs :: AppState -> LayoutInputs
 layoutInputs state =
   LayoutInputs
-    { layoutBadges = columnBadgeCounts state,
-      layoutAscii = state.appOptions.optionAscii,
+    { layoutAscii = state.appOptions.optionAscii,
       layoutExcerptLines = cardExcerptLimit state.appExcerptsVisible state.appConfig
     }
 
--- | The layout inputs a dashboard has before anything has been measured or
--- any agent session started: no badges, and whatever glyph set and excerpt
--- budget it launched under.
+-- | The layout inputs a dashboard has before anything has been measured:
+-- whatever glyph set and excerpt budget it launched under.
 --
 -- The one place a fresh 'appLayoutInputs' is spelled, so a launch and a test
 -- seat it identically and the first settle finds nothing to move. That
@@ -1136,8 +1112,7 @@ layoutInputs state =
 unmeasuredLayoutInputs :: Options -> ResolvedConfig -> LayoutInputs
 unmeasuredLayoutInputs options config =
   LayoutInputs
-    { layoutBadges = ColumnBadges 0 0 0,
-      layoutAscii = options.optionAscii,
+    { layoutAscii = options.optionAscii,
       layoutExcerptLines = cardExcerptLimit defaultExcerptsVisible config
     }
 
@@ -1149,20 +1124,12 @@ unmeasuredLayoutInputs options config =
 defaultExcerptsVisible :: Bool
 defaultExcerptsVisible = True
 
-columnBadgeCounts :: AppState -> ColumnBadges
-columnBadgeCounts state =
-  ColumnBadges
-    { badgeSolveCount = Map.size state.appSolveSessions,
-      badgeReviewCount = Map.size state.appReviewSessions,
-      badgePullRequestCount = Map.size state.appPullRequestReviewSessions
-    }
-
 -- | Lay one column out: what it draws, how tall each of those is, and where
 -- the viewport was when this was taken.
 --
 -- This is the pass over the column the frames after it reuse. It costs the
 -- column once per change to what it shows -- a refresh, a criteria or query
--- edit, an expansion, a resize, a badge appearing, or the earliest relative
+-- edit, an expansion, a resize, or the earliest relative
 -- age on it changing wording -- and nothing per frame in between.
 measureColumnWindow :: AppState -> BoardColumn -> Int -> Int -> ColumnWindow
 measureColumnWindow state column columnWidth top =
@@ -1350,8 +1317,6 @@ drawCard state column row entry lastInTracker =
     visibility = if selected && state.appEnsureSelectionVisible then visible else id
     card =
       (if selected then withAttr selectedAttr (txt marker) else txt " ")
-        <+> drawBadge (solveBadgePart state (entryItem entry))
-        <+> drawBadge (reviewBadgePart state (entryItem entry))
         <+> branchPrefix state entry lastInTracker
         <+> drawCardFrame (cardEnv state) selected entry
     marker = if state.appOptions.optionAscii then ">" else "▌"
@@ -1365,8 +1330,7 @@ data CardEnv = CardEnv
     -- configuration rather than read off it, because the height in force is
     -- the two together ('cardExcerptLimit').
     cardExcerptsVisible :: Bool,
-    cardNow :: UTCTime,
-    cardSolveSessions :: Map Int SolveSession
+    cardNow :: UTCTime
   }
 
 cardEnv :: AppState -> CardEnv
@@ -1375,8 +1339,7 @@ cardEnv state =
     { cardOptions = state.appOptions,
       cardConfig = state.appConfig,
       cardExcerptsVisible = state.appExcerptsVisible,
-      cardNow = state.appNow,
-      cardSolveSessions = state.appSolveSessions
+      cardNow = state.appNow
     }
 
 -- | Cells the frame spends on itself: two border columns plus the one-cell
@@ -1488,8 +1451,6 @@ drawTrackerHeader state column row tracker expanded =
     . padLeftRight 1
     . padTop (Pad 1)
     $ marker
-      <+> drawBadge (solveBadgePart state (IssueItem tracker.trackerIssue))
-      <+> drawBadge (reviewBadgePart state (IssueItem tracker.trackerIssue))
       <+> withAttr headerAttribute (txtWrap headerText)
   where
     selected = not expanded && state.appSelectedColumn == column && selectedRow state column == row
@@ -1577,91 +1538,6 @@ cardLabelRows env item innerWidth = map drawRow (labelChipRows innerWidth cardLa
     drawChip (LabelChip name) = withAttr (labelAttribute env.cardConfig.resolvedWorkflow name) (txt (" " <> name <> " "))
     drawChip (OverflowChip count) = withAttr pendingAttr (txt (overflowChipText count))
 
--- | The badge one item's live solve draws beside its card, as the attribute
--- and the glyph rather than as the widget.
---
--- Split out because a badge is part of a card's /geometry/: it takes cells
--- from the width the frame lays its interior out at. Measuring a column asks
--- for the width and drawing asks for the widget, and both read this, so
--- neither can assume a badge the other did not.
-solveBadgePart :: AppState -> BoardItem -> Maybe (AttrName, Text)
-solveBadgePart _ (PullRequestItem _) = Nothing
-solveBadgePart state (IssueItem issue) = do
-  session <- Map.lookup issue.issueNumber state.appSolveSessions
-  pure (solveSessionAttribute session, solvePhaseGlyph state session)
-
-drawBadge :: Maybe (AttrName, Text) -> Widget Name
-drawBadge = maybe emptyWidget (\(attribute, glyph) -> withAttr attribute (txt glyph))
-
--- | What each 'SolvePhase' looks like as a badge. Solve and PR sessions
--- disagree about one arm only -- a finished solve has nothing left to do
--- while a finished PR review is ready -- so that arm is the parameter and
--- the rest of the table exists once.
-solvePhaseGlyphs :: PhaseGlyph -> SolvePhase -> PhaseGlyph
-solvePhaseGlyphs finished = \case
-  SolveStarting -> PhaseSpinner
-  SolveRunning -> PhaseSpinner
-  SolveInterrupting -> PhaseGlyphs "◆ " "! "
-  SolveAttention -> PhaseGlyphs "◆ " "! "
-  SolveFinished -> finished
-  SolveFailedPhase -> PhaseGlyphs "× " "x "
-  SolveKilledPhase -> PhaseGlyphs "× " "x "
-  SolveOrphanedPhase -> PhaseGlyphs "⚠ " "x "
-
-reviewPhaseGlyphs :: ReviewPhase -> PhaseGlyph
-reviewPhaseGlyphs = \case
-  ReviewStarting -> PhaseSpinner
-  ReviewRunning -> PhaseSpinner
-  ReviewWaiting -> PhaseGlyphs "? " "? "
-  ReviewFinished -> PhaseGlyphs "✓ " "+ "
-  ReviewNeedsChanges -> PhaseGlyphs "! " "! "
-  ReviewFailed -> PhaseGlyphs "× " "! "
-  ReviewRevised -> PhaseGlyphs "◆ " "^ "
-  ReviewInterrupted -> PhaseGlyphs "· " "- "
-
-solvePhaseGlyphFor :: Bool -> SolveSession -> Text
-solvePhaseGlyphFor useAscii = renderPhaseGlyph useAscii (solvePhaseGlyphs (PhaseGlyphs "◇ " "+ "))
-
-pullRequestPhaseGlyphFor :: Bool -> PullRequestReviewSession -> Text
-pullRequestPhaseGlyphFor useAscii = renderPhaseGlyph useAscii (solvePhaseGlyphs (PhaseGlyphs "✓ " "+ "))
-
-reviewPhaseGlyphFor :: Bool -> ReviewSession -> Text
-reviewPhaseGlyphFor useAscii = renderPhaseGlyph useAscii reviewPhaseGlyphs
-
-solvePhaseGlyph :: AppState -> SolveSession -> Text
-solvePhaseGlyph state = solvePhaseGlyphFor state.appOptions.optionAscii
-
-pullRequestPhaseGlyph :: AppState -> PullRequestReviewSession -> Text
-pullRequestPhaseGlyph state = pullRequestPhaseGlyphFor state.appOptions.optionAscii
-
-reviewPhaseGlyph :: AppState -> ReviewSession -> Text
-reviewPhaseGlyph state = reviewPhaseGlyphFor state.appOptions.optionAscii
-
--- | 'solveBadgePart' for the review half: the pull-request review badge on a
--- pull request, and the issue review badge on an issue.
-reviewBadgePart :: AppState -> BoardItem -> Maybe (AttrName, Text)
-reviewBadgePart state (PullRequestItem pullRequest) = do
-  session <- Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions
-  pure (pullRequestSessionAttribute session, pullRequestPhaseGlyph state session)
-reviewBadgePart state (IssueItem issue) = do
-  session <- Map.lookup issue.issueNumber state.appReviewSessions
-  pure (reviewPhaseAttribute session.sessionPhase, reviewPhaseGlyph state session)
-
--- | The animated activity line a live solve or PR overlay shows. A session
--- kind with no activity clock ('sessionActivityStartedAt' absent) simply
--- shows no elapsed time, rather than this inventing one for it.
-drawLiveActivity :: AppState -> Bool -> Int -> Maybe UTCTime -> Text -> Widget Name
-drawLiveActivity state isLive frame startedAt activity
-  | not isLive = emptyWidget
-  | otherwise =
-      withAttr reviewingAttr
-        . txtWrap
-        $ activityGlyph <> " " <> timedActivity state.appNow True startedAt activity
-  where
-    activityGlyph
-      | state.appOptions.optionAscii = "*"
-      | otherwise = spinnerGlyph frame
-
 -- | How many rows the base frame keeps for itself below an open overlay: the
 -- footer it is about to draw, plus its own bottom border.
 --
@@ -1723,29 +1599,17 @@ overlayHintLine state = footerHintRow . overlayHintChips state
 --
 -- This module writes none of that text. The details and help overlays are
 -- scopes of the table in "Kanban.UI.Keys" and project from it exactly as the
--- board's line does; the other five declare their chips beside their own
--- decoders, and the three live-agent overlays resolve theirs against the
--- focused session so the row follows its effective mode. What is here is the
--- routing and nothing else -- the same reason the help overlay's rows are
--- assembled rather than transcribed.
+-- board's line does; the incidents panel declares its chips beside its own
+-- decoder. What is here is the routing and nothing else -- the same reason the
+-- help overlay's rows are assembled rather than transcribed.
 --
 -- The two scopes of the base table follow the operating mode exactly as the
--- board's own line does, and for the same reason: a details overlay whose
--- footer named `r`, `S`, and `A` on a board that loads no provider would
--- advertise three keys that answer with a refusal. `x` is the fourth chip
--- this footer carries and it stays in every mode, because the work it
--- terminates can outlive the roster that started it (issue #546).
+-- board's own line does, and for the same reason.
 overlayHintChips :: AppState -> Overlay -> [Text]
 overlayHintChips state = \case
   HelpOverlay -> map footerHint (modeScopeBindings state.appOperatingMode HelpScope)
   DetailsOverlay _ -> map footerHint (modeScopeBindings state.appOperatingMode DetailsScope)
-  SettingsOverlay -> settingsFooterHints
-  ProcessesOverlay -> processesFooterHints
   IncidentsOverlay -> incidentsFooterHints
-  SolveChooser _ _ -> solveChooserFooterHints
-  SolveOverlay issueNumber -> sessionOverlayHints solveSessionOps issueNumber state
-  PullRequestReviewOverlay number -> sessionOverlayHints pullRequestSessionOps number state
-  ReviewOverlay issueNumber -> sessionOverlayHints reviewSessionOps issueNumber state
 
 -- | The hint line a focused filter panel shows in place of the board's.
 --
@@ -1878,11 +1742,6 @@ cardStatusAttribute :: CardEnv -> BoardItem -> AttrName
 cardStatusAttribute env (PullRequestItem pullRequest) = pullRequestCardAttribute env.cardConfig.resolvedWorkflow pullRequest
 cardStatusAttribute env item
   | isProblem env.cardConfig.resolvedWorkflow item = problemAttr
-  | Just solveAttribute <- solveCardAttribute env item = solveAttribute
   | itemHasAmberWarning env.cardConfig.resolvedWorkflow item = pendingAttr
   | isApproved env.cardConfig.resolvedWorkflow item = approvedAttr
 cardStatusAttribute _ _ = neutralAttr
-
-solveCardAttribute :: CardEnv -> BoardItem -> Maybe AttrName
-solveCardAttribute _ (PullRequestItem _) = Nothing
-solveCardAttribute env (IssueItem issue) = solveSessionAttribute <$> Map.lookup issue.issueNumber env.cardSolveSessions

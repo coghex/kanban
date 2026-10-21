@@ -54,9 +54,7 @@ module Kanban.ApprovalService
 
     -- * Control
     ApprovalToggle (..),
-    approvalContentionNotice,
     approvalObservationSettles,
-    approvalOwnsCanonicalReview,
     approvalServiceIsRunning,
     liveApprovalContention,
     approvalToggle,

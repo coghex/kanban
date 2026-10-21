@@ -24,7 +24,6 @@ module Kanban.Domain
     targetPreconditionForItem,
     targetPreconditionHolds,
     targetPreconditionMessage,
-    targetPreconditionNumber,
     MergeState (..),
     NativeSubIssues (..),
     PullRequest (..),

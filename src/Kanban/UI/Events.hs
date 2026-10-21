@@ -9,19 +9,14 @@ module Kanban.UI.Events
     dashboardQuitRequest,
     applyCardClick,
     applyIncidentsAction,
-    applyRunningProcessClick,
     blockedByCompletedLoad,
     boardActionGate,
     boardMouseAction,
     boardMousePress,
     handleEvent,
     incidentsAction,
-    killSelectionNotice,
     mutatesSelectedWork,
-    runningProcessClickRefusal,
     settleBoardAction,
-    settledSessionRefusal,
-    sharedFullscreenKey,
     overlayExtent,
     overlayMouseAction,
     quitDecision,
@@ -34,12 +29,11 @@ where
 import Brick
 import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO )
-import Control.Monad (void, when)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.Time (getCurrentTime )
 import qualified Graphics.Vty as Vty
 import Kanban.Browser (OpenFailure, openFailureNotice, openPage)
@@ -50,22 +44,7 @@ import Kanban.GitHub
     coordinatorMustSettle,
     shutdownRefreshCoordinator
     )
-import Kanban.Models (saveModelRoster)
-import Kanban.Process (killManagedProcess )
-import Kanban.Solve
-  ( SolveWorkflow (..),
-    SolverBrand (..)
-    )
-import Kanban.Settings
-  ( ChatVerbosity (..),
-    Settings (..),
-    saveSettings,
-    verbosityLabel
-  )
 import Kanban.Workflow (entryItem )
-import Kanban.Worker
-  ( terminateWorker
-    )
 import Kanban.UI.Board (columnScrollStep, refreshColumnWindows)
 import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
@@ -79,34 +58,18 @@ import Kanban.UI.Filter
     focusedFilterPanel,
     focusedSearch,
     readOnlyHistoryRefusal,
-    readOnlyHistoryRefusalFor,
     settleFacetCounts,
     toggleFilterBoxFromClick,
     toggleFilterPanel,
   )
 import Kanban.UI.Keys
-import Kanban.UI.SessionCore
-import Kanban.UI.Settings
-  ( RosterWrite (..),
-    SettingsInput,
-    SettingsOutcome (..),
-    applyRosterWrite,
-    openSettings,
-    settingsInput,
-    settingsOutcome
-  )
 import Kanban.UI.State
-import Kanban.UI.Transcript
 import Kanban.UI.Search
 import Kanban.UI.Selection
-import Kanban.UI.Session
-import Kanban.UI.SessionEvents
+import Kanban.UI.Incidents
 import Kanban.UI.Refresh
-import Kanban.UI.Solve
 import Kanban.UI.Approval
-import Kanban.UI.PullRequest
-import Kanban.UI.Review
-import Kanban.UI.Worker
+import Kanban.UI.Drainer
 import Kanban.UI.Reconcile
 
 -- | Every event the dashboard receives, and the one place the fullscreen flag
@@ -191,79 +154,24 @@ dispatchEvent event = do
     (_, AppEvent (ApprovalStatusRefreshed issuedUnder result)) -> applyApprovalStatus issuedUnder result
     (_, AppEvent (ApprovalToggleFinished transition result)) -> applyApprovalToggle transition result
     (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
-    (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applySessionTick reviewSessionOps issueNumber generation
-    (_, AppEvent (SolveProtocolEvent solveEvent)) -> applySolveEvent solveEvent
-    (_, AppEvent (SolveAnimationTick issueNumber generation)) -> applySessionTick solveSessionOps issueNumber generation
-    (_, AppEvent SolveBoardRefreshRequested) -> startBoardRefresh
-    (_, AppEvent (PullRequestProtocolEvent flowEvent)) -> applyPullRequestFlowEvent flowEvent
-    (_, AppEvent (PullRequestAnimationTick number generation)) -> applySessionTick pullRequestSessionOps number generation
-    (_, AppEvent (WorkerRegistered descriptor)) -> registerWorker descriptor
-    (_, AppEvent (WorkerProtocolEvent descriptor workerEvent)) -> applyWorkerProtocolEvent descriptor workerEvent
-    (_, AppEvent (WorkerDiscoveryFinished descriptors)) -> mapM_ attachDiscoveredWorker descriptors
-    (_, AppEvent (IssueActionRefused issueNumber notice)) -> applyIssueActionRefused issueNumber notice
     -- The tick clears only the instance it was armed for, and only once that
     -- instance's deadline has actually passed; everything else about the
     -- decision is 'Kanban.UI.Util.noticeExpiryApplied''s.
     (_, AppEvent (NoticeExpired instanceId)) -> modify (noticeExpiryApplied instanceId)
     (_, AppEvent (PageOpenFinished url outcome)) -> reportPageOpen url outcome
-    -- @f@ is the one binding live in every overlay that honors it, so it is
-    -- resolved once here rather than in each overlay's own arms below. It has
-    -- to come first: settings, the process inspector, and the incidents panel
-    -- each answer /every/ event they receive, so a letter reaching them is a
-    -- letter they have swallowed. The three live-agent overlays are excluded
-    -- because @f@ is a command there only in normal mode -- in insert mode it
-    -- is a character typed into the draft -- which is their own decoder's
-    -- decision to make ('Kanban.UI.SessionCore.sessionInputEvent').
-    (Just overlay, VtyEvent keyEvent)
-      | sharedFullscreenKey overlay,
-        Just ToggleFullscreen <- boardAction OverlayScope keyEvent ->
+    -- @f@ is the one binding live in every overlay, so it is resolved once
+    -- here rather than in each overlay's own arms below. It has to come first:
+    -- the incidents panel answers /every/ event it receives, so a letter
+    -- reaching it is a letter it has swallowed.
+    (Just _, VtyEvent keyEvent)
+      | Just ToggleFullscreen <- boardAction OverlayScope keyEvent ->
           modify toggleOverlayFullscreen
     -- The help overlay answers nothing of its own, so its scoped bindings can
     -- be resolved before the overlays below, which do.
     (Just HelpOverlay, VtyEvent keyEvent)
       | Just action <- boardAction HelpScope keyEvent -> applyBoardAction action
-    -- The settings overlay answers every event it receives, so its policy is
-    -- one total decoder rather than an arm per key: 'settingsInput' names the
-    -- input, 'settingsOutcome' decides what it does, and only the roster
-    -- write below reaches a file.
-    (Just SettingsOverlay, settingsEvent) -> handleSettingsInput (settingsInput settingsEvent)
-    -- The keys these arms answer are named for the user by
-    -- 'processesFooterHints', which the base footer draws while the panel is
-    -- open (issue #525). A key added or dropped here owes that list a row.
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveProcessSelection 1
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveProcessSelection 1
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveProcessSelection (-1)
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> moveProcessSelection (-1)
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedAgentSession
-    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killSelectedAgentSession
-    (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollUp _ _) -> scrollProcesses (-3)
-    (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollDown _ _) -> scrollProcesses 3
-    (Just ProcessesOverlay, MouseDown (ProcessTarget ref) Vty.BLeft _ _) -> selectOrOpenAgentSession ref
-    (Just ProcessesOverlay, MouseDown ProcessesPanel _ _ _) -> pure ()
-    (Just ProcessesOverlay, _) -> pure ()
     (overlay, incidentEvent)
       | Just action <- incidentsAction overlay incidentEvent -> handleIncidentsAction action
-    -- The three live-agent overlays no longer answer Esc here. It is modal
-    -- inside them -- from insert it returns to normal, from normal it hides
-    -- the overlay -- so it is decoded beside the rest of the session table by
-    -- 'sessionInputEvent' rather than short-circuited above it (issue #515).
-    (Just (ReviewOverlay issueNumber), mouseEvent)
-      | Just action <- overlayMouseAction (overlayExtent state) ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
-    (Just (ReviewOverlay issueNumber), reviewInputEvent) ->
-      handleSessionOverlayEvent reviewSessionOps reviewInputHooks issueNumber reviewInputEvent
-    (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> startIssueSolve issue workflow CodexSolver
-    (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> startIssueSolve issue workflow ClaudeSolver
-    (Just (SolveChooser _ _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just (SolveChooser _ _), _) -> pure ()
-    (Just (SolveOverlay issueNumber), mouseEvent)
-      | Just action <- overlayMouseAction (overlayExtent state) SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
-    (Just (SolveOverlay issueNumber), solveInputEvent) ->
-      handleSessionOverlayEvent solveSessionOps solveInputHooks issueNumber solveInputEvent
-    (Just (PullRequestReviewOverlay number), mouseEvent)
-      | Just action <- overlayMouseAction (overlayExtent state) PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
-    (Just (PullRequestReviewOverlay number), inputEvent) ->
-      handleSessionOverlayEvent pullRequestSessionOps pullRequestInputHooks number inputEvent
     (Just (DetailsOverlay _), VtyEvent keyEvent)
       | Just action <- boardAction DetailsScope keyEvent -> applyBoardAction action
     (Just (DetailsOverlay _), mouseEvent)
@@ -312,7 +220,7 @@ data BoardMouseAction
   | ToggleFilterBoxFromClick FilterBox
   | ToggleEpicFromClick BoardColumn Int Int
   | SelectOrOpenCardAt BoardColumn Int
-  | OpenRunningProcessAt BoardColumn Int
+  | SelectCardOnlyAt BoardColumn Int
   | ScrollColumnBy BoardColumn Int
   deriving stock (Eq, Show)
 
@@ -348,7 +256,7 @@ boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (EpicTarget column _ _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-columnScrollStep))
   (EpicTarget column _ _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column columnScrollStep)
   (EpicTarget column row trackerNumber, Vty.BLeft, _) -> Just (ToggleEpicFromClick column row trackerNumber)
-  (CardTarget column row, Vty.BRight, _) -> Just (OpenRunningProcessAt column row)
+  (CardTarget column row, Vty.BRight, _) -> Just (SelectCardOnlyAt column row)
   (CardTarget column row, Vty.BLeft, _) -> Just (SelectOrOpenCardAt column row)
   (CardTarget column _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-columnScrollStep))
   (CardTarget column _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column columnScrollStep)
@@ -377,16 +285,15 @@ boardMousePress = \case
   ToggleFilterBoxFromClick box -> toggleFilterBoxFromClick box
   ToggleEpicFromClick column row trackerNumber -> toggleTrackerState column row trackerNumber
   SelectOrOpenCardAt column row -> applyCardClick column row
-  OpenRunningProcessAt column row -> applyRunningProcessClick column row
+  SelectCardOnlyAt column row -> selectCardOnly column row
   -- Scrolling a viewport is not a state change; all the state carries is that
   -- this frame must not drag the selection back into view.
   ScrollColumnBy _ _ -> \state -> state {appEnsureSelectionVisible = False}
 
 -- | Carries out one decided press: its effect on the state, and then the
--- five things that are not state — the viewport scroll, the controller
+-- four things that are not state — the viewport scroll, the controller
 -- handoff a drainer press makes, the controller handoff an approval press
--- makes, the update an update press starts, and the transcript a newly opened
--- session overlay has to be shown the tail of.
+-- makes, and the update an update press starts.
 applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
 applyBoardMouseAction action = do
   before <- get
@@ -401,11 +308,6 @@ applyBoardMouseAction action = do
     -- The key's own dispatch, not a second call to whatever it happens to
     -- reach today, so the click cannot acquire a refresh path of its own.
     RefreshAllFromClick -> applyBoardAction RefreshAll
-    OpenRunningProcessAt _ _ -> do
-      after <- get
-      when (after.appOverlay /= before.appOverlay) $ do
-        presentTranscriptTail
-        armVisibleReviewTicks
     _ -> pure ()
 
 -- | Carries out one binding from "Kanban.UI.Keys". Total in 'BoardAction', so
@@ -439,15 +341,11 @@ data BoardActionGate
 --
 -- The operating mode is asked first, and that ordering is the contract rather
 -- than an accident: the two gates below it resolve the card in front of the
--- user, and a board that spawns nothing must refuse `r`, `S`, and `A` with
--- the reason that is actually true of it -- the roster loads no provider --
--- however the selection happens to be sitting. Settled history and the
--- completed-history blocker are facts about /that card/, and they are the
--- right answer only once there is a mode in which the key could work at all.
--- `a`, the fourth binding the mode refuses, meets neither of the two below,
--- so for it the ordering decides nothing; `x` is the other way round, and
--- since issue #546 the mode has no answer for that key at all, leaving the
--- card's own two gates to give the only one there is.
+-- user, and a board that spawns nothing must refuse `a` with the reason that
+-- is actually true of it -- the roster loads no provider -- however the
+-- selection happens to be sitting. Settled history and the completed-history
+-- blocker are facts about /that card/, and they are the right answer only once
+-- there is a mode in which the key could work at all.
 --
 -- Pure, and the whole of what 'applyBoardAction' decides, so a press can be
 -- taken and inspected without a terminal.
@@ -460,9 +358,9 @@ boardActionGate state action
 
 -- | What a press the gate settled does to the state, and the whole of it.
 --
--- A refusal writes one field and nothing else -- no session is inserted or
--- reopened, no chooser or overlay opens, no process is spawned or killed, and
--- the approval service is neither started nor stopped -- because that is what
+-- A refusal writes one field and nothing else -- no overlay opens, no process
+-- is spawned or killed, and the approval service is neither started nor
+-- stopped -- because that is what
 -- 'Kanban.UI.State.setNotice', the arm above, does. Written out here so the
 -- suite can take a populated dashboard through a refused press and hold every
 -- one of those to it.
@@ -496,18 +394,13 @@ blockedByCompletedLoad = \case
   ToggleEpic -> True
   ShowDetails -> True
   OpenCardPage -> True
-  ReviewSelection -> True
-  SolveSelection -> True
-  AutoSolveSelection -> True
   MergeDoneCard -> True
-  KillWorking -> True
   ShowFilter -> False
   -- Reaches no card: it resizes whichever overlay is already open, and the
   -- blocker is a board-side surface with no overlay over it in the first
   -- place.
   ToggleFullscreen -> False
   DismissOrClose -> False
-  ShowProcesses -> False
   ShowIncidents -> False
   RefreshAll -> False
   ToggleApproval -> False
@@ -517,7 +410,6 @@ blockedByCompletedLoad = \case
   -- blocker that is drawing none of them still has a footer, a filter panel,
   -- and a board to come back to.
   ToggleExcerpts -> False
-  ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
   QuitDashboard -> False
@@ -527,11 +419,9 @@ blockedByCompletedLoad = \case
 --
 -- One decision covering every mutating binding, taken before any of them
 -- resolves a target, so a completed card refuses ahead of the wrong-kind,
--- approval, drainer-state, structural, reusable-session and process-presence
--- errors each arm would otherwise report. Each arm re-asks it at its own
--- launch or termination boundary, which is what a chooser, an overlay, or a
--- session opened before a refresh needs; this is what makes the key press
--- itself refuse.
+-- approval and drainer-state errors each arm would otherwise report. The arm
+-- re-asks it at its own boundary, which is what an overlay opened before a
+-- refresh needs; this is what makes the key press itself refuse.
 readOnlyHistoryGate :: AppState -> BoardAction -> Maybe Text
 readOnlyHistoryGate state action
   | mutatesSelectedWork action = subject >>= readOnlyHistoryRefusal state
@@ -542,7 +432,7 @@ readOnlyHistoryGate state action
     -- collapsed group draws.
     subject = case state.appOverlay of
       Just (DetailsOverlay item) -> Just item
-      _ -> selectedReviewItem state
+      _ -> selectedBoardItem state
 
 -- | Which bindings act on the work a card stands for rather than only reading
 -- it or moving around it.
@@ -552,11 +442,7 @@ readOnlyHistoryGate state action
 -- whether settled history is allowed to reach it.
 mutatesSelectedWork :: BoardAction -> Bool
 mutatesSelectedWork = \case
-  ReviewSelection -> True
-  SolveSelection -> True
-  AutoSolveSelection -> True
   MergeDoneCard -> True
-  KillWorking -> True
   NextCard -> False
   PreviousCard -> False
   PreviousColumn -> False
@@ -570,14 +456,12 @@ mutatesSelectedWork = \case
   OpenCardPage -> False
   ToggleFullscreen -> False
   DismissOrClose -> False
-  ShowProcesses -> False
   ShowIncidents -> False
   RefreshAll -> False
   ToggleApproval -> False
   ToggleDrainer -> False
   ToggleSidebar -> False
   ToggleExcerpts -> False
-  ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
   QuitDashboard -> False
@@ -586,7 +470,6 @@ dispatchBoardAction :: BoardAction -> EventM Name AppState ()
 dispatchBoardAction = \case
   NextCard -> moveCard 1
   PreviousCard -> moveCard (-1)
-  KillWorking -> onSelection killItemWorkingProcess killSelectedWorkingProcess
   PreviousColumn -> moveColumn (-1)
   NextColumn -> moveColumn 1
   FirstItem -> selectBoundary False
@@ -596,10 +479,6 @@ dispatchBoardAction = \case
   OpenCardPage -> onSelection openItemPage openSelectedPage
   ToggleFullscreen -> modify toggleOverlayFullscreen
   DismissOrClose -> closeOverlay
-  ReviewSelection -> onSelection startItemReview startSelectedReview
-  SolveSelection -> onSelection (openItemSolveChooser SolveOnly) (openSelectedSolveChooser SolveOnly)
-  AutoSolveSelection -> onSelection (openItemSolveChooser AutoSolve) (openSelectedSolveChooser AutoSolve)
-  ShowProcesses -> openProcesses
   ShowIncidents -> handleIncidentsAction OpenIncidentsPanel
   RefreshAll -> startAllRefreshes
   ToggleApproval -> toggleApprovalService
@@ -607,7 +486,6 @@ dispatchBoardAction = \case
   MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
   ToggleExcerpts -> modify toggleCardExcerpts
-  ShowSettings -> modify openSettings
   OpenSearch -> modify openSearch
   ShowFilter -> modify toggleFilterPanel
   ShowHelp -> modify (\current -> current {appOverlay = Just HelpOverlay})
@@ -632,13 +510,10 @@ handleSearchInput input = modify (applySearchInput input)
 
 -- | The quit key's decision.
 --
--- Nothing about an agent refuses it any more. A live issue review or revision
--- used to, because its lifecycle was held in this process's memory and
--- quitting would have thrown it away mid-turn; SAG-10 moved that lifecycle
--- into the repository review host, so an issue action outlives the dashboard
--- exactly as a solve or a pull-request worker always has (requirement 3).
+-- Nothing about an agent is involved: the dashboard starts none, and quitting
+-- never waits on, signals, or mentions one.
 --
--- What is left is about the @gh@ this dashboard owns. With nothing queued or
+-- The @gh@ this dashboard owns is what the decision is about. With nothing queued or
 -- running there is nothing to stop and the halt is immediate, which is what
 -- keeps an ordinary quit instant; otherwise the queued work is cancelled and
 -- the running fetch is put through the same verified cleanup a refresh
@@ -659,14 +534,9 @@ requestDashboardQuit = do
 
 -- | What the quit key does, as a value.
 --
--- Pure so that requirement 3 is assertable: what has to be shown is that a
--- dashboard holding a live issue action still quits, and the way to show it is
--- to hand this function such a state and get 'QuitImmediate' back. The old
--- refusal was reachable only from inside 'EventM', which is why the notice it
--- raised outlived several attempts to describe it.
---
--- The coordinator's answer is a parameter rather than read here for the same
--- reason it always was: it is the one input that needs IO.
+-- Pure so the decision is assertable without a terminal. The coordinator's
+-- answer is a parameter rather than read here because it is the one input
+-- that needs IO.
 data QuitRequest
   = -- | A settle this dashboard already started.
     QuitAlreadySettling
@@ -718,26 +588,6 @@ completeDashboardQuit :: Maybe GhCleanupFailure -> EventM Name AppState ()
 completeDashboardQuit verdict = case quitDecision verdict of
   QuitHalts -> halt
   QuitHeldBack notice -> modify (\current -> noticeSet notice current {appQuitPending = False})
-
--- | Which overlays answer @f@ through the shared arm in 'dispatchEvent'
--- rather than through a decoder of their own.
---
--- Total in 'OverlaySurface' rather than a wildcard over the two exclusions:
--- an overlay added later has to say which side of this it is on, because a
--- surface that honors the toggle and is on neither side would silently have
--- no way to reach it. The chooser honors nothing, and the three live-agent
--- overlays answer the letter from their own normal mode.
-sharedFullscreenKey :: Overlay -> Bool
-sharedFullscreenKey overlay = case overlaySurface overlay of
-  HelpSurface -> True
-  SettingsSurface -> True
-  ProcessesSurface -> True
-  IncidentsSurface -> True
-  DetailsSurface -> True
-  SolveChooserSurface -> False
-  ReviewSurface -> False
-  SolveSurface -> False
-  PullRequestReviewSurface -> False
 
 -- | Whether the overlay a click landed over is drawn windowed or fullscreen,
 -- which is the whole of what the mouse policy below needs to know about it.
@@ -805,43 +655,6 @@ applyOverlayMouseAction scrollOverlay = \case
   OverlayMouseScroll amount -> scrollOverlay amount
   OverlayMouseClose -> closeOverlay
   OverlayMouseNoOp -> pure ()
-
--- | Carries out one settings input.
---
--- The only step that is not already decided by 'settingsOutcome' is the write
--- itself: 'saveModelRoster' runs here, and its result — not the proposal —
--- is what 'applyRosterWrite' turns into state. A roster the file refused
--- therefore never reaches the screen, which is what keeps this process from
--- spawning on a value that disappears at the next restart.
-handleSettingsInput :: SettingsInput -> EventM Name AppState ()
-handleSettingsInput input = do
-  state <- get
-  case settingsOutcome input state.appModelRoster state.appSettingsFocus of
-    SettingsUnchanged -> pure ()
-    SettingsClosed -> closeOverlay
-    SettingsVerbosityChosen verbosity -> chooseChatVerbosity verbosity
-    SettingsRefused message -> setNotice message
-    SettingsRefocused focus scrolled -> do
-      modify (\current -> current {appSettingsFocus = focus})
-      when (scrolled /= 0) (vScrollBy (viewportScroll SettingsViewport) scrolled)
-    SettingsRosterWrite write -> do
-      result <- liftIO (saveModelRoster write.rosterWriteRoster)
-      modify (applyRosterWrite result write)
-
-chooseChatVerbosity :: ChatVerbosity -> EventM Name AppState ()
-chooseChatVerbosity verbosity = do
-  state <- get
-  let settings = state.appSettings {settingsChatVerbosity = verbosity}
-  result <- liftIO (saveSettings settings)
-  case result of
-    Left message -> setNotice message
-    Right () ->
-      modify
-        ( \current ->
-            noticeSet
-              ("Chat output set to " <> Text.toLower (verbosityLabel verbosity) <> " · full logs remain unchanged")
-              current {appSettings = settings}
-        )
 
 -- | What one event does to the incidents panel. Separated from the dispatch
 -- that carries it out so the whole interaction — opening the panel, moving,
@@ -939,7 +752,7 @@ applyIncidentActivation :: IncidentActivation -> AppState -> AppState
 applyIncidentActivation activation state =
   maybe noticeCleared noticeSet activation.incidentActivationNotice
     . selectWork
-    $ state {appOverlay = activation.incidentActivationSession >>= sessionOverlayFor}
+    $ state {appOverlay = Nothing}
   where
     selectWork current = case activation.incidentActivationWork of
       -- No row to go to: column, row, and tracker expansion are all left
@@ -958,39 +771,25 @@ applyIncidentActivation activation state =
             appEnsureSelectionVisible = True
           }
 
-sessionOverlayFor :: AgentSessionRef -> Maybe Overlay
-sessionOverlayFor (SolveAgent issueNumber) = Just (SolveOverlay issueNumber)
-sessionOverlayFor (PullRequestAgent number) = Just (PullRequestReviewOverlay number)
-sessionOverlayFor (ReviewAgent issueNumber) = Just (ReviewOverlay issueNumber)
-sessionOverlayFor (WorkerAgent _) = Nothing
-
--- | Dispatches one panel action, adding the two effects the pure transition
--- cannot express: the viewport scroll a wheel event asks for, and settling a
--- session overlay that activation just opened at its live tail.
+-- | Dispatches one panel action, adding the one effect the pure transition
+-- cannot express: the viewport scroll a wheel event asks for.
 handleIncidentsAction :: IncidentsAction -> EventM Name AppState ()
 handleIncidentsAction action = do
-  before <- get
   modify (applyIncidentsAction action)
   case action of
     ScrollIncidentsPanel amount -> vScrollBy (viewportScroll IncidentsViewport) amount
     _ -> pure ()
-  after <- get
-  when (after.appOverlay /= before.appOverlay) $ case after.appOverlay of
-    Just (ReviewOverlay _) -> presentTranscriptTail >> armVisibleReviewTicks
-    Just (SolveOverlay _) -> presentTranscriptTail
-    Just (PullRequestReviewOverlay _) -> presentTranscriptTail
-    _ -> pure ()
 
 -- | Open the board selection's own GitHub page, promoted to the epic a
 -- collapsed group draws exactly as the keys that act on a card are
--- ('Kanban.UI.Session.selectedReviewItem').
+-- ('Kanban.UI.Selection.selectedBoardItem').
 --
 -- Nothing at all when there is no selection: an empty column has no page, and
 -- there is no launch to make for one.
 openSelectedPage :: EventM Name AppState ()
 openSelectedPage = do
   state <- get
-  mapM_ openItemPage (selectedReviewItem state)
+  mapM_ openItemPage (selectedBoardItem state)
 
 -- | Hand one card's retained URL to the platform's opener.
 --
@@ -1011,252 +810,8 @@ reportPageOpen :: Text -> Maybe OpenFailure -> EventM Name AppState ()
 reportPageOpen _ Nothing = pure ()
 reportPageOpen url (Just failure) = setNotice (openFailureNotice url failure)
 
-openProcesses :: EventM Name AppState ()
-openProcesses = do
-  state <- get
-  let resolved = resolveProcessSelection (agentSessionEntries state) state.appProcessSelection
-  modify
-    ( \current ->
-        noticeCleared
-          current
-            { appOverlay = Just ProcessesOverlay,
-              appProcessSelection = resolved
-            }
-    )
-
-moveProcessSelection :: Int -> EventM Name AppState ()
-moveProcessSelection amount = do
-  state <- get
-  let entries = agentSessionEntries state
-      resolved = resolveProcessSelection entries state.appProcessSelection
-      maximumIndex = max 0 (length entries - 1)
-      nextIndex = max 0 (min maximumIndex (resolved.processSelectionRow + amount))
-      nextSelection = ProcessSelection (agentSessionRef <$> safeIndex nextIndex entries) nextIndex
-  modify (\current -> current {appProcessSelection = nextSelection})
-
-scrollProcesses :: Int -> EventM Name AppState ()
-scrollProcesses amount = do
-  moveProcessSelection amount
-  vScrollBy (viewportScroll ProcessesViewport) amount
-
-selectOrOpenAgentSession :: AgentSessionRef -> EventM Name AppState ()
-selectOrOpenAgentSession clickedRef = do
-  state <- get
-  case resolveProcessClick (agentSessionEntries state) state.appProcessSelection clickedRef of
-    ProcessClickIgnored -> pure ()
-    ProcessClickOpen -> openSelectedAgentSession
-    ProcessClickSelect selection -> modify (\current -> current {appProcessSelection = selection})
-
-openSelectedAgentSession :: EventM Name AppState ()
-openSelectedAgentSession = do
-  state <- get
-  let entries = agentSessionEntries state
-      resolved = resolveProcessSelection entries state.appProcessSelection
-  modify (\current -> current {appProcessSelection = resolved})
-  case safeIndex resolved.processSelectionRow entries of
-    Nothing -> setNotice "No agent session is selected"
-    Just entry -> case entry.agentSessionRef of
-      SolveAgent issueNumber -> do
-        modify (\current -> noticeCleared current {appOverlay = Just (SolveOverlay issueNumber)})
-        presentTranscriptTail
-      PullRequestAgent number -> do
-        modify (\current -> noticeCleared current {appOverlay = Just (PullRequestReviewOverlay number)})
-        presentTranscriptTail
-      ReviewAgent issueNumber -> do
-        modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issueNumber)})
-        presentTranscriptTail
-        armVisibleReviewTicks
-      WorkerAgent _ -> setNotice ("This persistent worker is waiting for its issue or PR metadata; press " <> actionKeyText RefreshAll <> " to refresh the board")
-
-killSelectedAgentSession :: EventM Name AppState ()
-killSelectedAgentSession = do
-  state <- get
-  let entries = agentSessionEntries state
-      resolved = resolveProcessSelection entries state.appProcessSelection
-  modify (\current -> current {appProcessSelection = resolved})
-  case safeIndex resolved.processSelectionRow entries of
-    Nothing -> setNotice "No agent session is selected"
-    Just entry
-      -- The processes overlay reaches every kill route without going through
-      -- a card, so the read-only-history refusal has to be asked here too, and
-      -- ahead of the process-presence answer below: a session left over from
-      -- work that has since closed or merged is history, whatever it still
-      -- holds open.
-      | Just notice <- settledSessionRefusal state entry.agentSessionRef -> setNotice notice
-      | not entry.agentSessionLive -> setNotice (entry.agentSessionLabel <> " has no live process to kill")
-      | otherwise -> case entry.agentSessionRef of
-          SolveAgent issueNumber -> killSolveAgent issueNumber
-          PullRequestAgent number -> case Map.lookup number state.appPullRequestReviewSessions of
-            Nothing -> setNotice "PR session is no longer available"
-            Just session -> killItemWorkingProcess (PullRequestItem session.sessionDetail.pullRequestSessionPullRequest)
-          ReviewAgent issueNumber -> killReviewAgent issueNumber
-          WorkerAgent identifier -> case Map.lookup identifier state.appWorkers of
-            Nothing -> setNotice "Persistent worker is no longer available"
-            Just descriptor -> do
-              modify
-                ( \current ->
-                    current
-                      { appWorkers = Map.delete identifier current.appWorkers,
-                        appWorkerMonitors = Set.delete identifier current.appWorkerMonitors
-                      }
-                )
-              void . liftIO . forkIO $ terminateWorker descriptor
-              setNotice ("Killing " <> entry.agentSessionLabel <> " and its process tree…")
-
--- | Whether one agent session names work the completed generation has
--- settled, and what to say instead of acting on it.
---
--- The processes overlay is keyed by session rather than by card, so this is
--- how a row reaches the same refusal every board and overlay route already
--- asks for. A worker whose descriptor is gone names no work at all, which is
--- the one case there is nothing left to refuse.
-settledSessionRefusal :: AppState -> AgentSessionRef -> Maybe Text
-settledSessionRefusal state reference =
-  agentSessionSubject state reference >>= readOnlyHistoryRefusalFor state
-
-killSolveAgent :: Int -> EventM Name AppState ()
-killSolveAgent issueNumber = do
-  state <- get
-  case (solveWorkerFor state issueNumber, Map.lookup issueNumber state.appSolveProcesses) of
-    (Nothing, Nothing) -> setNotice ("Solve #" <> showText issueNumber <> " has no live process to kill")
-    (worker, process) -> do
-      appendToSolveSession issueNumber
-        ( \session ->
-            session
-              { sessionPhase = SolveKilledPhase,
-                sessionActivity = "killing process tree",
-                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-              }
-        )
-      void . liftIO . forkIO $ case worker of
-        Just descriptor -> terminateWorker descriptor
-        Nothing -> mapM_ killManagedProcess process
-      setNotice ("Killing solve #" <> showText issueNumber <> " and its process tree…")
-
--- | The @x@ gate's review arm.
---
--- One durable command, whatever the stage. The host settles the child it
--- names: under a process-per-thread provider that is the thread's own process
--- and its descendants, under a shared one the thread's turn and its tool
--- subprocesses, and for a canonical stage the @approve_issues.py@ subprocess
--- and everything it started. None of those touches the host or a sibling
--- (requirement 11), which is exactly what a dashboard-side kill could not
--- promise once the client stopped living here.
-killReviewAgent :: Int -> EventM Name AppState ()
-killReviewAgent issueNumber = do
-  state <- get
-  if not (issueActionLive state issueNumber)
-    then setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
-    else do
-      requested <- terminateIssueAction issueNumber
-      -- Only for a kill that was actually recorded. An unwritable command
-      -- ledger means nothing was asked for, and the failure notice the
-      -- submission set is what the user needs to see instead.
-      when requested $
-        setNotice ("Killing issue review #" <> showText issueNumber <> " and its process tree…")
-
-killSelectedWorkingProcess :: EventM Name AppState ()
-killSelectedWorkingProcess = do
-  state <- get
-  case selectedReviewItem state of
-    Nothing -> setNotice killSelectionNotice
-    Just item -> killItemWorkingProcess item
-
--- | Shown when the kill binding is pressed with nothing killable selected. It
--- has to name that binding itself: @k@ is the select-previous binding, so a
--- reader who obeys a notice naming @k@ moves the selection instead of
--- retrying the kill. Naming it from the table is what keeps the two from
--- disagreeing again.
-killSelectionNotice :: Text
-killSelectionNotice = "Select a working issue or PR before pressing " <> actionKeyText KillWorking
-
--- | The termination boundary. Read-only history is refused ahead of the
--- process-presence check, so a settled card reports what it is rather than
--- that it has no live process — and a session left running against work that
--- has since closed is stopped through its own row, not through history.
-killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
-killItemWorkingProcess item = do
-  state <- get
-  case readOnlyHistoryRefusal state item of
-    Just notice -> setNotice notice
-    Nothing -> killLiveItemWorkingProcess item
-
-killLiveItemWorkingProcess :: BoardItem -> EventM Name AppState ()
-killLiveItemWorkingProcess (PullRequestItem pullRequest) = do
-  state <- get
-  let number = pullRequest.pullRequestNumber
-  case (pullRequestWorkerFor state number, Map.lookup number state.appPullRequestProcesses) of
-    (Nothing, Nothing) -> setNotice ("PR #" <> showText number <> " has no live process to kill")
-    (worker, process) -> do
-      appendToPullRequestSession number
-        ( \session ->
-            session
-              { sessionPhase = SolveKilledPhase,
-                sessionActivity = "killing process tree",
-                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-              }
-        )
-      void . liftIO . forkIO $ case worker of
-        Just descriptor -> terminateWorker descriptor
-        Nothing -> mapM_ killManagedProcess process
-      setNotice ("Killing PR workflow #" <> showText number <> " and its process tree…")
-killLiveItemWorkingProcess (IssueItem issue) = do
-  state <- get
-  let issueNumber = issue.issueNumber
-      solveProcess = Map.lookup issueNumber state.appSolveProcesses
-      solveWorker = solveWorkerFor state issueNumber
-      liveReview = issueActionLive state issueNumber
-  case (solveWorker, solveProcess, liveReview) of
-    (Nothing, Nothing, False) -> setNotice ("Issue #" <> showText issueNumber <> " has no live process to kill")
-    _ -> do
-      case (solveWorker, solveProcess) of
-        (Nothing, Nothing) -> pure ()
-        (worker, process) -> do
-          appendToSolveSession issueNumber
-            ( \session ->
-                session
-                  { sessionPhase = SolveKilledPhase,
-                    sessionActivity = "killing process tree",
-                    sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-                  }
-            )
-          void . liftIO . forkIO $ case worker of
-            Just descriptor -> terminateWorker descriptor
-            Nothing -> mapM_ killManagedProcess process
-      when liveReview (void (terminateIssueAction issueNumber))
-      setNotice ("Killing work for issue #" <> showText issueNumber <> " and its process tree…")
-
 scrollDetails :: Int -> EventM Name AppState ()
 scrollDetails = vScrollBy (viewportScroll DetailsViewport)
-
--- | The kind-specific half of each overlay's key table: what Enter submits,
--- what Ctrl-C interrupts, and -- for the review overlay alone -- what a
--- numbered choice answers. Everything else the three overlays do with a key
--- press is 'handleSessionOverlayEvent'.
-solveInputHooks :: SessionInputHooks
-solveInputHooks =
-  noSessionInputHooks
-    { sessionHookSubmit = submitSolveInput,
-      sessionHookInterrupt = interruptSolveSession,
-      sessionHookSubject = IssueId
-    }
-
-pullRequestInputHooks :: SessionInputHooks
-pullRequestInputHooks =
-  noSessionInputHooks
-    { sessionHookSubmit = submitPullRequestInput,
-      sessionHookInterrupt = interruptPullRequestSession,
-      sessionHookSubject = PullRequestId
-    }
-
-reviewInputHooks :: SessionInputHooks
-reviewInputHooks =
-  SessionInputHooks
-    { sessionHookSubmit = submitReviewInput,
-      sessionHookInterrupt = cancelReviewSession,
-      sessionHookChoice = chooseReviewOption,
-      sessionHookSubject = IssueId
-    }
 
 -- | What a left click on a board card does. A click that only selects leaves a
 -- live search running; one that opens details ends it, on the identity it
@@ -1272,39 +827,6 @@ applyCardClick column row state
         Nothing -> state
   | otherwise = selectCardOnly column row state
 
--- | What a right click on a board card does: select it, and open its live
--- session's overlay if it has one. Opening one ends a live search on the
--- identity it opened, the same way Enter and a details click do.
-applyRunningProcessClick :: BoardColumn -> Int -> AppState -> AppState
-applyRunningProcessClick column row state = case clicked >>= runningProcessOverlay state . entryItem of
-  Nothing -> selectedState
-  Just overlay -> case runningProcessClickRefusal state of
-    -- The second route to the three live-agent overlays. No mode takes it
-    -- away today, but the refusal is still asked here rather than dropped,
-    -- so a mode that later hides the inspector takes this route with it:
-    -- the click would then still select the card and open nothing. A card
-    -- with no live session is untouched either way -- that press was never
-    -- opening an agent overlay, so it keeps selecting and nothing else.
-    Just refusal -> noticeSet refusal selectedState
-    Nothing -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
-  where
-    clicked = safeIndex row (entriesFor state column)
-    selectedState = selectCardOnly column row state
-
--- | The refusal a right click that would open a live agent session owes the
--- operating mode.
---
--- Not a binding of its own, so it borrows a decision rather than restating
--- it, and 'ShowProcesses' is the binding it borrows from: this gesture opens
--- exactly the overlays `p` and then Enter already open, so it is an
--- inspection route rather than one that starts work, and it is available
--- wherever the inspector is (issue #546). It borrowed 'ReviewSelection' while
--- both were on the same side of the gate, which read the same then and would
--- now leave a no-agent board's own recovered sessions reachable by keyboard
--- and refused by mouse.
-runningProcessClickRefusal :: AppState -> Maybe Text
-runningProcessClickRefusal state = agentSurfaceRefusal state.appOperatingMode ShowProcesses
-
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =
   noticeCleared
@@ -1313,25 +835,3 @@ selectCardOnly column row state =
         appSelectedRows = Map.insert column row state.appSelectedRows,
         appEnsureSelectionVisible = True
       }
-
-runningProcessOverlay :: AppState -> BoardItem -> Maybe Overlay
-runningProcessOverlay state (PullRequestItem pullRequest)
-  | Map.member pullRequest.pullRequestNumber state.appPullRequestProcesses || pullRequestWorkerFor state pullRequest.pullRequestNumber /= Nothing =
-      Just (PullRequestReviewOverlay pullRequest.pullRequestNumber)
-  | otherwise = Nothing
-runningProcessOverlay state (IssueItem issue)
-  | issueReviewIsActive = Just (ReviewOverlay issueNumber)
-  | Map.member issueNumber state.appSolveProcesses || solveWorkerFor state issueNumber /= Nothing = Just (SolveOverlay issueNumber)
-  | Just pullRequestNumber <- boundAutoSolvePullRequest,
-    Map.member pullRequestNumber state.appPullRequestProcesses =
-      Just (PullRequestReviewOverlay pullRequestNumber)
-  | otherwise = Nothing
-  where
-    issueNumber = issue.issueNumber
-    issueReviewIsActive =
-      issueActionLive state issueNumber
-        || maybe False reviewSessionActive (Map.lookup issueNumber state.appReviewSessions)
-    boundAutoSolvePullRequest = do
-      session <- Map.lookup issueNumber state.appSolveSessions
-      progress <- session.sessionDetail.solveSessionAutoProgress
-      progress.autoSolvePullRequest

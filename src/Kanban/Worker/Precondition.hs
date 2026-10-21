@@ -122,9 +122,9 @@ preconditionReadSeconds spec = do
 -- its recorded target has demonstrably moved.
 --
 -- A prefix rather than a whole message, because the reading that moved is what
--- makes the refusal actionable and it differs every time. One spelling, read
--- by 'Kanban.Action.Types.settledWorkerFailure' to type the outcome, so the
--- two cannot drift apart.
+-- makes the refusal actionable and it differs every time. One spelling, so the
+-- prefix a refusal is written with and the one it is recognised by cannot
+-- drift apart.
 workerStaleTargetReason :: Text
 workerStaleTargetReason = "the recorded target moved before this turn began"
 

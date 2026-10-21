@@ -1,4 +1,4 @@
--- | The incidents panel: which sources contribute to it, how it tells an
+-- | The incidents panel: which source contributes to it, how it tells an
 -- unanswered source from an empty one, how a row keeps its identity across a
 -- refresh, and where activating one takes the user.
 module Spec.UI.Incidents (spec) where
@@ -16,8 +16,9 @@ import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAc
 import Kanban.Models (OperatingMode (..))
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Overlay (InteriorExtent (..), OverlayGeometry (..), drawIncidents, drawOverlay, overlayGeometryFor)
-import Kanban.UI.Session
+import Kanban.UI.Incidents
   ( BoardWorkLocation (..),
+    IncidentActivation (..),
     drainerSourceState,
     incidentEntries,
     incidentSourceLabel,
@@ -25,14 +26,11 @@ import Kanban.UI.Session
     resolveIncidentActivation,
     resolveIncidentClick,
     resolveIncidentSelection,
-    reviewIncidentPhase,
-    solveIncidentPhase,
   )
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Util (shownNotice)
 import Kanban.UI.Types
-  ( AgentSessionRef (..),
-    AppState (..),
+  ( AppState (..),
     DrainerSourceState (..),
     IncidentClickOutcome (..),
     IncidentEntry (..),
@@ -41,18 +39,10 @@ import Kanban.UI.Types
     IncidentSource (..),
     Name (..),
     Overlay (..),
-    ReviewPhase (..),
-    SolvePhase (..),
   )
-import Spec.Support.App
-  ( testAppState,
-    withPullRequestSession,
-    withReviewSession,
-    withSolveSession
-  )
+import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures
-  ( baseIssue,
-    basePullRequest,
+  ( basePullRequest,
     fixtureBoard,
     fixtureStandaloneEntry,
     fixtureTracker,
@@ -95,87 +85,18 @@ spec = do
                      DrainerIncidentRef "incident-crash"
                    ]
 
-    it "keeps session rows while the drainer source is being checked or is unavailable" $ do
-      checking <- solveSessionOn <$> unansweredState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing)
-      unavailable <- solveSessionOn <$> unansweredState (DrainerStatus DrainerError "not installed" DrainerServiceUnknown Nothing)
-      map (.incidentEntryRef) (incidentEntries checking)
-        `shouldBe` [SessionIncidentRef (SolveAgent 10)]
-      map (.incidentEntryRef) (incidentEntries unavailable)
-        `shouldBe` [SessionIncidentRef (SolveAgent 10)]
-
-  describe "incident panel session filtering" $ do
-    it "qualifies exactly the enumerated solve and pull-request phases" $ do
-      filter solveIncidentPhase everySolvePhase
-        `shouldBe` [SolveAttention, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
-      -- The adjacent active and completed phases are all excluded.
-      filter (not . solveIncidentPhase) everySolvePhase
-        `shouldBe` [SolveStarting, SolveRunning, SolveInterrupting, SolveFinished]
-
-    it "qualifies exactly the enumerated review phases" $ do
-      filter reviewIncidentPhase everyReviewPhase
-        `shouldBe` [ReviewWaiting, ReviewNeedsChanges, ReviewFailed]
-      -- ReviewRevised and ReviewInterrupted are terminal states the user
-      -- already knows about; the rest are active or completed.
-      filter (not . reviewIncidentPhase) everyReviewPhase
-        `shouldBe` [ReviewStarting, ReviewRunning, ReviewFinished, ReviewRevised, ReviewInterrupted]
-
-    it "builds a row for every qualifying session and none for the rest" $ do
-      mapM_
-        ( \phase -> do
-            state <- withSolveSession (baseIssue 10 []) phase <$> emptyState
-            map (.incidentEntryRef) (incidentEntries state)
-              `shouldBe` [SessionIncidentRef (SolveAgent 10)]
-        )
-        (filter solveIncidentPhase everySolvePhase)
-      mapM_
-        ( \phase -> do
-            state <- withSolveSession (baseIssue 10 []) phase <$> emptyState
-            incidentEntries state `shouldBe` []
-        )
-        (filter (not . solveIncidentPhase) everySolvePhase)
-      mapM_
-        ( \phase -> do
-            state <- withPullRequestSession (basePullRequest 42 [] False []) phase <$> emptyState
-            map (.incidentEntryRef) (incidentEntries state)
-              `shouldBe` [SessionIncidentRef (PullRequestAgent 42)]
-        )
-        (filter solveIncidentPhase everySolvePhase)
-      mapM_
-        ( \phase -> do
-            state <- withPullRequestSession (basePullRequest 42 [] False []) phase <$> emptyState
-            incidentEntries state `shouldBe` []
-        )
-        (filter (not . solveIncidentPhase) everySolvePhase)
-      mapM_
-        ( \phase -> do
-            state <- withReviewSession (baseIssue 11 []) phase <$> emptyState
-            map (.incidentEntryRef) (incidentEntries state)
-              `shouldBe` [SessionIncidentRef (ReviewAgent 11)]
-        )
-        (filter reviewIncidentPhase everyReviewPhase)
-      mapM_
-        ( \phase -> do
-            state <- withReviewSession (baseIssue 11 []) phase <$> emptyState
-            incidentEntries state `shouldBe` []
-        )
-        (filter (not . reviewIncidentPhase) everyReviewPhase)
-
   describe "incident panel row content" $ do
     it "names the work, what happened, and the source of every row" $ do
-      state <- solveSessionOn <$> reportingState [conflictIncident 42]
+      state <- reportingState [conflictIncident 42]
       case incidentEntries state of
-        [drainer, session] -> do
+        [drainer] -> do
           drainer.incidentEntrySubject `shouldBe` "PR #42 — PR 42"
           drainer.incidentEntryDetail `shouldBe` "PR #42 has a merge conflict in README."
           incidentSourceLabel drainer.incidentEntrySource `shouldBe` "pr drainer"
-          session.incidentEntrySubject `shouldBe` "issue #10 — Issue 10"
-          session.incidentEntryDetail `shouldBe` "failed · solve activity"
-          incidentSourceLabel session.incidentEntrySource `shouldBe` "kanban session"
-        entries -> expectationFailure ("expected one row per source, got " <> show (length entries))
+        entries -> expectationFailure ("expected one row, got " <> show (length entries))
 
     it "sanitizes every title, summary, and activity it renders" $ do
-      let hostileTitle = "Fix \ESC[31mthe\ESC[0m \x202Ereversed\x202C thing"
-          hostileSummary = "PR #42 broke:\ESC]0;title\BEL \x200Ehidden"
+      let hostileSummary = "PR #42 broke:\ESC]0;title\BEL \x200Ehidden"
           hostileActivity = "waiting\ESC[2K on \x061Cinput"
           hostileIncident =
             (conflictIncident 42)
@@ -185,13 +106,17 @@ spec = do
                 incidentPullRequest = Nothing,
                 incidentLastPullRequest = Nothing
               }
-      state <-
-        withSolveSession ((baseIssue 10 []) {issueTitle = hostileTitle}) SolveFailedPhase
-          <$> reportingState [hostileIncident]
-      let rendered =
+      state <- reportingState [hostileIncident]
+      -- The title of the pull request a row names is the board's own text, and
+      -- reaches the subject through the same sanitizer.
+      titled <- reportingState [conflictIncident 42]
+      let hostileTitle = "Fix \ESC[31mthe\ESC[0m \x202Ereversed\x202C thing"
+          hostilePullRequest = (basePullRequest 42 [] False []) {pullRequestTitle = hostileTitle}
+          titledBoard = fixtureBoard [(Reviewing, [Standalone (PullRequestItem hostilePullRequest)])]
+          rendered =
             concatMap
               (\entry -> [entry.incidentEntrySubject, entry.incidentEntryDetail])
-              (incidentEntries state)
+              (incidentEntries state <> incidentEntries titled {appBoard = titledBoard})
       -- Nothing reaching the terminal may carry an escape sequence, a
       -- bidirectional override, or a format control (docs/design.md §11).
       mapM_ (`shouldSatisfy` Data.Text.all safeCharacter) rendered
@@ -300,23 +225,17 @@ spec = do
       locateBoardWork navigationBoard (IssueId 999) `shouldBe` Nothing
       locateBoardWork navigationBoard (PullRequestId 999) `shouldBe` Nothing
 
-    it "expands a collapsed tracker so the child it selects is visible" $ do
-      state <- withSolveSession (baseIssue 812 []) SolveFailedPhase <$> navigationState
-      let activated = activateFirstRow state
-      activated.appSelectedColumn `shouldBe` Issues
-      Map.lookup Issues activated.appSelectedRows `shouldBe` Just 2
-      activated.appExpandedTrackers `shouldBe` Set.fromList [800]
+    it "expands a collapsed tracker so the child it selects is visible" $
+      fmap (.incidentActivationWork) (resolveIncidentActivation navigationBoard [workEntry (IssueId 812)] (namedRef "work"))
+        `shouldBe` Just (Just (BoardWorkLocation Issues 2 (Just 800)))
 
-    it "targets a represented tracker's header rather than reporting it absent" $ do
-      state <- withReviewSession (baseIssue 800 []) ReviewFailed <$> navigationState
-      let activated = activateFirstRow state
-      Map.lookup Issues activated.appSelectedRows `shouldBe` Just 1
+    it "targets a represented tracker's header rather than reporting it absent" $
       -- Nothing is expanded: a group header is drawn open or closed.
-      activated.appExpandedTrackers `shouldBe` Set.empty
-      shownNotice activated `shouldBe` Nothing
+      fmap (.incidentActivationWork) (resolveIncidentActivation navigationBoard [workEntry (IssueId 800)] (namedRef "work"))
+        `shouldBe` Just (Just (BoardWorkLocation Issues 1 Nothing))
 
   describe "incident panel activation" $ do
-    it "selects the card a drainer incident names, opening no session Kanban does not hold" $ do
+    it "selects the card a drainer incident names" $ do
       state <- reportingState [conflictIncident 42]
       let activated = activateFirstRow state
       activated.appSelectedColumn `shouldBe` Reviewing
@@ -324,32 +243,7 @@ spec = do
       activated.appOverlay `shouldBe` Nothing
       shownNotice activated `shouldBe` Nothing
 
-    it "selects the card and opens the session for a qualifying session row" $ do
-      solve <- withSolveSession (baseIssue 10 []) SolveAttention <$> navigationState
-      (activateFirstRow solve).appOverlay `shouldBe` Just (SolveOverlay 10)
-      Map.lookup Issues (activateFirstRow solve).appSelectedRows `shouldBe` Just 3
-
-      review <- withReviewSession (baseIssue 10 []) ReviewWaiting <$> navigationState
-      (activateFirstRow review).appOverlay `shouldBe` Just (ReviewOverlay 10)
-
-      pullRequest <- withPullRequestSession (basePullRequest 42 [] False []) SolveKilledPhase <$> navigationState
-      let activated = activateFirstRow pullRequest
-      activated.appOverlay `shouldBe` Just (PullRequestReviewOverlay 42)
-      activated.appSelectedColumn `shouldBe` Reviewing
-
-    it "opens the session of work the board no longer shows, and moves nothing" $ do
-      -- #77 is not on this board: closed since, or never on it.
-      state <- withSolveSession (baseIssue 77 []) SolveFailedPhase <$> navigationState
-      let moved = state {appSelectedColumn = Done, appSelectedRows = Map.insert Done 0 state.appSelectedRows}
-          activated = activateFirstRow moved
-      activated.appSelectedColumn `shouldBe` Done
-      activated.appSelectedRows `shouldBe` moved.appSelectedRows
-      activated.appExpandedTrackers `shouldBe` Set.empty
-      shownNotice activated `shouldBe` Just "Issue #77 is not on the current board"
-      -- The session is still worth opening.
-      activated.appOverlay `shouldBe` Just (SolveOverlay 77)
-
-    it "reports an absent pull request without opening any session" $ do
+    it "reports an absent pull request and opens nothing" $ do
       state <- reportingState [conflictIncident 903]
       let activated = activateFirstRow state
       activated.appSelectedColumn `shouldBe` Issues
@@ -367,28 +261,17 @@ spec = do
       activated.appOverlay `shouldBe` Nothing
       shownNotice activated `shouldBe` Just ("drainer supervisor · " <> crashDetail)
 
-    it "changes no incident, session, or GitHub state when opened or activated" $ do
-      base <-
-        withSolveSession (baseIssue 10 []) SolveFailedPhase
-          . withReviewSession (baseIssue 800 []) ReviewNeedsChanges
-          . withPullRequestSession (basePullRequest 42 [] False []) SolveAttention
-          <$> reportingState [conflictIncident 42, crashIncident]
+    it "changes no incident or GitHub state when opened or activated" $ do
+      base <- reportingState [conflictIncident 42, crashIncident]
       let opened = applyIncidentsAction OpenIncidentsPanel base
           references = map (.incidentEntryRef) (incidentEntries opened)
           activations = [activateRow reference opened | reference <- references]
-      -- Both drainer kinds and all three session kinds, so no activation
-      -- path is left unexercised.
-      length references `shouldBe` 5
+      -- Both drainer kinds, so no activation path is left unexercised.
+      length references `shouldBe` 2
       mapM_
         ( \state -> do
             state.appDrainerIncidents `shouldBe` base.appDrainerIncidents
-            state.appSolveSessions `shouldBe` base.appSolveSessions
-            state.appReviewSessions `shouldBe` base.appReviewSessions
-            state.appPullRequestReviewSessions `shouldBe` base.appPullRequestReviewSessions
             state.appBoard `shouldBe` base.appBoard
-            Map.size state.appSolveProcesses `shouldBe` 0
-            Map.size state.appPullRequestProcesses `shouldBe` 0
-            Map.size state.appWorkers `shouldBe` 0
         )
         (opened : activations)
 
@@ -450,21 +333,20 @@ spec = do
 
   describe "incident panel events" $ do
     it "opens on i from the board and closes on Esc" $ do
-      state <- solveSessionOn <$> navigationState
+      state <- reportingState [conflictIncident 42]
       -- The board's own @i@ is a base-board binding declared once in
       -- "Kanban.UI.Keys"; this module's policy starts at the open panel.
       boardAction BoardScope (Vty.EvKey (Vty.KChar 'i') []) `shouldBe` Just ShowIncidents
       incidentsAction Nothing (key (Vty.KChar 'i')) `shouldBe` Nothing
       let opened = applyIncidentsAction OpenIncidentsPanel state
       opened.appOverlay `shouldBe` Just IncidentsOverlay
-      opened.appIncidentSelection `shouldBe` IncidentSelection (Just (SessionIncidentRef (SolveAgent 10))) 0
-      panelLines opened `shouldSatisfy` any (Data.Text.isInfixOf "issue #10")
+      opened.appIncidentSelection `shouldBe` IncidentSelection (Just (DrainerIncidentRef "incident-conflict-42")) 0
+      panelLines opened `shouldSatisfy` any (Data.Text.isInfixOf "PR #42")
 
       incidentsAction (Just IncidentsOverlay) (key Vty.KEsc) `shouldBe` Just CloseIncidentsPanel
       (applyIncidentsAction CloseIncidentsPanel opened).appOverlay `shouldBe` Nothing
 
     it "leaves every other context's keys alone" $ do
-      incidentsAction (Just ProcessesOverlay) (key (Vty.KChar 'i')) `shouldBe` Nothing
       incidentsAction (Just HelpOverlay) (key (Vty.KChar 'i')) `shouldBe` Nothing
       incidentsAction Nothing (key (Vty.KChar 'p')) `shouldBe` Nothing
 
@@ -494,12 +376,12 @@ spec = do
 
     it "selects on the first click of a row and activates on the second" $ do
       opened <- threeRowPanel
-      let sessionRow = (incidentEntries opened !! 2).incidentEntryRef
-          selected = applyIncidentsAction (ClickIncidentRow sessionRow) opened
-      selected.appIncidentSelection `shouldBe` IncidentSelection (Just sessionRow) 2
+      let lastRow = (incidentEntries opened !! 2).incidentEntryRef
+          selected = applyIncidentsAction (ClickIncidentRow lastRow) opened
+      selected.appIncidentSelection `shouldBe` IncidentSelection (Just lastRow) 2
       selected.appOverlay `shouldBe` Just IncidentsOverlay
-      (applyIncidentsAction (ClickIncidentRow sessionRow) selected).appOverlay
-        `shouldBe` Just (SolveOverlay 10)
+      -- The second click activates the row, which leaves the panel.
+      (applyIncidentsAction (ClickIncidentRow lastRow) selected).appOverlay `shouldBe` Nothing
 
   describe "incident panel rendering" $ do
     it "claims nothing needs attention only from a verified-empty drainer" $ do
@@ -511,13 +393,18 @@ spec = do
       checking <- unansweredState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing)
       let checkingLines = panelLines (applyIncidentsAction OpenIncidentsPanel checking)
       checkingLines `shouldSatisfy` any (Data.Text.isInfixOf "checking for open incidents")
+      checkingLines `shouldSatisfy` any (Data.Text.isInfixOf "The PR drainer has not answered yet.")
       checkingLines `shouldSatisfy` not . any (Data.Text.isInfixOf "Nothing needs attention.")
+      -- Nothing monitors sessions any more, so neither state may speak for one.
+      checkingLines `shouldSatisfy` not . any (Data.Text.isInfixOf "session")
 
       unavailable <- unansweredState (DrainerStatus DrainerError "the PR drainer is not installed" DrainerServiceUnknown Nothing)
       let unavailableLines = panelLines (applyIncidentsAction OpenIncidentsPanel unavailable)
       unavailableLines
         `shouldSatisfy` any (Data.Text.isInfixOf "open incidents unavailable · the PR drainer is not installed")
+      unavailableLines `shouldSatisfy` any (Data.Text.isInfixOf "The PR drainer's open incidents are unavailable.")
       unavailableLines `shouldSatisfy` not . any (Data.Text.isInfixOf "Nothing needs attention.")
+      unavailableLines `shouldSatisfy` not . any (Data.Text.isInfixOf "session")
 
       -- A controller that answered without reporting a set at all is the
       -- same unanswered source, and must not be described as though the
@@ -527,13 +414,11 @@ spec = do
         `shouldSatisfy` any (Data.Text.isInfixOf "PR drainer: open incidents unavailable · on")
 
     it "renders every row with its subject, detail, and source" $ do
-      state <- solveSessionOn <$> reportingState [conflictIncident 42]
+      state <- reportingState [conflictIncident 42]
       let rendered = panelLines (applyIncidentsAction OpenIncidentsPanel state)
       rendered `shouldSatisfy` any (Data.Text.isInfixOf "PR drainer: 1 open incident")
       rendered
         `shouldSatisfy` any (Data.Text.isInfixOf "PR #42 — PR 42 · PR #42 has a merge conflict in README. · pr drainer")
-      rendered
-        `shouldSatisfy` any (Data.Text.isInfixOf "issue #10 — Issue 10 · failed · solve activity · kanban session")
 
     it "shows the recorded cause and remedy through the real fixed-width panel" $ do
       -- The point of the whole change. A real cleanup summary already
@@ -622,13 +507,12 @@ spec = do
       -- narrow. A note takes the lines it wraps to and nothing else: no other
       -- entry's row may move, change, or re-wrap because one incident gained
       -- a recorded failure.
-      bare <- solveSessionOn <$> reportingState [cleanupIncident 1079, crashIncident]
+      bare <- reportingState [cleanupIncident 1079, crashIncident]
       loaded <-
-        solveSessionOn
-          <$> reportingState
-            [ (cleanupIncident 1079) {incidentError = Just recordedRefusal},
-              crashIncident
-            ]
+        reportingState
+          [ (cleanupIncident 1079) {incidentError = Just recordedRefusal},
+            crashIncident
+          ]
       let opened = applyIncidentsAction OpenIncidentsPanel
           -- The panel is a fixed-height viewport, so a note spends one of its
           -- blank rows. Comparing the rows that carry text is what isolates
@@ -768,12 +652,10 @@ spec = do
       state <- emptyState
       pure state {appDrainerStatus = status, appDrainerIncidents = Nothing}
 
-    solveSessionOn = withSolveSession (baseIssue 10 []) SolveFailedPhase
-
-    -- Two drainer rows and one session row, opened and ready for input.
+    -- Three drainer rows, opened and ready for input.
     threeRowPanel = do
-      state <- reportingState [conflictIncident 42, crashIncident]
-      pure (applyIncidentsAction OpenIncidentsPanel (solveSessionOn state))
+      state <- reportingState [conflictIncident 42, cleanupIncident 43, crashIncident]
+      pure (applyIncidentsAction OpenIncidentsPanel state)
 
     -- Activate the first row, the way pressing Enter on a freshly opened
     -- panel does.
@@ -842,6 +724,7 @@ spec = do
     safeCharacter character = character `notElem` ("\ESC\BEL\x202E\x202C\x200E\x061C" :: String)
 
     namedRef = DrainerIncidentRef
+    workEntry target = (entryNamed "work") {incidentEntryWork = Just target}
     threeEntries = map entryNamed ["a", "b", "c"]
 
     entryNamed name =
@@ -849,7 +732,6 @@ spec = do
         { incidentEntryRef = namedRef name,
           incidentEntrySource = DrainerSource,
           incidentEntryWork = Nothing,
-          incidentEntrySession = Nothing,
           incidentEntrySubject = "drainer supervisor",
           incidentEntryDetail = "incident " <> name,
           incidentEntryNote = Nothing
@@ -896,25 +778,3 @@ spec = do
 
     showNumber :: Int -> Text
     showNumber = Data.Text.pack . show
-
-    everySolvePhase =
-      [ SolveStarting,
-        SolveRunning,
-        SolveInterrupting,
-        SolveAttention,
-        SolveFinished,
-        SolveFailedPhase,
-        SolveKilledPhase,
-        SolveOrphanedPhase
-      ]
-
-    everyReviewPhase =
-      [ ReviewStarting,
-        ReviewRunning,
-        ReviewWaiting,
-        ReviewFinished,
-        ReviewNeedsChanges,
-        ReviewFailed,
-        ReviewRevised,
-        ReviewInterrupted
-      ]

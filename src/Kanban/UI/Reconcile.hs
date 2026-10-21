@@ -9,8 +9,6 @@ module Kanban.UI.Reconcile
     currentCompletedGeneration,
     currentOpenGeneration,
     failureFreshness,
-    reconcilePullRequestSessions,
-    reconcileReviewSessions,
     refreshSuccessNotice,
     unverifiedRefreshNotice,
     usageRefreshApplied,
@@ -21,7 +19,6 @@ where
 import Brick
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -32,38 +29,17 @@ import Kanban.Cache
     usageCommitNotes,
     writeCompletedCache
   )
-import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), HistoryOutcome (..) )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.Action
-  ( AutoSolveConclusion (..),
-    AutoSolveMove (..),
-    AutoSolveTick (..),
-    autoSolveTick,
-  )
-import Kanban.Review
-  ( ReviewStage (..)
-    )
-import Kanban.Solve
-  ( SolveWorkflow (..)
-    )
-import Kanban.Text (sanitizeText)
 import Kanban.Workflow (deriveBoard )
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Types
 import Kanban.UI.Util
-import Kanban.UI.SessionCore
-import Kanban.UI.State
-import Kanban.UI.AutoSolve
 import Kanban.UI.Search
 import Kanban.UI.Selection
-import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
-import Kanban.UI.Solve
-import Kanban.UI.PullRequest
-import Kanban.UI.Worker
 
 -- | Applies one open generation's outcome, or drops it.
 --
@@ -99,7 +75,7 @@ applyCurrentBoardRefresh outcome = do
   -- here because the refresh below replaces the board it was read off.
   let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
   modify (boardRefreshOutcomeApplied outcome)
-  finishCurrentBoardRefresh before searchAnchor outcome
+  finishCurrentBoardRefresh before searchAnchor
 
 -- | What one open outcome does to the state: the board, the freshness, and
 -- the notice reporting it. Pure, and exported, so the suite can take the
@@ -151,8 +127,6 @@ boardRefreshOutcomeApplied outcome state = case outcome of
           -- that view still shows must not be closed as absent.
           (selectedColumn, selectedRows) = preserveSelection state refreshed.appVisibleBoard
           (refreshedOverlay, overlayNotice) = refreshOverlay refreshed.appVisibleBoard state.appOverlay
-          refreshedReviewSessions = reconcileReviewSessions state.appConfig.resolvedWorkflow snapshot.snapshotIssues state.appReviewSessions
-          refreshedPullRequestSessions = reconcilePullRequestSessions snapshot.snapshotPullRequests state.appPullRequestReviewSessions
           successNotice = refreshSuccessNotice snapshot githubResult.githubWarnings
        in noticeSet
             (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
@@ -160,14 +134,12 @@ boardRefreshOutcomeApplied outcome state = case outcome of
               { appSelectedColumn = selectedColumn,
                 appSelectedRows = selectedRows,
                 appOverlay = refreshedOverlay,
-                appReviewSessions = refreshedReviewSessions,
-                appPullRequestReviewSessions = refreshedPullRequestSessions,
                 appBoardFreshness = Fresh snapshot.snapshotFetchedAt,
                 appLastSuccessfulFetch = Just snapshot.snapshotFetchedAt
               }
 
-finishCurrentBoardRefresh :: AppState -> Maybe SearchAnchor -> BoardRefreshOutcome -> EventM Name AppState ()
-finishCurrentBoardRefresh before searchAnchor outcome = do
+finishCurrentBoardRefresh :: AppState -> Maybe SearchAnchor -> EventM Name AppState ()
+finishCurrentBoardRefresh before searchAnchor = do
   -- The query is re-run against the new board by 'entriesFor' itself; what
   -- needs deciding is where the selection lands in the result. The target
   -- column stays both the searched and the selected one whatever the refresh
@@ -184,10 +156,6 @@ finishCurrentBoardRefresh before searchAnchor outcome = do
   -- the first publication composes them onto its own settled notice for the
   -- ordinary ten seconds and retires the carry ('startupReportApplied').
   modify (startupReportApplied before)
-  startPendingWorkerMonitors
-  case outcome of
-    BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
-    _ -> pure ()
   startQueuedBoardRefresh
 
 -- | Applies one completed generation's outcome, or drops it.
@@ -331,36 +299,6 @@ unverifiedRefreshNotice failure =
 unverifiedProviderError :: GhCleanupFailure -> ProviderError
 unverifiedProviderError failure = ProviderError RequestFailed (unverifiedRefreshNotice failure)
 
-reconcilePullRequestSessions :: [PullRequest] -> Map Int PullRequestReviewSession -> Map Int PullRequestReviewSession
-reconcilePullRequestSessions pullRequests = Map.mapWithKey reconcile
-  where
-    pullRequestsByNumber = Map.fromList [(pullRequest.pullRequestNumber, pullRequest) | pullRequest <- pullRequests]
-    reconcile number session = case Map.lookup number pullRequestsByNumber of
-      Nothing -> session
-      Just pullRequest -> withSessionDetail (\detail -> detail {pullRequestSessionPullRequest = pullRequest}) session
-
-reconcileReviewSessions :: WorkflowConfig -> [Issue] -> Map Int ReviewSession -> Map Int ReviewSession
-reconcileReviewSessions config issues = Map.mapWithKey reconcile
-  where
-    issuesByNumber = Map.fromList [(issue.issueNumber, issue) | issue <- issues]
-    reconcile issueNumber session = case Map.lookup issueNumber issuesByNumber of
-      Nothing -> session
-      Just issue ->
-        (withSessionDetail (\detail -> detail {reviewSessionIssue = issue}) session)
-          {sessionPhase = reconciledPhase issue session}
-    reconciledPhase issue session
-      | issueHasLabel config.approvalLabel issue = ReviewFinished
-      | issueHasLabel "reviewed:revised" issue
-          && session.sessionPhase == ReviewFailed
-          && session.sessionDetail.reviewSessionStage == IssueRevision =
-          ReviewRevised
-      | issueHasLabel config.changesRequestedLabel issue && session.sessionPhase == ReviewFailed = ReviewNeedsChanges
-      | otherwise = session.sessionPhase
-
-issueHasLabel :: Text -> Issue -> Bool
-issueHasLabel labelName issue =
-  any ((== Text.toCaseFold labelName) . Text.toCaseFold . (.labelName)) issue.issueLabels
-
 applyCodexRefresh :: Either ProviderError UsageSnapshot -> EventM Name AppState ()
 applyCodexRefresh = applyUsageRefresh Codex "Codex"
 
@@ -465,143 +403,3 @@ refreshSuccessNotice snapshot warnings =
 appendWarnings :: Text -> [Text] -> Text
 appendWarnings message [] = message
 appendWarnings message warnings = message <> " · " <> Text.intercalate " · " warnings
-
--- | Adapt the pure autosolve engine to the dashboard: gather what this
--- refresh saw, run the decision it produces, and render the notices. Every
--- stage and round decision belongs to 'Kanban.UI.AutoSolve'; nothing below
--- re-derives one, so the two cannot drift apart.
-advanceAutoSolves :: RepoSnapshot -> EventM Name AppState ()
-advanceAutoSolves snapshot = do
-  sessions <- Map.toList . (.appSolveSessions) <$> get
-  mapM_ (uncurry (advanceAutoSolve snapshot)) sessions
-
-advanceAutoSolve :: RepoSnapshot -> Int -> SolveSession -> EventM Name AppState ()
-advanceAutoSolve snapshot issueNumber session = case session.sessionDetail.solveSessionAutoProgress of
-  Nothing -> pure ()
-  Just progress -> do
-    state <- get
-    -- The move is the registry's, from the one function a headless tick also
-    -- takes its move from: this adapter gathers the observation out of
-    -- @AppState@ and then only renders and launches what that move says.
-    let observation = autoSolveObservation state snapshot issueNumber session progress
-    runAutoSolveTick
-      snapshot
-      issueNumber
-      session
-      ( autoSolveTick
-          state.appConfig.resolvedWorkflow
-          state.appOptions.optionConfig
-          state.appRepository
-          observation
-          progress
-      )
-
-autoSolveObservation :: AppState -> RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> AutoSolveObservation
-autoSolveObservation state snapshot issueNumber session progress =
-  AutoSolveObservation
-    { autoSolveIssueNumber = issueNumber,
-      autoSolveWorkflowConfig = state.appConfig.resolvedWorkflow,
-      autoSolveSolverBrand = session.sessionDetail.solveSessionBrand,
-      autoSolveSolverSession = session.sessionDetail.solveSessionId,
-      autoSolveSolverRunning = Map.member issueNumber state.appSolveProcesses,
-      autoSolveSnapshotPullRequests = snapshot.snapshotPullRequests,
-      autoSolveReviewPhase =
-        (.sessionPhase)
-          <$> (progress.autoSolvePullRequest >>= (`Map.lookup` state.appPullRequestReviewSessions))
-    }
-
--- | Render and launch one move of the loop.
---
--- Every arm below is presentation and session state -- the transcript line,
--- the phase, the notice -- plus the launch that move asks for. Which move it
--- is was decided by 'Kanban.Action.AutoSolve.autoSolveTick', so a refresh
--- cannot advance this session in a way a headless runner would not, and
--- neither can start a turn the other already started: both read the same
--- guards, the solver process this board holds and the review session bound to
--- the pull request.
-runAutoSolveTick :: RepoSnapshot -> Int -> SolveSession -> AutoSolveTick -> EventM Name AppState ()
-runAutoSolveTick snapshot issueNumber session tick = case tick.tickMove of
-  AutoSolveHold Nothing -> pure ()
-  AutoSolveHold (Just activity) ->
-    modifySolveSession issueNumber (\current -> current {sessionActivity = activity})
-  -- A round the loop was already on: start the review the bound pull request
-  -- is missing, and announce nothing, because nothing about the run changed.
-  AutoSolveReviewRound number False -> startAutoSolveReview snapshot number
-  AutoSolveReviewRound number True -> do
-    appendToSolveSession
-      issueNumber
-      ( \current ->
-          (withAutoSolveProgress tick.tickProgress current)
-            { sessionPhase = SolveRunning,
-              sessionActivity = "reviewing PR #" <> showText number,
-              sessionTranscript =
-                appendTranscript
-                  current.sessionTranscript
-                  ("\n[kanban] Discovered PR #" <> showText number <> "; starting review round " <> showText tick.tickProgress.autoSolveReviewRound <> ".\n")
-            }
-      )
-    startAutoSolveReview snapshot number
-    setNotice ("Autosolve #" <> showText issueNumber <> " discovered PR #" <> showText number <> " and started review")
-  AutoSolveRevisionRound number turn -> do
-    appendToSolveSession
-      issueNumber
-      ( \current ->
-          (withAutoSolveProgress tick.tickProgress current)
-            { sessionPhase = SolveStarting,
-              sessionActivity = "resuming solver for requested changes",
-              sessionTranscript =
-                appendTranscript
-                  current.sessionTranscript
-                  ("\n[kanban] Review requested changes on PR #" <> showText number <> "; resuming the original solver.\n")
-            }
-      )
-    launchSolveInvocation
-      issueNumber
-      AutoSolve
-      session.sessionDetail.solveSessionBrand
-      (Just turn.autoSolveRevisionSession)
-      turn.autoSolveRevisionProvenance
-      turn.autoSolveRevisionMessage
-    setNotice ("Autosolve #" <> showText issueNumber <> " resumed its original solver for PR #" <> showText number)
-  AutoSolveConcluded (AutoSolveConcludedApproved number) -> do
-    appendToSolveSession
-      issueNumber
-      ( \current ->
-          (withAutoSolveProgress tick.tickProgress current)
-            { sessionPhase = SolveFinished,
-              sessionActivity = "approved PR #" <> showText number,
-              sessionTranscript =
-                appendTranscript
-                  current.sessionTranscript
-                  ("\n[kanban] PR #" <> showText number <> " approved; autosolve complete.\n")
-            }
-      )
-    setNotice ("Autosolve #" <> showText issueNumber <> " completed: PR #" <> showText number <> " is approved")
-  AutoSolveConcluded (AutoSolveConcludedHalted haltKind reason) -> do
-    appendToSolveSession
-      issueNumber
-      ( \current ->
-          (withAutoSolveProgress tick.tickProgress current)
-            { sessionPhase = haltPhase haltKind,
-              sessionActivity = reason,
-              sessionTranscript =
-                appendTranscript
-                  current.sessionTranscript
-                  ("\n[kanban] Autosolve " <> haltWord haltKind <> ": " <> sanitizeText reason <> "\n")
-            }
-      )
-    setNotice ("Autosolve #" <> showText issueNumber <> " " <> haltWord haltKind <> ": " <> sanitizeText reason)
-  where
-    haltPhase AutoSolveHaltStopped = SolveAttention
-    haltPhase AutoSolveHaltFailed = SolveFailedPhase
-    haltWord AutoSolveHaltStopped = "stopped"
-    haltWord AutoSolveHaltFailed = "failed"
-    withAutoSolveProgress progress = withSessionDetail (\detail -> detail {solveSessionAutoProgress = Just progress})
-
--- | Autosolve's own review launch. It stays on the label-derived route, and
--- never the user's direct @r@ dispatch, so a problem status on the pull
--- request this loop is reviewing cannot turn an internal review round into a
--- repair launch.
-startAutoSolveReview :: RepoSnapshot -> Int -> EventM Name AppState ()
-startAutoSolveReview snapshot number =
-  mapM_ (startPullRequestReviewWithVisibility False) (findSnapshotPullRequest snapshot number)

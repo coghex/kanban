@@ -1,18 +1,12 @@
 module Kanban.UI.State
-  ( agentActivity,
-    appendAgentTranscript,
-    closeOverlay,
-    findReviewSessionByThread,
+  ( closeOverlay,
     forceTerminalRepaint,
-    modifyReviewSessionByThread,
-    plainTranscript,
     setNotice,
     setNoticeFor,
     settleNoticeExpiry,
     settleOverlayFullscreen,
     toggleCardExcerpts,
     toggleOverlayFullscreen,
-    transcriptFor,
   )
 where
 
@@ -22,23 +16,11 @@ import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe )
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
-import Kanban.Review (ReviewThreadId)
-import Kanban.Solve
-  ( AgentEvent (..),
-    renderAgentEvent
-    )
-import Kanban.Settings
-  ( ChatVerbosity (..)
-    )
-import Kanban.Text (sanitizeText)
 import Kanban.UI.Notice
 import Kanban.UI.Types
-import Kanban.UI.SessionCore
 import Kanban.UI.Util
 
 setNotice :: Text -> EventM Name AppState ()
@@ -93,16 +75,12 @@ forceTerminalRepaint = do
 closeOverlay :: EventM Name AppState ()
 closeOverlay = modify (\state -> noticeCleared state {appOverlay = Nothing})
 
--- | The whole of what @f@ does: one flag, on the overlay that is open and
--- honors the toggle.
+-- | The whole of what @f@ does: one flag, on the overlay that is open.
 --
--- A refusal rather than a notice when it does not. The solve chooser is the
--- one overlay that keeps its windowed box, and it says so by staying the size
--- it is; the footer never names @f@ for it, so there is nothing for a message
--- to correct.
+-- With no overlay open the key does nothing.
 toggleOverlayFullscreen :: AppState -> AppState
 toggleOverlayFullscreen state
-  | maybe False overlayHonorsFullscreen state.appOverlay =
+  | isJust state.appOverlay =
       state {appOverlayFullscreen = not state.appOverlayFullscreen}
   | otherwise = state
 
@@ -135,17 +113,14 @@ toggleCardExcerpts state =
 -- was open before it.
 --
 -- The single seam the reset rule lives at. @appOverlay@ is assigned from
--- thirty sites and only one of them is 'closeOverlay', so clearing the flag
--- beside each assignment would be a rule with thirty chances to be forgotten
--- -- the incidents panel's Enter, which replaces the panel with a live
--- session without closing anything, is exactly the transition that would be.
+-- many sites and only one of them is 'closeOverlay', so clearing the flag
+-- beside each assignment would be a rule with many chances to be forgotten.
 -- Deciding it here from the before-and-after pair instead makes every one of
 -- those sites reset by construction.
 --
--- Preserved only while the same /surface/ stays open. That is what keeps
--- @Tab@ session cycling and a refresh that re-points the same overlay
--- fullscreen while a genuinely different overlay -- or no overlay at all --
--- comes back windowed.
+-- Preserved only while the same /surface/ stays open. That is what keeps a
+-- refresh that re-points the same overlay fullscreen while a genuinely
+-- different overlay -- or no overlay at all -- comes back windowed.
 settleOverlayFullscreen :: Maybe Overlay -> AppState -> AppState
 settleOverlayFullscreen before state
   | surviving = state
@@ -154,60 +129,3 @@ settleOverlayFullscreen before state
     surviving = case (before, state.appOverlay) of
       (Just opened, Just still) -> overlaySurface opened == overlaySurface still
       _ -> False
-
--- | Review protocol events are addressed by the app-server's thread id
--- rather than by issue number, which is the one session lookup the shared
--- key-addressed helpers in 'Kanban.UI.SessionEvents' cannot express.
-modifyReviewSessionByThread :: ReviewThreadId -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
-modifyReviewSessionByThread threadId update = modify $ \state ->
-  case findReviewSessionByThread threadId state of
-    Nothing -> state
-    Just (issueNumber, _) -> state {appReviewSessions = Map.adjust update issueNumber state.appReviewSessions}
-
-findReviewSessionByThread :: ReviewThreadId -> AppState -> Maybe (Int, ReviewSession)
-findReviewSessionByThread threadId state =
-  safeIndex 0
-    [ (issueNumber, session)
-      | (issueNumber, session) <- Map.toList state.appReviewSessions,
-        session.sessionDetail.reviewSessionThreadId == Just threadId
-    ]
-
-plainTranscript :: Text -> ChatTranscript
-plainTranscript value = ChatTranscript value value value
-
-transcriptFor :: ChatVerbosity -> ChatTranscript -> Text
-transcriptFor CompactChat = (.compactTranscript)
-transcriptFor StandardChat = (.standardTranscript)
-transcriptFor FullChat = (.fullTranscript)
-
-appendAgentTranscript :: AgentEvent -> ChatTranscript -> ChatTranscript
-appendAgentTranscript agentEvent transcript =
-  ChatTranscript
-    { compactTranscript = appendRendered CompactChat transcript.compactTranscript,
-      standardTranscript = appendRendered StandardChat transcript.standardTranscript,
-      fullTranscript = appendRendered FullChat transcript.fullTranscript
-    }
-  where
-    appendRendered verbosity value = case renderAgentEvent verbosity agentEvent of
-      Nothing -> value
-      Just rendered -> boundedAppend value (sanitizeText rendered <> "\n")
-
-agentActivity :: AgentEvent -> Text
-agentActivity agentEvent = case agentEvent.agentEventKind of
-  "reasoning" -> "thinking"
-  "command" -> "running " <> activitySummary "[command] " agentEvent.agentEventSummary
-  "tool" -> Text.take 80 agentEvent.agentEventSummary
-  "tool-result" -> "processing tool result"
-  "file" -> "changing files"
-  "plan" -> "updating plan"
-  "message" -> "responding"
-  "error" -> "error"
-  _ -> "running"
-
-activitySummary :: Text -> Text -> Text
-activitySummary prefix summary =
-  Text.take 120
-    . Text.unwords
-    . Text.words
-    . sanitizeText
-    $ fromMaybe summary (Text.stripPrefix prefix summary)

@@ -675,10 +675,10 @@ blockerSpec = describe "the completed-history blocker" $ do
       `shouldBe` replicate 6 True
     map blockedByCompletedLoad [OpenSearch, ToggleEpic, ShowDetails, OpenCardPage]
       `shouldBe` replicate 4 True
-    map blockedByCompletedLoad [ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, KillWorking]
-      `shouldBe` replicate 5 True
-    map blockedByCompletedLoad [ShowFilter, DismissOrClose, ShowHelp, ShowSettings, RefreshAll, ToggleDrainer, ToggleSidebar, ShowProcesses, ShowIncidents, RepaintTerminal, QuitDashboard]
-      `shouldBe` replicate 11 False
+    map blockedByCompletedLoad [MergeDoneCard]
+      `shouldBe` replicate 1 True
+    map blockedByCompletedLoad [ShowFilter, DismissOrClose, ShowHelp, RefreshAll, ToggleDrainer, ToggleSidebar, ShowIncidents, RepaintTerminal, QuitDashboard]
+      `shouldBe` replicate 9 False
 
   -- No column is drawn under the blocker, so there is no box to type into and
   -- none to open. The query itself survives and comes back with the columns.

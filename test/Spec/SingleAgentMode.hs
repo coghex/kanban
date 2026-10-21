@@ -20,8 +20,8 @@
 -- Everything here is a pure function the corresponding @EventM@ arm or @IO@
 -- entry point only projects -- 'agentForAction' and 'pullRequestAssignment'
 -- for routing, 'recordedPullRequestBrand' for a worker that already exists,
--- 'embeddedReviewProvider' for the review backend, 'solveChooserDecision' for
--- the chooser, 'usageProviders' for the probes, 'pingBrandRefusal' for the
+-- 'embeddedReviewProvider' for the review backend, 'usageProviders' for the
+-- probes, 'pingBrandRefusal' for the
 -- command line, and 'actionReport' for readiness -- so the whole matrix is
 -- settled with no terminal, no subprocess, and no provider account.
 module Spec.SingleAgentMode (spec) where
@@ -43,6 +43,7 @@ import Kanban.Models
     RoleName (..),
     assignmentFor,
     defaultRoster,
+    loadedOperatingMode,
     operatingModeFor,
     providerKey,
     recordAssignment,
@@ -68,9 +69,8 @@ import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReview
 import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor, providerForBrand)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
-import Kanban.UI.Solve (SolveChooserDecision (..), solveChooserDecision)
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types (withModelRoster)
+import Kanban.UI.Types (AppState (..))
 import Kanban.Usage (usageProviders)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard, testOptions)
@@ -84,7 +84,6 @@ spec = describe "single-agent operating mode" $ do
   routingSpec
   workerSpec
   reviewSpec
-  solveSpec
   usageSpec
   pingSpec
   preflightSpec
@@ -443,30 +442,6 @@ reviewSpec = describe "the embedded review it starts" $ do
     toolName _ = Nothing
 
 -- ---------------------------------------------------------------------------
--- Starting a solve
--- ---------------------------------------------------------------------------
-
-solveSpec :: Spec
-solveSpec = describe "the chooser it does not open" $ do
-  -- Requirement 4. There is nothing to choose between, so a fresh solve
-  -- starts on the loaded provider rather than showing a box whose only live
-  -- digit is the brand this install already runs on.
-  it "starts a fresh solve on the loaded provider without asking" $
-    sequence_
-      [ (variant.variantName, solveChooserDecision (variantMode variant))
-          `shouldBe` (variant.variantName, SolveChooserAuto variant.variantBrand)
-      | variant <- variants
-      ]
-
-  -- The negative control, and the boundary the review's seventh spec addition
-  -- draws: dual mode still presents both rows, and no-agent -- whose bindings
-  -- 'Kanban.UI.Keys.availableIn' has already refused -- is not turned into a
-  -- silent launch by this arm.
-  it "still opens the chooser in dual and no-agent mode" $
-    map solveChooserDecision [DualMode, NoAgentMode]
-      `shouldBe` [SolveChooserOpen, SolveChooserOpen]
-
--- ---------------------------------------------------------------------------
 -- The usage surfaces
 -- ---------------------------------------------------------------------------
 
@@ -502,7 +477,7 @@ usageSpec = describe "the usage accounts it reads" $ do
     sequence_
       [ do
           board <- testAppState (fixtureBoard [])
-          let drawn = sidebarText (withModelRoster (Right variant.variantRoster) board)
+          let drawn = sidebarText (board {appOperatingMode = loadedOperatingMode (Right variant.variantRoster)})
           (variant.variantName, accountName (expectedAccount variant) `Data.Text.isInfixOf` drawn)
             `shouldBe` (variant.variantName, True)
           (variant.variantName, accountName (unloadedAccount variant) `Data.Text.isInfixOf` drawn)
@@ -512,7 +487,7 @@ usageSpec = describe "the usage accounts it reads" $ do
 
   it "draws both blocks in dual mode" $ do
     board <- testAppState (fixtureBoard [])
-    let drawn = sidebarText (withModelRoster (Right defaultRoster) board)
+    let drawn = sidebarText (board {appOperatingMode = loadedOperatingMode (Right defaultRoster)})
     map (`Data.Text.isInfixOf` drawn) ["Codex", "Claude"] `shouldBe` [True, True]
   where
     expectedAccount variant = case variant.variantProvider of

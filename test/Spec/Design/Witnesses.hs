@@ -85,14 +85,12 @@ import Kanban.GitHub
     initialHistoryFetchState,
     planCoordinator,
   )
-import Kanban.Models (allProviders, allRoles)
 import Kanban.Repository (parseRemoteRepository)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI.Events (boardMouseAction, boardMousePress, mutatesSelectedWork)
 import Kanban.UI.Keys (BoardAction, binding)
 import Kanban.UI.Types
-  ( AgentSessionRef (..),
-    AppState,
+  ( AppState,
     IncidentRef (..),
     Name (..),
   )
@@ -403,9 +401,9 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "`mutatesSelectedWork`, total in `BoardAction`, is True for exactly five actions: KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, and MergeDoneCard.",
+                "`mutatesSelectedWork`, total in `BoardAction`, is True for exactly one action: MergeDoneCard.",
               factRationale =
-                "Those five are the review, solve and drainer workflows this entry's second sentence permits, and nothing else on the board acts on the work a card stands for — no action edits a card's title, body, labels, assignees, or column. Because the predicate is total in `BoardAction`, an action added to the table in Kanban.UI.Keys cannot reach the board without a decision here, and a sixth mutating action fails this comparison.",
+                "That one is the drainer's own merge path this entry permits, and nothing else on the board acts on the work a card stands for — no action edits a card's title, body, labels, assignees, or column. Because the predicate is total in `BoardAction`, an action added to the table in Kanban.UI.Keys cannot reach the board without a decision here, and a second mutating action fails this comparison.",
               factReads = [],
               factCheck = pure mutatingActions
             }
@@ -485,9 +483,9 @@ declarations =
       ( Witnessed
           WitnessedFact
             { factStatement =
-                "Every GraphQL document Kanban sends begins `query(` and contains no `mutation`, over both traversals and every cursor and sub-issue combination; and `mutatesSelectedWork` is True for exactly the five review, solve and drainer actions.",
+                "Every GraphQL document Kanban sends begins `query(` and contains no `mutation`, over both traversals and every cursor and sub-issue combination; and `mutatesSelectedWork` is True for exactly the one drainer merge action.",
               factRationale =
-                "An assignment or a label change is a GraphQL mutation or a mutating `gh` subcommand, and every document Kanban sends is a query. The action side is closed too: the five actions that act on a card's work all hand off to a workflow §3 names, and none of them edits an assignee or a label from the board.",
+                "An assignment or a label change is a GraphQL mutation or a mutating `gh` subcommand, and every document Kanban sends is a query. The action side is closed too: the one action that acts on a card's work hands off to the drainer's merge path §3 names, and it edits no assignee or label from the board.",
               factReads = [],
               factCheck = pure (everyFault [githubRequestsAreReads, mutatingActions])
             }
@@ -749,7 +747,6 @@ boardActionInventory =
     "the dashboard's board actions"
     [ "NextCard",
       "PreviousCard",
-      "KillWorking",
       "PreviousColumn",
       "NextColumn",
       "FirstItem",
@@ -761,10 +758,6 @@ boardActionInventory =
       "OpenCardPage",
       "ToggleFullscreen",
       "DismissOrClose",
-      "ReviewSelection",
-      "SolveSelection",
-      "AutoSolveSelection",
-      "ShowProcesses",
       "ShowIncidents",
       "RefreshAll",
       "ToggleApproval",
@@ -772,7 +765,6 @@ boardActionInventory =
       "MergeDoneCard",
       "ToggleSidebar",
       "ToggleExcerpts",
-      "ShowSettings",
       "ShowHelp",
       "RepaintTerminal",
       "QuitDashboard"
@@ -827,7 +819,7 @@ mutatingActions :: Maybe Text
 mutatingActions =
   sameAs
     "the board actions that act on the work a card stands for"
-    ["KillWorking", "ReviewSelection", "SolveSelection", "AutoSolveSelection", "MergeDoneCard"]
+    ["MergeDoneCard"]
     (map showText (filter mutatesSelectedWork everyBoardAction))
 
 -- | The bindings table takes the action and nothing else.
@@ -985,7 +977,7 @@ declaredPointerClaims =
   sort
     [ ("ApprovalButton", "BLeft", "no modifiers", "ToggleApprovalFromClick"),
       ("CardTarget", "BLeft", "any modifiers", "SelectOrOpenCardAt"),
-      ("CardTarget", "BRight", "any modifiers", "OpenRunningProcessAt"),
+      ("CardTarget", "BRight", "any modifiers", "SelectCardOnlyAt"),
       ("CardTarget", "BScrollDown", "any modifiers", "ScrollColumnBy"),
       ("CardTarget", "BScrollUp", "any modifiers", "ScrollColumnBy"),
       ("ColumnViewport", "BScrollDown", "any modifiers", "ScrollColumnBy"),
@@ -1043,18 +1035,6 @@ probeTargets =
     ("IncidentTarget", [IncidentTarget (DrainerIncidentRef "drainer")]),
     ("IncidentsPanel", [IncidentsPanel]),
     ("IncidentsViewport", [IncidentsViewport]),
-    ("ProcessTarget", [ProcessTarget (SolveAgent 1)]),
-    ("ProcessesPanel", [ProcessesPanel]),
-    ("ProcessesViewport", [ProcessesViewport]),
-    ("PullRequestReviewPanel", [PullRequestReviewPanel]),
-    ("PullRequestReviewViewport", [PullRequestReviewViewport]),
-    ("ReviewPanel", [ReviewPanel]),
-    ("ReviewViewport", [ReviewViewport]),
-    ("SettingsPanel", [SettingsPanel]),
-    ("SettingsRosterTarget", [SettingsRosterTarget role provider | role <- allRoles, provider <- allProviders]),
-    ("SettingsViewport", [SettingsViewport]),
-    ("SolvePanel", [SolvePanel]),
-    ("SolveViewport", [SolveViewport]),
     ("UpdateButton", [UpdateButton])
   ]
 

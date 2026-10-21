@@ -1,18 +1,11 @@
 -- | A dashboard state the pure UI transitions can be driven against, with
 -- no terminal, network, or GitHub account.
 --
--- Every field is a quiet default: no sessions, no workers, nothing in
--- flight. A test names only what it is about by updating the record, which
+-- Every field is a quiet default: nothing in flight. A test names only what it is about by updating the record, which
 -- keeps each one readable and keeps a new 'AppState' field from rewriting
 -- every test that ever built one.
 module Spec.Support.App
-  ( testAppState,
-    withSolveSession,
-    withPullRequestSession,
-    withReviewSession,
-    testSolveSession,
-    testPullRequestSession,
-    testReviewSession
+  ( testAppState
   )
 where
 
@@ -32,27 +25,11 @@ import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (.
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Models (defaultRoster, loadedOperatingMode)
-import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
-import Kanban.Review (ReviewStage (..))
-import Kanban.Settings (defaultSettings)
-import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Notice (emptyNoticeState)
 import Kanban.UI.Types
-  ( AgentSession (..),
-    AppState (..),
-    ChatTranscript (..),
+  ( AppState (..),
     CompletedHistoryStatus (..),
     IncidentSelection (..),
-    ProcessSelection (..),
-    PullRequestDetail (..),
-    PullRequestReviewSession,
-    ReviewDetail (..),
-    ReviewPhase (..),
-    ReviewSession,
-    SolveDetail (..),
-    SolvePhase (..),
-    SolveSession,
   )
 import Kanban.UI.Board (defaultExcerptsVisible, unmeasuredLayoutInputs)
 import Spec.Support.Board (inertRefreshCoordinator)
@@ -92,16 +69,10 @@ testAppState board = do
         appSearch = Nothing,
         appSidebarVisible = True,
         appExcerptsVisible = defaultExcerptsVisible,
-        appSettings = defaultSettings,
-        -- The pure compiled value, not a load: a test state must not read
-        -- the developer's real XDG configuration. A test naming another
-        -- roster moves it with 'Kanban.UI.Types.withModelRoster', which is
-        -- what keeps the mode below agreeing with it.
-        appModelRoster = Right defaultRoster,
+        -- Derived from the pure compiled roster, not a load: a test state
+        -- must not read the developer's real XDG configuration. A test naming
+        -- another mode sets the field.
         appOperatingMode = loadedOperatingMode (Right defaultRoster),
-        appSettingsFocus = Nothing,
-        appLogRoot = "/tmp/example-project/logs",
-        appProcessSelection = ProcessSelection Nothing 0,
         appIncidentSelection = IncidentSelection Nothing 0,
         appOverlay = Nothing,
         appOverlayFullscreen = False,
@@ -135,91 +106,9 @@ testAppState board = do
         appBoardRefreshQueued = False,
         appRefreshCoordinator = refreshCoordinator,
         appQuitPending = False,
-        appReviewSessions = Map.empty,
-        appReviewUndelivered = Map.empty,
-        appSolveSessions = Map.empty,
-        appSolveProcesses = Map.empty,
-        appPullRequestReviewSessions = Map.empty,
-        appPullRequestProcesses = Map.empty,
-        appWorkers = Map.empty,
-        appWorkerMonitors = Set.empty,
         appEventChannel = eventChannel,
         appNow = epoch,
         appTimeZone = utc,
         appOptions = testOptions,
         appConfig = testResolvedConfig
       }
-
-withSolveSession :: Issue -> SolvePhase -> AppState -> AppState
-withSolveSession issue phase state =
-  state
-    { appSolveSessions =
-        Map.insert issue.issueNumber (testSolveSession issue phase) state.appSolveSessions
-    }
-
-withPullRequestSession :: PullRequest -> SolvePhase -> AppState -> AppState
-withPullRequestSession pullRequest phase state =
-  state
-    { appPullRequestReviewSessions =
-        Map.insert
-          pullRequest.pullRequestNumber
-          (testPullRequestSession pullRequest phase)
-          state.appPullRequestReviewSessions
-    }
-
-withReviewSession :: Issue -> ReviewPhase -> AppState -> AppState
-withReviewSession issue phase state =
-  state
-    { appReviewSessions =
-        Map.insert issue.issueNumber (testReviewSession issue phase) state.appReviewSessions
-    }
-
-testSolveSession :: Issue -> SolvePhase -> SolveSession
-testSolveSession issue phase =
-  (newAgentSession 0 phase "solve activity" (Just epoch) emptyTranscript detail) {sessionTickGeneration = 0}
-  where
-    detail =
-      SolveDetail
-        { solveSessionIssue = issue,
-          solveSessionWorkflow = SolveOnly,
-          solveSessionBrand = ClaudeSolver,
-          solveSessionId = Nothing,
-          solveSessionAutoProgress = Nothing,
-          solveSessionResumeProvenance = ResumeAnswer,
-          solveSessionAssignment = Nothing
-        }
-
-testPullRequestSession :: PullRequest -> SolvePhase -> PullRequestReviewSession
-testPullRequestSession pullRequest phase =
-  (newAgentSession 0 phase "pr activity" (Just epoch) emptyTranscript detail) {sessionTickGeneration = 0}
-  where
-    detail =
-      PullRequestDetail
-        { pullRequestSessionPullRequest = pullRequest,
-          pullRequestSessionOrigin = PullRequestClaude,
-          pullRequestSessionAction = PullRequestReview,
-          pullRequestSessionLaunchedForUpdatedAt = epoch,
-          pullRequestSessionBrand = CodexSolver,
-          pullRequestSessionId = Nothing,
-          pullRequestSessionResumeProvenance = ResumeAnswer,
-          pullRequestSessionAssignment = Nothing
-        }
-
-testReviewSession :: Issue -> ReviewPhase -> ReviewSession
-testReviewSession issue phase =
-  (newAgentSession 0 phase "review activity" Nothing emptyTranscript detail) {sessionTickGeneration = 0}
-  where
-    detail =
-      ReviewDetail
-        { reviewSessionIssue = issue,
-          reviewSessionStage = InitialReview,
-          reviewSessionThreadId = Nothing,
-          reviewSessionTurnId = Nothing,
-          reviewSessionPending = Nothing,
-          reviewSessionUndelivered = [],
-          reviewSessionAwaiting = [],
-          reviewSessionRestored = Nothing
-        }
-
-emptyTranscript :: ChatTranscript
-emptyTranscript = ChatTranscript "" "" ""

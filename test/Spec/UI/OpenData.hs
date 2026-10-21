@@ -31,23 +31,18 @@ import Kanban.UI.Refresh (BoardRefreshDispatch (..), boardRefreshDispatch)
 import Kanban.UI.Reconcile
   ( currentOpenGeneration,
     failureFreshness,
-    reconcilePullRequestSessions,
-    reconcileReviewSessions,
     refreshSuccessNotice
   )
 import Kanban.UI.Selection (preserveSelection, refreshOverlay)
 import Kanban.UI.Types
-  ( AgentSession (..),
-    AppState (..),
+  ( AppState (..),
     OpenDataView (..),
     Overlay (..),
-    ReviewPhase (..),
-    SolvePhase (..),
     openDataView
   )
 import Kanban.UI.Util (entriesForBoard, allColumns)
 import Kanban.Workflow (deriveBoard)
-import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession)
+import Spec.Support.App (testAppState)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, testOptions, testResolvedConfig)
 import Spec.Support.Json (versionFiveCacheFile)
@@ -210,15 +205,10 @@ spec = do
             state
               { appSelectedColumn = Issues,
                 appSelectedRows = Map.insert Issues (rowOf priorBoard 10) state.appSelectedRows,
-                appOverlay = Just (DetailsOverlay (IssueItem (issue 10 []))),
-                appReviewSessions = Map.singleton 10 (testReviewSession (issue 10 []) ReviewWaiting),
-                appPullRequestReviewSessions =
-                  Map.singleton 30 (testPullRequestSession (basePullRequest 30 [10] False []) SolveRunning)
+                appOverlay = Just (DetailsOverlay (IssueItem (issue 10 [])))
               }
           (swappedColumn, swappedRows) = preserveSelection selected swappedBoard
           (swappedOverlay, overlayNotice) = refreshOverlay swappedBoard selected.appOverlay
-          swappedReviews = reconcileReviewSessions defaultWorkflowConfig afterSnapshot.snapshotIssues selected.appReviewSessions
-          swappedPullRequests = reconcilePullRequestSessions afterSnapshot.snapshotPullRequests selected.appPullRequestReviewSessions
       -- The card, not the row: #10 moved, and the selection moved with it.
       swappedColumn `shouldBe` Issues
       Map.lookup Issues swappedRows `shouldBe` Just (rowOf swappedBoard 10)
@@ -231,11 +221,6 @@ spec = do
           shown.issueNumber `shouldBe` 10
           shown.issueLabels `shouldBe` approved
         other -> expectationFailure ("expected the details overlay to survive, got " <> show other)
-      -- Both live sessions stay associated with their item, and the review
-      -- session sees the approval the new generation brought.
-      Map.keys swappedReviews `shouldBe` [10]
-      fmap (.sessionPhase) (Map.lookup 10 swappedReviews) `shouldBe` Just ReviewFinished
-      Map.keys swappedPullRequests `shouldBe` [30]
 
   describe "the refresh banner" $ do
     -- Requirement 3: the counted sources are exact, because there is no cap

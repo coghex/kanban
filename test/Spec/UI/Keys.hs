@@ -10,38 +10,28 @@
 -- table and checked for round trip.
 module Spec.UI.Keys (spec) where
 
+import Data.Foldable (for_)
 import Data.List (nub, sort)
-import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified Graphics.Vty as Vty
-import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..))
+import Kanban.Domain (BoardColumn (..), BoardItem (..), Issue (..))
 import Kanban.Models (OperatingMode (..), ProviderName (..), noAgentModeMessage)
-import Kanban.Review (ReviewStage (..))
-import Kanban.Solve (SolveWorkflow (..))
 import Kanban.UI.Board (BoardMarks (..), boardFooterHintLine, boardHintLine, defaultBoardMarks, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
 import Kanban.UI.Filter (toggleFilterPanel)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (drawOverlay, helpLines, mouseHelpEntries)
 import Kanban.UI.Search (openSearch)
-import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
-import Kanban.UI.Settings (settingsFooterHints)
-import Kanban.UI.Solve (solveChooserFooterHints)
+import Kanban.UI.Incidents (incidentsFooterHints)
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types
-  ( AgentSession (..),
-    AppState (..),
-    Overlay (..),
-    ReviewDetail (..),
-    ReviewPhase (..),
-    SessionMode (..),
-    SolvePhase (..),
-  )
-import Kanban.UI.SessionCore (SessionFocus (..), SessionInputEvent (..), noSessionInputCaps, sessionFooterHints, sessionInputEvent, sessionInputHelp)
-import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession, testSolveSession)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, fixtureBoard, testOptions)
+import Kanban.UI.Types (AppState (..), Overlay (..))
+import Kanban.UI.Util (shownNotice)
+import Spec.Support.App (testAppState)
+import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
+import Spec.Support.Fixtures (baseIssue, fixtureBoard, fixtureStandaloneEntry, testOptions)
 import Spec.Support.Render (renderWidgetLines)
 import Test.Hspec
 
@@ -118,7 +108,7 @@ spec = describe "keybinding table" $ do
     -- binding added by accident.
     it "keeps the overlay scopes to the board's bindings, plus the one that is overlay-only" $ do
       map (.bindingAction) (scopeBindings DetailsScope)
-        `shouldBe` [KillWorking, OpenCardPage, ToggleFullscreen, DismissOrClose, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, QuitDashboard]
+        `shouldBe` [OpenCardPage, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
       map (.bindingAction) (scopeBindings HelpScope) `shouldBe` [ToggleFullscreen, DismissOrClose, QuitDashboard]
       map (.bindingAction) (scopeBindings OverlayScope) `shouldBe` [ToggleFullscreen]
       map (.bindingAction) (scopeBindings BoardScope)
@@ -215,25 +205,16 @@ spec = describe "keybinding table" $ do
           | (name, state) <- [("filter panel" :: String, latentFilter), ("search box", latentSearch)]
         ]
 
-  -- Issue #525 requirement 4: the seven overlays that drew a hint line inside
-  -- their own box no longer do, now that the base footer names their keys.
-  -- Rendered rather than read off the source, and asked of all seven -- the
-  -- processes, incidents, and PR review overlays have no golden frame of
-  -- their own, so nothing else here would notice one coming back.
+  -- Issue #525 requirement 4: the overlays that drew a hint line inside their
+  -- own box no longer do, now that the base footer names their keys. Rendered
+  -- rather than read off the source, and asked of every overlay -- the
+  -- incidents panel has no golden frame of its own, so nothing else here would
+  -- notice one coming back.
   describe "overlay hint relocation" $ do
     it "accounts for every overlay the dashboard can open" $ do
       base <- overlayBaseState
       nub [overlayRoute overlay | (_, overlay, _, _) <- overlayFooterCases base]
-        `shouldMatchList` [ "help",
-                            "details",
-                            "settings",
-                            "processes",
-                            "incidents",
-                            "solve chooser",
-                            "solve",
-                            "pull request review",
-                            "issue review"
-                          ]
+        `shouldMatchList` ["help", "details", "incidents"]
 
     it "draws no overlay's hint chips inside its own box" $ do
       base <- overlayBaseState
@@ -297,7 +278,7 @@ spec = describe "keybinding table" $ do
 
   describe "help projection" $ do
     it "renders exactly one row per declared entry, in declaration order" $
-      helpLines DualMode `shouldBe` helpRows (map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries)
+      helpLines DualMode `shouldBe` helpRows (map bindingHelpEntry boardBindings <> mouseHelpEntries)
 
     it "leaves no key-hint row that no binding backs" $
       sequence_
@@ -305,8 +286,8 @@ spec = describe "keybinding table" $ do
           | row <- helpLines DualMode
         ]
 
-    it "gives every base-board and session binding a row of its own" $
-      length (helpLines DualMode) `shouldBe` length boardBindings + length sessionInputHelp + length mouseHelpEntries
+    it "gives every base-board binding a row of its own" $
+      length (helpLines DualMode) `shouldBe` length boardBindings + length mouseHelpEntries
 
     it "keeps the rows no binding backs to mouse prose" $
       sequence_
@@ -328,68 +309,18 @@ spec = describe "keybinding table" $ do
         ]
       nub gutters `shouldBe` take 1 gutters
 
-  describe "session overlay bindings" $ do
-    -- Every documented session key is answered from the mode §7 documents it
-    -- in, with the caps of the kind that offers the fewest optional bindings:
-    -- a row the decoder only honours for the review overlay would be a help
-    -- entry the solve and PR overlays cannot back.
-    it "declares only keys its own decoder answers" $
-      sequence_
-        [ (helpEntryDescription entry, fmap (const ()) (sessionInputEvent normalFocus (bindingEvent pressed)))
-            `shouldBe` (helpEntryDescription entry, Just ())
-          | entry <- sessionInputHelp,
-            pressed <- entry.helpEntryKeys
-        ]
-
-    -- The mode split is the point of the rows, so the normal-mode ones must
-    -- not also answer from insert -- otherwise `q` would close an overlay
-    -- mid-word and `j` would refuse to type.
-    it "keeps the normal-mode rows out of insert mode" $
-      sequence_
-        [ (helpEntryDescription entry, sessionInputEvent insertFocus (bindingEvent pressed))
-            `shouldBe` (helpEntryDescription entry, Just (SessionInputInsert character))
-          | entry <- sessionInputHelp,
-            pressed <- entry.helpEntryKeys,
-            Vty.KChar character <- [pressed.bindingKeyKey],
-            null pressed.bindingKeyModifiers,
-            character /= '\t'
-        ]
-
-  -- Issue #521, narrowed by issue #546. A board whose roster loads no
-  -- provider starts nothing, so the four bindings that start agent work come
-  -- off the footer and out of the help overlay instead of being advertised
-  -- and then refused. `x` and `p` are not among them: they inspect and
-  -- terminate work that is already running, which such a board inherits from
-  -- worker discovery. Both surfaces project from 'modeBoardBindings', which
-  -- is why one group covers them, and every expectation below is built from
-  -- the table rather than from a second copy of the line -- the same rule the
-  -- rest of this module keeps.
+  -- Issue #521, narrowed by issue #546 and by the removal of the agent
+  -- screens. A board whose roster loads no provider starts nothing, so the
+  -- one binding that still needs one comes off the footer and out of the help
+  -- overlay instead of being advertised and then refused. Both surfaces
+  -- project from 'modeBoardBindings', which is why one group covers them, and
+  -- every expectation below is built from the table rather than from a second
+  -- copy of the line -- the same rule the rest of this module keeps.
   describe "operating mode" $ do
-    it "hides exactly the four bindings §7's paragraph names, and no others" $ do
+    it "hides exactly the binding §7's paragraph names, and no others" $ do
       filter requiresLoadedAgent (map (.bindingAction) boardBindings) `shouldBe` agentBindings
       map (.bindingAction) (modeBoardBindings NoAgentMode)
         `shouldBe` filter (`notElem` agentBindings) (map (.bindingAction) boardBindings)
-
-    -- Issue #546 requirement 1, stated as a positive rather than left to the
-    -- negative control below: the two keys that reach already-running work
-    -- are on the no-agent board's footer line and in its help overlay, and
-    -- neither is refused. Where on the line they sit is that control's
-    -- question, since it compares the whole line against the table's order.
-    it "keeps the inspector and the kill key on both surfaces, and refuses neither" $ do
-      sequence_
-        [ (action, footerHint (binding action) `elem` Text.splitOn "  " noAgentFooterHintLine)
-            `shouldBe` (action, True)
-          | action <- recoveryBindings
-        ]
-      sequence_
-        [ (action, any (Text.isInfixOf (binding action).bindingDescription) (helpLines NoAgentMode))
-            `shouldBe` (action, True)
-          | action <- recoveryBindings
-        ]
-      sequence_
-        [ (action, agentSurfaceRefusal NoAgentMode action) `shouldBe` (action, Nothing)
-          | action <- recoveryBindings
-        ]
 
     it "leaves dual and single-agent mode the whole table, in the order it has today" $
       sequence_
@@ -433,13 +364,11 @@ spec = describe "keybinding table" $ do
           | (name, mode) <- loadedModes
         ]
 
-    -- `r`, `S`, and `A` are live from a card's details overlay too, and its
-    -- footer is the same projection, so it hides them for the same reason.
-    -- `x` is the fourth binding that footer carries and it stays, which is
-    -- the half of requirement 1 this scope owns.
-    it "hides the three a card's details overlay also carries, and keeps x" $ do
+    -- The hidden binding is not live from a card's details overlay, whose
+    -- footer is the same projection, so that scope loses nothing in any mode.
+    it "leaves a card's details overlay the whole of its scope in every mode" $ do
       map (.bindingAction) (modeScopeBindings NoAgentMode DetailsScope)
-        `shouldBe` [KillWorking, OpenCardPage, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
+        `shouldBe` map (.bindingAction) (scopeBindings DetailsScope)
       sequence_
         [ (name, map (.bindingAction) (modeScopeBindings mode DetailsScope))
             `shouldBe` (name, map (.bindingAction) (scopeBindings DetailsScope))
@@ -453,14 +382,12 @@ spec = describe "keybinding table" $ do
           | description <- map ((.bindingDescription) . binding) agentBindings
         ]
 
-    -- The help overlay's other two blocks are not the mode's to hide: the
-    -- session rows belong to a live-agent overlay's own decoder and the mouse
+    -- The help overlay's other block is not the mode's to hide: the mouse
     -- rows are prose about a policy no binding covers.
-    it "keeps every row it does not hide, including the session and mouse blocks" $ do
+    it "keeps every row it does not hide, including the mouse block" $ do
       length (helpLines NoAgentMode)
         `shouldBe` length boardBindings
           - length agentBindings
-          + length sessionInputHelp
           + length mouseHelpEntries
       sequence_
         [ (row, any ((== row) . rowOf) declaredEntries) `shouldBe` (row, True)
@@ -469,7 +396,7 @@ spec = describe "keybinding table" $ do
       sequence_
         [ (entry.helpEntryDescription, any (Text.isInfixOf entry.helpEntryDescription) (helpLines NoAgentMode))
             `shouldBe` (entry.helpEntryDescription, True)
-          | entry <- sessionInputHelp <> mouseHelpEntries
+          | entry <- mouseHelpEntries
         ]
 
     it "leaves the help overlay itself alone in dual and single-agent mode" $
@@ -478,6 +405,34 @@ spec = describe "keybinding table" $ do
           | (name, mode) <- loadedModes
         ]
 
+  -- The keys the agent screens used. They are unbound, not repurposed: no
+  -- scope resolves one to an action, and the dashboard's own event handler
+  -- does nothing with one on the base board beyond the per-event maintenance
+  -- every event gets.
+  describe "the unbound agent keys" $ do
+    it "resolves none of them to an action in any scope" $
+      sequence_
+        [ (scope, character, boardAction scope (Vty.EvKey (Vty.KChar character) []))
+            `shouldBe` (scope, character, Nothing)
+          | scope <- [minBound .. maxBound],
+            character <- removedAgentKeys
+        ]
+
+    it "claims none of them in the table at all" $
+      sequence_
+        [ (character, [candidate.bindingAction | candidate <- boardBindings, pressed <- candidate.bindingKeys, pressed == chord (Vty.KChar character) []])
+            `shouldBe` (character, [])
+          | character <- removedAgentKeys
+        ]
+
+    it "leaves the base board unchanged when one is pressed with no overlay open" $ do
+      base <- testAppState (fixtureBoard [(Issues, [fixtureStandaloneEntry 10])])
+      baseline <- runDashboardScript (120, 40) id base [quitStep]
+      for_ removedAgentKeys $ \character -> do
+        pressed <- runDashboardScript (120, 40) id base [Press (Vty.EvKey (Vty.KChar character) []), quitStep]
+        (character, quietFacts pressed.runState) `shouldBe` (character, quietFacts baseline.runState)
+        pressed.runState.appOverlay `shouldBe` Nothing
+
   describe "docs/design.md §7" $ do
     it "states exactly the keys and actions the table declares" $ do
       documented <- documentedBindings
@@ -485,7 +440,7 @@ spec = describe "keybinding table" $ do
 
     it "lists exactly as many bindings as the table declares" $ do
       documented <- documentedBindings
-      length documented `shouldBe` length boardBindings + length sessionInputHelp
+      length documented `shouldBe` length boardBindings
 
     it "leaves no row of its table unaccounted for on either side" $ do
       documented <- documentedBindings
@@ -508,38 +463,21 @@ loadedModes =
     ("single-agent claude", SingleAgentMode ClaudeProvider)
   ]
 
--- | The four bindings a no-agent board is left without -- issue #521's six,
--- less the two issue #546 gave back -- written out rather than filtered from
--- 'requiresLoadedAgent', so a binding that quietly joined or left that
--- predicate fails this module instead of moving the expectation with it.
+-- | The one binding a no-agent board is left without, written out rather
+-- than filtered from 'requiresLoadedAgent', so a binding that quietly joined
+-- or left that predicate fails this module instead of moving the expectation
+-- with it.
 agentBindings :: [BoardAction]
-agentBindings =
-  [ ReviewSelection,
-    SolveSelection,
-    AutoSolveSelection,
-    ToggleApproval
-  ]
-
--- | The two the same issue put back, which the assertions below pair with
--- 'agentBindings' so that hiding either of them again fails here rather than
--- only in a golden frame.
-recoveryBindings :: [BoardAction]
-recoveryBindings = [KillWorking, ShowProcesses]
+agentBindings = [ToggleApproval]
 
 -- | The board's footer line with no provider loaded and nothing filtering.
 noAgentFooterHintLine :: Text
 noAgentFooterHintLine = boardFooterHintLine NoAgentMode defaultBoardMarks
 
--- | The two modes a session key is decoded in, with no optional binding
--- enabled and something still there to read what the session types.
-normalFocus, insertFocus :: SessionFocus
-normalFocus = SessionFocus noSessionInputCaps SessionNormal True
-insertFocus = SessionFocus noSessionInputCaps SessionInsert True
-
 -- | Every help row the overlay is allowed to show, from the definitions that
 -- back them rather than from a copy of the overlay's own output.
 declaredEntries :: [HelpEntry]
-declaredEntries = map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries
+declaredEntries = map bindingHelpEntry boardBindings <> mouseHelpEntries
 
 -- | One entry rendered the way the overlay renders it, so a row can be
 -- matched back to the definition that produced it.
@@ -555,7 +493,7 @@ rowOf entry = case helpRows (entry : declaredEntries) of
 declaredBindings :: [([Text], Text)]
 declaredBindings =
   [ (map singleKeyName entry.helpEntryKeys <> maybe [] pure entry.helpEntryGesture, contract)
-    | entry <- map bindingHelpEntry boardBindings <> sessionInputHelp,
+    | entry <- map bindingHelpEntry boardBindings,
       Just contract <- [entry.helpEntryContract]
   ]
 
@@ -595,16 +533,12 @@ documentedBindings = do
         . Text.replace " or " "/"
         . firstCell
 
--- | A dashboard with nothing open and no session in flight, which every
--- overlay case below starts from.
+-- | A dashboard with nothing open, which every overlay case below starts from.
 overlayBaseState :: IO AppState
 overlayBaseState = testAppState (fixtureBoard [])
 
 overlayIssue :: Issue
 overlayIssue = baseIssue 901 []
-
-overlayPullRequest :: PullRequest
-overlayPullRequest = basePullRequest 823 [901] False []
 
 withOverlay :: Overlay -> AppState -> AppState
 withOverlay overlay state = state {appOverlay = Just overlay}
@@ -615,76 +549,15 @@ withOverlay overlay state = state {appOverlay = Just overlay}
 --
 -- Total over the routes rather than over 'Overlay' -- which carries payloads
 -- and so cannot be enumerated -- with 'overlayRoute' holding the inventory
--- to nine. The three live-agent overlays appear more than once because the
--- row follows the focused session's /effective/ mode, and the cases that
--- pin that are the ones where the stored mode and the effective one differ.
+-- to three.
 overlayFooterCases :: AppState -> [(String, Overlay, AppState, [Text])]
 overlayFooterCases base =
   [ opened "help" HelpOverlay (map footerHint (scopeBindings HelpScope)),
     opened "details" (DetailsOverlay (IssueItem overlayIssue)) (map footerHint (scopeBindings DetailsScope)),
-    opened "settings" SettingsOverlay settingsFooterHints,
-    opened "processes" ProcessesOverlay processesFooterHints,
-    opened "incidents" IncidentsOverlay incidentsFooterHints,
-    opened "solve chooser" (SolveChooser SolveOnly overlayIssue) solveChooserFooterHints,
-    solveCase "solve waiting for an answer" SolveAttention SessionNormal (focusOf SessionNormal True),
-    solveCase "solve in insert mode" SolveAttention SessionInsert (focusOf SessionInsert True),
-    solveCase "solve still running" SolveRunning SessionNormal (focusOf SessionNormal False),
-    -- The stored mode says insert and nothing is left to read what it types,
-    -- which is the state 'liveSessionMode' exists to pin to normal.
-    solveCase "solve left in insert mode with no reader" SolveRunning SessionInsert (focusOf SessionNormal False),
-    -- An overlay whose session the map no longer holds still answers Esc and
-    -- q, so the row has to name them rather than go blank.
-    ( "solve whose session is gone",
-      SolveOverlay (overlayIssue.issueNumber + 1),
-      withOverlay (SolveOverlay (overlayIssue.issueNumber + 1)) base,
-      sessionFooterHints "answer" (focusOf SessionNormal False)
-    ),
-    pullRequestCase "pull request review in insert mode" SolveAttention SessionInsert (focusOf SessionInsert True),
-    pullRequestCase "pull request review still running" SolveRunning SessionNormal (focusOf SessionNormal False),
-    reviewCase "issue review revision in insert mode" IssueRevision ReviewRunning SessionInsert (focusOf SessionInsert True),
-    reviewCase "issue review revision in normal mode" IssueRevision ReviewRunning SessionNormal (focusOf SessionNormal True),
-    -- A canonical stage runs a subprocess and never reads typed text, so the
-    -- row is the no-input one however the session was left.
-    reviewCase "canonical issue review" InitialReview ReviewRunning SessionInsert (focusOf SessionNormal False)
+    opened "incidents" IncidentsOverlay incidentsFooterHints
   ]
   where
     opened name overlay declared = (name, overlay, withOverlay overlay base, declared)
-
-    focusOf mode liveInput = SessionFocus noSessionInputCaps mode liveInput
-
-    solveCase name phase mode sessionFocus =
-      ( name,
-        SolveOverlay overlayIssue.issueNumber,
-        (withOverlay (SolveOverlay overlayIssue.issueNumber) base)
-          { appSolveSessions =
-              Map.singleton overlayIssue.issueNumber ((testSolveSession overlayIssue phase) {sessionMode = mode})
-          },
-        sessionFooterHints "answer" sessionFocus
-      )
-
-    pullRequestCase name phase mode sessionFocus =
-      ( name,
-        PullRequestReviewOverlay overlayPullRequest.pullRequestNumber,
-        (withOverlay (PullRequestReviewOverlay overlayPullRequest.pullRequestNumber) base)
-          { appPullRequestReviewSessions =
-              Map.singleton
-                overlayPullRequest.pullRequestNumber
-                ((testPullRequestSession overlayPullRequest phase) {sessionMode = mode})
-          },
-        sessionFooterHints "answer" sessionFocus
-      )
-
-    reviewCase name reviewStage phase mode sessionFocus =
-      ( name,
-        ReviewOverlay overlayIssue.issueNumber,
-        (withOverlay (ReviewOverlay overlayIssue.issueNumber) base)
-          { appReviewSessions = Map.singleton overlayIssue.issueNumber staged
-          },
-        sessionFooterHints "send" sessionFocus
-      )
-      where
-        session = (testReviewSession overlayIssue phase) {sessionMode = mode}
-        staged = session {sessionDetail = session.sessionDetail {reviewSessionStage = reviewStage}}
 
 -- | What to call one overlay's footer route. Total in 'Overlay', so a new
 -- overlay cannot be added without deciding what its row says and adding a
@@ -693,13 +566,7 @@ overlayRoute :: Overlay -> String
 overlayRoute = \case
   HelpOverlay -> "help"
   DetailsOverlay _ -> "details"
-  SettingsOverlay -> "settings"
-  ProcessesOverlay -> "processes"
   IncidentsOverlay -> "incidents"
-  SolveChooser _ _ -> "solve chooser"
-  SolveOverlay _ -> "solve"
-  PullRequestReviewOverlay _ -> "pull request review"
-  ReviewOverlay _ -> "issue review"
 
 -- | Whether this overlay used to draw a hint line inside its own box. Total
 -- for the same reason 'overlayRoute' is.
@@ -707,16 +574,31 @@ drewItsOwnHint :: Overlay -> Bool
 drewItsOwnHint = \case
   HelpOverlay -> False
   DetailsOverlay _ -> False
-  SettingsOverlay -> True
-  ProcessesOverlay -> True
   IncidentsOverlay -> True
-  SolveChooser _ _ -> True
-  SolveOverlay _ -> True
-  PullRequestReviewOverlay _ -> True
-  ReviewOverlay _ -> True
 
 -- | One overlay drawn through the real 'drawOverlay', so what is asserted
 -- absent is absent from the box a user actually sees rather than from the
 -- source that builds it.
 overlayBoxLines :: AppState -> Overlay -> [Text]
 overlayBoxLines state overlay = renderWidgetLines (themeFor testOptions) 120 (drawOverlay state overlay)
+
+-- | The six keys the agent screens used: review, solve, autosolve, kill,
+-- processes, and settings.
+removedAgentKeys :: [Char]
+removedAgentKeys = "rSAxpo"
+
+-- | Everything an unbound key must leave alone on the base board: the overlay,
+-- the notice, the selection, the search and filter surfaces, and the service
+-- state a binding could have moved. The clock, the notice's expiry and the
+-- layout epochs are per-event maintenance and are deliberately not compared.
+quietFacts :: AppState -> (Maybe Overlay, Maybe Text, (Int, [(Int, Int)]), Bool, Bool, Bool, Bool, Bool)
+quietFacts state =
+  ( state.appOverlay,
+    shownNotice state,
+    (fromEnum state.appSelectedColumn, [(fromEnum column, row) | (column, row) <- Map.toList state.appSelectedRows]),
+    state.appSearch == Nothing,
+    state.appFilterPanel == Nothing,
+    state.appDrainerBusy || state.appApprovalBusy,
+    state.appSidebarVisible,
+    state.appExcerptsVisible
+  )

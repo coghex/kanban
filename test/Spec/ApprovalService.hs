@@ -32,7 +32,7 @@ import Kanban.UI.Approval
     approvalToggleApplied,
     approvalTogglePress,
   )
-import Kanban.UI.PullRequest (drainerTogglePress)
+import Kanban.UI.Drainer (drainerTogglePress)
 import Kanban.UI.Types (AppState (..))
 import Kanban.UI.Util (shownNotice)
 import Spec.Support.App (testAppState)
