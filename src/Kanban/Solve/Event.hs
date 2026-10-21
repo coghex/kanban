@@ -2,12 +2,11 @@
 {-# LANGUAGE DerivingStrategies #-}
 
 -- | The vocabulary describing a solve invocation's lifecycle, identity, and
--- terminal outcome: the events 'Kanban.Solve' emits, the events a provider's
+-- terminal outcome: the events a solve emitted, the events a provider's
 -- stream decodes into, and how both are classified or rendered for the chat
--- pane. Separated from "Kanban.Solve.Parse" (which turns raw provider JSON
--- into these types) and "Kanban.Solve.Unknown" (which bounds and aggregates
--- the unrecognized-payload case) because this module owns what the types
--- mean, not how one is produced or counted.
+-- pane. Separate from the parser and the unrecognized-payload aggregator that
+-- used to sit beside it because this module owns what the types mean, not how
+-- one is produced or counted.
 module Kanban.Solve.Event
   ( AgentEvent (..),
     ResumeProvenance (..),

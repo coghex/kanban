@@ -401,8 +401,7 @@ backendAssignment client =
 
 -- | Start the embedded review on the provider this install routes it to.
 --
--- The provider comes off the roster the cell is looked up in, the same way
--- 'Kanban.PullRequestFlow.pullRequestAssignment' takes its mode, so the
+-- The provider comes off the roster the cell is looked up in, so the
 -- backend that starts and the @issue_review@ cell it runs on cannot be
 -- resolved against two different rosters — and through the same
 -- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,

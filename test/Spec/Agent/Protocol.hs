@@ -1,14 +1,13 @@
--- | The wire protocols the agent layer speaks: the Codex app-server exchange,
--- its recovery paths, the stream reader, and how a finished handoff is
--- classified.
+-- | The wire protocols the agent layer speaks: the Codex app-server exchange
+-- and its recovery paths.
 module Spec.Agent.Protocol (spec) where
 
 import Control.Concurrent (forkIO, modifyMVar_, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (SomeException, throwTo, try)
+import Control.Exception (SomeException, try)
 import Control.Monad (void)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
-import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Map.Strict as Map
@@ -16,7 +15,6 @@ import qualified Data.Text.Encoding as TextEncoding
 import Kanban.Domain
 import Kanban.Models (ProviderName (..))
 import Kanban.Process (killManagedProcess, managedProcessPid)
-import Kanban.PullRequestFlow (flowOutcome)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     GitHubIssueOperation (..),
@@ -62,15 +60,6 @@ import Kanban.Review
     renderCanonicalIssueReviewResult,
     renderReviewResult
   )
-import Kanban.Solve (SolveOutcome (..), solveOutcome)
-import Kanban.StreamReader
-  ( StreamOutcome (..),
-    handleReadLine,
-    maxConsecutiveReadFailures,
-    onStreamAbandoned,
-    runStreamReader,
-    runStreamReaderWith
-  )
 import Spec.Support.Env
   ( createTemporaryDirectory,
     withEnvironmentValue,
@@ -84,7 +73,6 @@ import Spec.Support.Process
     reviewOutputs,
     waitForReviewEvents,
     expectNoFurtherClientRequests,
-    managedProcessFor,
     nextClientRequest,
     nextClientLine,
     protocolWarnings,
@@ -103,23 +91,13 @@ import Spec.Support.Process
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
     undeliveredSteers,
-    withManagedShell,
     withRecordingReviewClient
   )
 import System.Directory (createDirectoryIfMissing)
-import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
-import System.IO (hClose)
 import System.Posix.Process (getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
-import System.Process
-  ( CreateProcess (..),
-    StdStream (CreatePipe),
-    createProcess,
-    getPid,
-    proc,
-    waitForProcess
-  )
+import System.Process (getPid)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -824,190 +802,3 @@ spec = do
                        )
                      ]
         stopReviewClient client
-
-  describe "Kanban.StreamReader" $ do
-    it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
-      cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
-      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
-      abandonSeen <- newIORef ([] :: [Text])
-      let readLine = do
-            queued <- readIORef cursor
-            case queued of
-              [] -> pure (Right Nothing)
-              (line : rest) -> writeIORef cursor rest >> pure (Right (Just line))
-      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
-      outcome `shouldBe` StreamCompleted
-      seenLines <- reverse <$> readIORef onLineSeen
-      seenLines `shouldBe` ["one", "two", "three"]
-      readIORef abandonSeen `shouldReturn` []
-
-    it "resets its consecutive-failure budget after every successful read, tolerating many isolated failures over a long stream" $ do
-      -- Each simulated round fails one short of the bound, then succeeds:
-      -- never a run long enough to exhaust it, even though the total
-      -- failure count across the whole stream far exceeds the bound.
-      let failsBetweenSuccesses = maxConsecutiveReadFailures - 1
-          rounds = 12 :: Int
-          failure = Left (userError "simulated transient read failure")
-          scriptRound n = replicate failsBetweenSuccesses failure <> [Right (Just (ByteString.pack ("line-" <> show n)))]
-          script = concatMap scriptRound [1 .. rounds] <> [Right Nothing]
-      cursor <- newIORef script
-      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
-      abandonSeen <- newIORef ([] :: [Text])
-      let readLine = do
-            queued <- readIORef cursor
-            case queued of
-              [] -> pure (Right Nothing)
-              (next : rest) -> writeIORef cursor rest >> pure next
-      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
-      outcome `shouldBe` StreamCompleted
-      seenLines <- reverse <$> readIORef onLineSeen
-      seenLines `shouldBe` [ByteString.pack ("line-" <> show n) | n <- [1 .. rounds]]
-      readIORef abandonSeen `shouldReturn` []
-
-    it "gives up after maxConsecutiveReadFailures consecutive read failures instead of retrying forever or abandoning silently" $ do
-      attempts <- newIORef (0 :: Int)
-      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
-      abandonSeen <- newIORef ([] :: [Text])
-      let readLine = do
-            modifyIORef attempts (+ 1)
-            pure (Left (userError "simulated persistent read failure"))
-      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
-      outcome `shouldBe` StreamAbandoned
-      readIORef attempts `shouldReturn` maxConsecutiveReadFailures
-      readIORef onLineSeen `shouldReturn` []
-      reasons <- readIORef abandonSeen
-      case reasons of
-        [reason] -> do
-          reason `shouldSatisfy` Data.Text.isInfixOf (Data.Text.pack (show maxConsecutiveReadFailures))
-          reason `shouldSatisfy` Data.Text.isInfixOf "simulated persistent read failure"
-        _ -> expectationFailure ("expected exactly one abandonment diagnostic, got " <> show (length reasons))
-
-    it "onStreamAbandoned reports the diagnostic, remembers only the first reason, and terminates the still-live process" $
-      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
-        threadDelay 100000
-        managed <- managedProcessFor process
-        abandonReasonRef <- newIORef Nothing
-        diagnostics <- newIORef ([] :: [Text])
-        let emitDiagnostic message = modifyIORef diagnostics (message :)
-        onStreamAbandoned emitDiagnostic managed abandonReasonRef "stdout gave up"
-        onStreamAbandoned emitDiagnostic managed abandonReasonRef "stderr gave up too"
-        readIORef abandonReasonRef `shouldReturn` Just "stdout gave up"
-        seenDiagnostics <- reverse <$> readIORef diagnostics
-        seenDiagnostics `shouldBe` ["stdout gave up", "stderr gave up too"]
-        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
-
-    it "runStreamReader reads a real provider pipe through to EOF, exactly like the injected-action path" $ do
-      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "printf 'alpha\\nbeta\\n'"]) {std_out = CreatePipe}
-      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
-      abandonSeen <- newIORef ([] :: [Text])
-      outcome <- runStreamReader outputHandle "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
-      _ <- waitForProcess process
-      outcome `shouldBe` StreamCompleted
-      seenLines <- reverse <$> readIORef onLineSeen
-      seenLines `shouldBe` ["alpha", "beta"]
-      readIORef abandonSeen `shouldReturn` []
-
-    it "handleReadLine reports a failure when the EOF probe itself throws" $ do
-      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "sleep 30"]) {std_out = CreatePipe}
-      hClose outputHandle
-      result <- handleReadLine outputHandle
-      case result of
-        Left _ -> pure ()
-        Right _ -> expectationFailure "expected hIsEOF on a closed handle to fail"
-      managedProcessFor process >>= killManagedProcess
-      void (timeout 3000000 (waitForProcess process))
-
-    it "handleReadLine reports a failure when the line read is interrupted after the EOF probe already reported more to read" $ do
-      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "printf '%s' 'partial-line-without-a-newline'; sleep 30"]) {std_out = CreatePipe}
-      resultVar <- newEmptyMVar
-      readerThread <- forkIO (handleReadLine outputHandle >>= putMVar resultVar)
-      -- Long enough that the reader thread has certainly finished its
-      -- (non-blocking, data-already-pending) EOF probe and parked in the
-      -- blocking line read before the injected exception lands, so it
-      -- exercises the line-read 'try', not the EOF probe's.
-      threadDelay 500000
-      throwTo readerThread (userError "simulated line-read cancellation")
-      result <- timeout 5000000 (takeMVar resultVar)
-      case result of
-        Just (Left _) -> pure ()
-        Just (Right _) -> expectationFailure "expected the interrupted read to fail"
-        Nothing -> expectationFailure "handleReadLine did not return after being interrupted"
-      managedProcessFor process >>= killManagedProcess
-      void (timeout 3000000 (waitForProcess process))
-
-  -- Both workflows classify their terminal outcome through one shared
-  -- implementation, so every case below is asserted against 'solveOutcome'
-  -- and 'flowOutcome' together: they must agree on marker anchoring and on
-  -- exit-status precedence, and differ only in the failure diagnostic's
-  -- agent label.
-  describe "agent handoff outcome classification" $ do
-    let bothOutcomes message exitCode = (solveOutcome exitCode message, flowOutcome exitCode message)
-
-    it "treats a marker that begins the final message as a handoff" $
-      bothOutcomes "KANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
-        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
-
-    it "treats a marker that begins a later line as a handoff" $
-      bothOutcomes "I inspected the worktree.\nKANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
-        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
-
-    it "accepts an indented marker line" $
-      bothOutcomes "Summary:\n   \tKANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
-        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
-
-    -- The regression this classification exists for: the prompts tell the
-    -- agent to "stop with exactly KANBAN_NEEDS_INPUT: <question>", so a
-    -- completion summary quoting the contract used to turn a finished run
-    -- into a question nobody asked.
-    it "completes a successful run whose message only mentions the marker mid-line" $
-      bothOutcomes
-        "Opened PR #42. Had ambiguity arisen I would have stopped with KANBAN_NEEDS_INPUT: a concrete question."
-        ExitSuccess
-        `shouldBe` (SolveCompleted, SolveCompleted)
-
-    it "completes a successful run with no marker at all" $
-      bothOutcomes "PR #42 — anchored the marker match." ExitSuccess
-        `shouldBe` (SolveCompleted, SolveCompleted)
-
-    it "ignores an anchored marker whose question is empty" $
-      bothOutcomes "KANBAN_NEEDS_INPUT:   " ExitSuccess
-        `shouldBe` (SolveCompleted, SolveCompleted)
-
-    -- Deterministic rule: the last *valid* anchored line supplies the single
-    -- question, so a resumed session's newest ask is the one surfaced.
-    it "takes the last anchored line when several qualify" $
-      bothOutcomes
-        "KANBAN_NEEDS_INPUT: first question?\nstill working\nKANBAN_NEEDS_INPUT: second question?"
-        ExitSuccess
-        `shouldBe` (SolveNeedsInput "second question?", SolveNeedsInput "second question?")
-
-    it "skips a trailing empty marker in favour of the last valid anchored line" $
-      bothOutcomes "KANBAN_NEEDS_INPUT: real question?\nKANBAN_NEEDS_INPUT:" ExitSuccess
-        `shouldBe` (SolveNeedsInput "real question?", SolveNeedsInput "real question?")
-
-    -- A question the agent actually printed must outrank the exit status:
-    -- needs-input is always more useful than a failure that buries it.
-    it "keeps an anchored handoff when the agent exits nonzero" $
-      bothOutcomes "KANBAN_NEEDS_INPUT: which base branch?" (ExitFailure 1)
-        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
-
-    it "still fails a nonzero exit whose message only mentions the marker mid-line" $
-      bothOutcomes "aborted before I could stop with KANBAN_NEEDS_INPUT: a question" (ExitFailure 3)
-        `shouldBe` ( SolveFailed "Solver exited with status 3: aborted before I could stop with KANBAN_NEEDS_INPUT: a question",
-                     SolveFailed "PR agent exited with status 3: aborted before I could stop with KANBAN_NEEDS_INPUT: a question"
-                   )
-
-    it "reports a nonzero exit without a marker using each workflow's diagnostic" $
-      bothOutcomes "fatal: not a git repository" (ExitFailure 128)
-        `shouldBe` ( SolveFailed "Solver exited with status 128: fatal: not a git repository",
-                     SolveFailed "PR agent exited with status 128: fatal: not a git repository"
-                   )
-
-    it "omits the message from the diagnostic when the final message is blank" $
-      bothOutcomes "  \n  " (ExitFailure 2)
-        `shouldBe` (SolveFailed "Solver exited with status 2", SolveFailed "PR agent exited with status 2")
-
-    it "truncates a long failure message to 1000 characters" $ do
-      let (solveFailure, flowFailure) = bothOutcomes (Data.Text.replicate 1200 "x") (ExitFailure 1)
-      solveFailure `shouldBe` SolveFailed ("Solver exited with status 1: " <> Data.Text.replicate 1000 "x")
-      flowFailure `shouldBe` SolveFailed ("PR agent exited with status 1: " <> Data.Text.replicate 1000 "x")

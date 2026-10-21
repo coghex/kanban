@@ -3577,11 +3577,11 @@ runs) parses the manifest in §4 and:
   `Review/Tools.hs`, `Codex.hs`, `Claude.hs`,
   `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`, `ManagedPaths.hs`,
   `ApprovalService.hs`, `Process.hs`) invoke a literal external command that
-  has no matching `executable` manifest entry — `ProviderAdapter.hs` rather
-  than `Solve.hs` and `PullRequestFlow.hs` because issue #522 moved both
-  provider executable names into the one record those two flow modules now
-  read them back out of, which is what the same file's
-  `ProviderAdapterBoundaryTests` holds; `GitHub/Run.hs` rather than
+  has no matching `executable` manifest entry — `ProviderAdapter.hs` because
+  issue #522 moved both provider executable names into the one record the
+  flow modules read them back out of (those modules have since been removed),
+  which is what the same file's `ProviderAdapterBoundaryTests` holds;
+  `GitHub/Run.hs` rather than
   `GitHub.hs`
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
@@ -3596,23 +3596,13 @@ runs) parses the manifest in §4 and:
   `proc`/`findExecutable`/`readProcessWithExitCode`, a literal name passed to
   `Kanban.Drainer`'s timed `runProcess` helper, a `findExecutable` argument a
   `case` or `if` binds to string literals, and a location spelled as one
-  literal hung off a `getHomeDirectory` result. Five other modules call one of
-  those functions and are deliberately out, because none of them writes a name
+  literal hung off a `getHomeDirectory` result. Two other modules call one of
+  those functions and are deliberately out, because neither writes a name
   or a path any extractor could recover: `ServiceProcess.hs` and
   `UsageCommand.hs` are spawn helpers that pass `proc` an
-  executable *value* their caller computed; `Ping.hs` resolves
-  `findExecutable (pingExecutableName brand)`, whose argument is a
-  two-equation top-level function rather than the `case`/`if` binding the
-  indirect extractor reads, and builds its scratch directory with
-  `getXdgDirectory` rather than `getHomeDirectory`; and `Solve.hs` and
-  `PullRequestFlow.hs` (since issue #522) still resolve an executable with
-  `findExecutable`, but the name they resolve is `adapter.adapterExecutable`
-  rather than a literal they spell, so the literal lives in `ProviderAdapter.hs`,
-  which is scanned. Listing any of the five
+  executable *value* their caller computed. Listing either
   would add a member the extractors recover nothing from, which is a surface
-  entry that scans nothing rather than coverage; the `codex` and `claude` that
-  `Ping.hs` ultimately runs carry `executable` rows grounded in
-  the scanned modules that do spell them;
+  entry that scans nothing rather than coverage;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files, the
   tracked Claude plugin's packaged `commands/*.md` files, the tracked Grok
   plugin's packaged `SKILL.md` files, the tracked Kimi plugin's packaged

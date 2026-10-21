@@ -1,8 +1,6 @@
 module Kanban.Claude
   ( ScriptFlavor (..),
-    claudeEnvironment,
     claudeProbeArguments,
-    claudeScratchDirectory,
     decodeClaudeUsageText,
     fetchClaudeUsage,
     fetchClaudeUsageWith,
@@ -183,9 +181,8 @@ runClaudeProviderWith flavor timeoutMicros scriptPath claudePath = do
 
 -- | The fixed directory the probe runs from, so the client's folder-trust
 -- prompt happens at most once and session history lands outside the user's
--- project (§14). Shared with @kanban --ping claude@ for exactly that reason: a
--- directory whose trust question is already settled cannot strand a
--- non-interactive run at that prompt.
+-- project (§14). A directory whose trust question is already settled cannot
+-- strand a non-interactive run at that prompt.
 claudeScratchDirectory :: IO FilePath
 claudeScratchDirectory = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"

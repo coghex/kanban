@@ -1,17 +1,13 @@
 -- | The model roster reaching the Haskell spawn sites (MODEL-2) and the label
 -- every surface shows for the assignment in force (MODEL-3).
 --
--- Three things fail independently and are proved separately here. The role and
--- provider each action's spawn runs on. The embedded review thread and its
+-- Two things fail independently and are proved separately here. The embedded review thread and its
 -- @kanban_run_claude@ tool, which read their own two cells and each refuse on
 -- their own terms. And every surface that names an agent renders the display
 -- of the assignment actually in force -- the recorded one wherever a session
 -- has it, the live cell that surface's own role and provider select otherwise,
 -- and no model at all when neither can be resolved.
 --
--- The per-argument default-roster expectations live beside the argument
--- builders in "Spec.Agent.Solve" and "Spec.Agent.PullRequestFlow"; only what
--- crosses a boundary is here.
 module Spec.Agent.Roster (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
@@ -19,7 +15,7 @@ import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text
-import Kanban.Domain (Repository (..), defaultWorkflowConfig)
+import Kanban.Domain (defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
@@ -30,15 +26,7 @@ import Kanban.Models
     defaultRoster,
     encodeRoster,
     providerKey,
-    recordAssignment,
-    recordedAssignmentCell,
     roleKey
-  )
-import Kanban.PullRequestFlow
-  ( PullRequestAction (..),
-    PullRequestOrigin (..),
-    pullRequestAssignment,
-    pullRequestRole
   )
 import Kanban.Review
   ( CommandBounds (..),
@@ -51,14 +39,6 @@ import Kanban.Review
     issueReviseAssignment,
     reviewDeveloperInstructions,
     sendReviewMessage
-  )
-import Kanban.Solve
-  ( ResumeProvenance (..),
-    SolveWorkflow (..),
-    SolverBrand (..),
-    providerForBrand,
-    solveArguments,
-    solveAssignment,
   )
 import Spec.Support.Fixtures (fixtureReviewThread)
 import Spec.Support.Process
@@ -94,22 +74,6 @@ spec = do
       mapM_
         (\roster -> decodeRoster (encodeRoster roster) `shouldBe` Right roster)
         [rerosteredDefaults, distinctDisplays, claudeOnlyRoster, codexOnlyRoster, noAgentRoster]
-
-  describe "the role and provider a spawn runs on" $ do
-    -- MODEL-2's role matrix, asserted as a matrix rather than one arm
-    -- at a time, so an action added to either side has to be placed here.
-    it "maps each action to the role and provider its spawn runs on" $ do
-      map pullRequestRole [PullRequestReview, PullRequestRereview] `shouldBe` [PrReviewRole, PrReviewRole]
-      map pullRequestRole [PullRequestRevision, PullRequestRepair] `shouldBe` [PrReviseRole, PrReviseRole]
-      map providerForBrand [CodexSolver, ClaudeSolver] `shouldBe` [CodexProvider, ClaudeProvider]
-      -- The provider is part of what resolves, not something a later caller
-      -- recomputes, so each row names the provider its cell was read for.
-      solveAssignment defaultRoster CodexSolver
-        `shouldBe` (recordAssignment CodexProvider <$> assignmentFor defaultRoster SolveRole CodexProvider)
-      pullRequestAssignment defaultRoster PullRequestCodex PullRequestReview
-        `shouldBe` (recordAssignment ClaudeProvider <$> assignmentFor defaultRoster PrReviewRole ClaudeProvider)
-      pullRequestAssignment defaultRoster PullRequestClaude PullRequestRepair
-        `shouldBe` (recordAssignment ClaudeProvider <$> assignmentFor defaultRoster PrReviseRole ClaudeProvider)
 
   describe "the embedded issue review" $ do
     it "starts its thread and its turns on the roster's issue_review codex cell" $ do
@@ -261,16 +225,6 @@ spec = do
       withFakeClaudeCliUsing distinctDisplays ["echo $$ > \"$CLAUDE_CHILD_MARKER\"", "sleep 30"] fastBounds $ \_ client -> do
         message <- requireLeft "expected a claude reviewer past its deadline to time out" =<< runBoundedClaudeCall boundedCallMicros client "review"
         message `shouldBe` ("Claude " <> display <> " revision agent timed out after ten minutes")
-
-    -- A Kanban.Solve surface that had no assertion at all before this slice,
-    -- and would therefore have passed the src/ literal grep on a wrong-cell
-    -- or leftover-shim wiring.
-    it "names the resolved cell in the solver prompt" $ do
-      let cell = recordedAssignmentCell (cellOf (solveAssignment distinctDisplays CodexSolver))
-          arguments =
-            solveArguments 858 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig cell Nothing ResumeAnswer ""
-      unwords arguments
-        `shouldContain` Data.Text.unpack ("You are the canonical codex · " <> displayOf SolveRole CodexProvider <> " solver")
 
     -- Requirement 6: the wording change this slice makes, pinned against the
     -- compiled defaults so an unintended one is a failure.

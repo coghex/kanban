@@ -915,12 +915,12 @@ loadDecodedUsageCache value = case parse (withObject "usage cache" (.: "schemaVe
 -- | What one usage-cache transaction did.
 --
 -- The two halves are independent on purpose. 'usageCommitResult' is the
--- write: @kanban --ping@ makes a failed one fatal (section 14), so it may not
--- be blurred into anything advisory. 'usageCommitWarning' is the
--- 'UsageCacheInvalid' reading of the file the merge started from, which stays
--- non-fatal exactly as it is on the @--usage@ and ping load paths -- a corrupt
--- file is warned about and then replaced, not refused. A commit can carry
--- both: a corrupt base whose replacement then failed to land.
+-- write, which may not be blurred into anything advisory.
+-- 'usageCommitWarning' is the 'UsageCacheInvalid' reading of the file the
+-- merge started from, which stays non-fatal exactly as it is on the @--usage@
+-- load path -- a corrupt file is warned about and then replaced, not refused.
+-- A commit can carry both: a corrupt base whose replacement then failed to
+-- land.
 data UsageCommit = UsageCommit
   { usageCommitResult :: Either Text (),
     usageCommitWarning :: Maybe Text

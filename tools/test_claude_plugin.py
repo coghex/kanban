@@ -4,11 +4,11 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Guards the packaging promise of issue #77: a clean Claude Code installation
 can add claude-plugin/ as a marketplace and discover exactly the five
-workflows Kanban invokes by name (/solve, /pr-review, /pr-rereview,
+workflows Kanban's dashboard used to invoke by name (/solve, /pr-review, /pr-rereview,
 /pr-revise, /repair), none of which may set its own model/effort/permission-mode/
 working-directory configuration, depend on an untracked personal path, or
-drift from the invocation strings src/Kanban/Solve.hs and
-src/Kanban/PullRequestFlow.hs actually spawn. The bundled coordinator is a
+drift from the invocation strings Kanban's own dashboard used to spawn them
+with, which the packaged commands still carry. The bundled coordinator is a
 tracked copy of the Codex plugin's coordinator (issue #76), tested here
 standalone so the Claude bundle's own coverage never requires the Codex
 plugin's assets to exist.
@@ -31,8 +31,8 @@ that arc -- the /autosolve autonomous solve-and-review loop. /project-review and
 /auto-project-review were removed again when the guide replaced them.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
 commands directory (all twenty-four); HASKELL_PARITY_COMMAND_NAMES is the
-strictly smaller set Kanban's own Haskell code spawns by name (the five
-above). The drafting, document, roadmap, documentation-landing,
+strictly smaller set Kanban's own dashboard used to spawn by name (the five
+above; it spawns none now, and the set stays as the packaged partition). The drafting, document, roadmap, documentation-landing,
 backlog-audit, drainer-control, approved-pull-request,
 manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
 workflows
@@ -54,10 +54,11 @@ rather than trusting it to fire.
 
 Issue #125 packaged /repair ahead of the key that spawns it, so it briefly
 formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
-Done-column repair branch, so /repair is now spawned by name from
-src/Kanban/PullRequestFlow.hs and belongs in HASKELL_PARITY_COMMAND_NAMES with
-the rest; that third category is gone and discovery-minus-parity is the
-user-invoked set again. See tools/test_repair_workflow_contract.py for
+Done-column repair branch, so /repair belongs in HASKELL_PARITY_COMMAND_NAMES
+with the rest; that third category is gone and discovery-minus-parity is the
+user-invoked set again. The dashboard no longer spawns any of them (the agent
+execution layer was removed), and the set stays as the partition it always
+was. See tools/test_repair_workflow_contract.py for
 /repair's own behavioral contract.
 """
 
@@ -102,13 +103,9 @@ ORIGINAL_BUNDLE_VERSION = "1.0.0"
 # enumerates them.
 COMMAND_SIGIL = "/"
 
-SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
-PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
-# Since MODEL-2 the canonical reviewer's model and effort are roster cells
-# rather than literals in PullRequestFlow.hs, so the Haskell half of the
-# parity gate below reads the tracked example roster -- which
-# Spec.Config.Models holds byte-for-byte against the compiled defaults the
-# spawn sites actually resolve.
+# The canonical reviewer's model and effort are roster cells, so the gate
+# below reads the tracked example roster -- which Spec.Config.Models holds
+# byte-for-byte against the compiled defaults the spawn sites resolve.
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 TRACKED_ROSTER_READER = REPO_ROOT / "tools" / "kanban_models.py"
 BUNDLED_ROSTER_READER = PLUGIN_ROOT / "scripts" / "kanban_models.py"
@@ -129,16 +126,14 @@ REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # two files below rather than one.
 MANAGED_PATHS_HS = REPO_ROOT / "src" / "Kanban" / "ManagedPaths.hs"
 
-# The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
-# pins this set — and only this set — against src/Kanban/Solve.hs and
-# src/Kanban/PullRequestFlow.hs, so it must never grow to include a workflow
-# Kanban does not spawn.
+# The workflows Kanban's own dashboard used to spawn by name, kept as the
+# partition between them and the user- or daemon-invoked rest of the bundle.
 HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
 
 # The drafting and canonical issue-review workflows vendored by issue #118,
 # plus the issue-rereview repair loop vendored by issue #240. User- or
 # daemon-invoked, never spawned by Kanban's CLI, so they are packaged
-# and policy-checked but excluded from Haskell name parity above.
+# and policy-checked but excluded from the parity set above.
 DRAFTING_COMMAND_NAMES = {
     "issue",
     "draft-issues",
@@ -241,9 +236,8 @@ JANITOR_COMMAND_NAMES = {"janitor"}
 # and the eighth and last of the arc's commands: with it every personal copy of
 # a Kanban workflow command is retired. Rendered from
 # tools/command_sources/autosolve.md the way the eight sets above are, and like
-# them user-invoked and excluded from Haskell name parity -- Kanban's own
-# Haskell code spawns /solve and /pr-review directly and never this loop over
-# them. It is its own category rather than another solve or review name for the
+# them user-invoked and excluded from the parity set -- Kanban's own dashboard
+# spawned /solve and /pr-review directly and never this loop over them. It is its own category rather than another solve or review name for the
 # reason it is excluded from parity at all: it performs neither job itself. It
 # delegates the implementation to /solve and the verdict to /pr-review and
 # /pr-rereview, and what it contributes is the loop and the prohibitions --
@@ -396,10 +390,10 @@ class CommandDiscoveryTests(unittest.TestCase):
 
     def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
         # The two concepts must stay distinct: discovery covers every packaged
-        # workflow, while WorkflowNameParityTests pins only the ones Kanban's
-        # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting,
-        # document, and roadmap commands.
+        # workflow, while HASKELL_PARITY_COMMAND_NAMES is only the ones
+        # Kanban's dashboard used to spawn. Collapsing them back into one
+        # constant would silently stop discovering the drafting, document, and
+        # roadmap commands.
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
         self.assertEqual(
             EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES,
@@ -523,51 +517,6 @@ class CommandDiscoveryTests(unittest.TestCase):
             forbidden_lower = {key.lower() for key in FORBIDDEN_FRONTMATTER_KEYS}
             hits = keys & forbidden_lower
             self.assertEqual(hits, set(), f"{command_md} frontmatter must not set: {hits}")
-
-
-class WorkflowNameParityTests(unittest.TestCase):
-    """Pins the Kanban-spawned command names to the exact `/`-prefixed tokens
-    Kanban's Haskell invocation code spawns for the Claude brand, so a
-    rename on either side fails this test instead of failing silently at
-    runtime. Scoped to HASKELL_PARITY_COMMAND_NAMES, not the full discovery
-    set: the drafting commands issue #118 packaged are user- or
-    daemon-invoked, so Kanban's Haskell code must NOT spawn them."""
-
-    def test_claude_workflow_tokens_match_packaged_command_names(self):
-        solve_source = SOLVE_HS.read_text(encoding="utf-8")
-        solve_tokens = set(re.findall(r'workflowName \w+ ClaudeSolver = "/([\w-]+)"', solve_source))
-        self.assertEqual(solve_tokens, {"solve"}, "src/Kanban/Solve.hs workflowName Claude tokens changed")
-
-        pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
-        self.assertIn(
-            'commandName name = if brand == CodexSolver then "$" <> name else "/" <> name',
-            pr_flow_source,
-            "src/Kanban/PullRequestFlow.hs commandName no longer prefixes the Claude brand with /",
-        )
-        pr_flow_tokens = set(re.findall(r'commandName "([\w-]+)"', pr_flow_source))
-        self.assertEqual(
-            pr_flow_tokens,
-            {"pr-review", "pr-rereview", "pr-revise", "repair"},
-            "src/Kanban/PullRequestFlow.hs commandName tokens changed",
-        )
-
-        all_tokens = solve_tokens | pr_flow_tokens
-        self.assertEqual(all_tokens, HASKELL_PARITY_COMMAND_NAMES)
-
-    def test_no_drafting_command_is_spawned_by_kanbans_haskell_code(self):
-        # The other half of the discovery/parity split: a workflow outside the
-        # parity set appearing in Kanban's own invocation surface would mean
-        # this module's parity set is wrong, not that the non-parity set
-        # should grow.
-        haskell_sources = "\n".join(
-            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS)
-        )
-        spawned = set(re.findall(r'(?:workflowName \w+ \w+ = "|commandName ")[/$]?([\w-]+)"', haskell_sources))
-        # Non-vacuous: the same scan must still recover every name Kanban does
-        # spawn, so an extraction that silently matched nothing fails here.
-        self.assertEqual(spawned & EXPECTED_COMMAND_NAMES, HASKELL_PARITY_COMMAND_NAMES)
-        self.assertEqual(spawned & DRAFTING_COMMAND_NAMES, set())
-        self.assertEqual(spawned & DOCUMENT_COMMAND_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):
@@ -940,16 +889,12 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
 
 
 class SolveGateEscalationTests(unittest.TestCase):
-    """solve must escalate with the exact terminal line Kanban's own
-    invocation prompt uses (src/Kanban/Solve.hs), not a paraphrase, so
-    Kanban's KANBAN_NEEDS_INPUT handling recognizes it."""
+    """solve must escalate with the exact terminal line the dashboard's
+    KANBAN_NEEDS_INPUT handling recognized, not a paraphrase."""
 
     ESCALATION_TEXT = "KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."
 
-    def test_escalation_text_matches_solve_hs_verbatim(self):
-        solve_hs_source = SOLVE_HS.read_text(encoding="utf-8")
-        self.assertIn(self.ESCALATION_TEXT, solve_hs_source)
-
+    def test_solve_command_states_the_escalation_text_verbatim(self):
         solve_command_source = (COMMANDS_ROOT / "solve.md").read_text(encoding="utf-8")
         self.assertIn(self.ESCALATION_TEXT, solve_command_source)
 
@@ -1003,12 +948,10 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
     verify the canonical reviewer model/effort rather than deferring to an
     arbitrary local default.
 
-    Since MODEL-2 the Haskell half is the pr_review roster cell rather than a
-    literal in src/Kanban/PullRequestFlow.hs: Kanban's own PR review and
-    rereview spawns resolve roles.pr_review.<provider> from the roster, and
-    Spec.Config.Models holds models.toml.example byte-for-byte against the
-    compiled defaults, so reading the example here still pins exactly what
-    those spawns use. Since MODEL-4 the Python half is roster-backed too: the
+    The reference is the pr_review roster cell: roles.pr_review.<provider> in
+    the tracked models.toml.example, which Spec.Config.Models holds
+    byte-for-byte against the compiled defaults. Since MODEL-4 the Python
+    half is roster-backed too: the
     coordinator resolves the same cells through its own bundled
     kanban_models.py, and its four constants are the compiled fallbacks that
     reader is handed for a host carrying no roster file at all. Holding those
@@ -1019,7 +962,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
     from docs/agent-workflow-contract.md §2.2's general policy for this one
     nested-spawn path in this plugin only."""
 
-    def test_nested_reviewer_models_match_the_haskell_canonical_review_models(self):
+    def test_nested_reviewer_models_match_the_tracked_roster_example(self):
         roster_source = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
         codex_cell = roster_cell(roster_source, "roles.pr_review.codex")
         claude_cell = roster_cell(roster_source, "roles.pr_review.claude")
@@ -1027,12 +970,6 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         self.assertEqual(codex_cell["effort"], "xhigh")
         self.assertEqual(claude_cell["model"], "claude-opus-5-5")
         self.assertEqual(claude_cell["effort"], "xhigh")
-
-        # The literals must be gone from the Haskell source, or this gate
-        # would keep passing against a stale second authority.
-        pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
-        for retired in ("codexModel", "codexEffort", "claudeModel", "claudeEffort"):
-            self.assertNotIn(retired, pr_flow_source)
 
         # The coordinator's compiled fallbacks -- what its bundled reader is
         # handed for a host with no roster file, and therefore what a default

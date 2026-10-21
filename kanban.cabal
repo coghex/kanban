@@ -138,18 +138,16 @@ library kanban-internal
     Kanban.ManagedPaths
     Kanban.Models
     Kanban.Paths
-    Kanban.Ping
     Kanban.Process
     Kanban.Provider
-    Kanban.PullRequestFlow
     Kanban.Repository
     Kanban.Repository.Authority
     Kanban.Repository.Lease
+    Kanban.ProviderAdapter
     Kanban.Review
     Kanban.ReviewToolServer
     Kanban.Settings
-    Kanban.Solve
-    Kanban.StreamReader
+    Kanban.Solve.Event
     Kanban.Text
     Kanban.Transcript
     Kanban.Tracker
@@ -188,7 +186,6 @@ library kanban-internal
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
     Kanban.ServiceProcess
-    Kanban.ProviderAdapter
     Kanban.Review.Canonical
     Kanban.Review.Client
     Kanban.Review.Connection
@@ -197,9 +194,6 @@ library kanban-internal
     Kanban.Review.Stream
     Kanban.Review.Tools
     Kanban.Review.Types
-    Kanban.Solve.Event
-    Kanban.Solve.Parse
-    Kanban.Solve.Unknown
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
@@ -241,16 +235,12 @@ test-suite kanban-test
     Spec.ApprovalService
     Spec.Agent.Adapter
     Spec.Agent.Capture
-    Spec.Agent.Compatibility
     Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Lifecycle
-    Spec.Agent.Ping
     Spec.Agent.ClaudeReview
     Spec.Agent.Protocol
-    Spec.Agent.PullRequestFlow
     Spec.Agent.Roster
-    Spec.Agent.Solve
     Spec.Agent.Supervision
     Spec.Agent.ToolReentry
     Spec.Agent.Transcript

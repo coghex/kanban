@@ -18,16 +18,12 @@ module Main (main) where
 
 import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
-import qualified Spec.Agent.Compatibility as Compatibility
 import qualified Spec.ApprovalService as ApprovalService
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
-import qualified Spec.Agent.Ping as Ping
 import qualified Spec.Agent.ClaudeReview as ClaudeReview
 import qualified Spec.Agent.Protocol as Protocol
-import qualified Spec.Agent.PullRequestFlow as PullRequestFlow
 import qualified Spec.Agent.Roster as AgentRoster
-import qualified Spec.Agent.Solve as Solve
 import qualified Spec.Agent.Supervision as Supervision
 import qualified Spec.Agent.ToolReentry as ToolReentry
 import qualified Spec.Agent.Transcript as Transcript
@@ -170,14 +166,11 @@ suiteGroups =
     -- for the pair it names, at a cost of about 22 of this lane's seconds.
     SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
     SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
-    SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
     SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,
     SuiteGroup "Spec.Agent.Transcript" PingLane Transcript.spec,
-    SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
     SuiteGroup "Spec.Agent.Roster" LifecycleLane AgentRoster.spec,
-    SuiteGroup "Spec.Agent.Compatibility" PingLane Compatibility.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
     SuiteGroup "Spec.Repository.Authority" PingLane RepositoryAuthority.spec,
     SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
@@ -229,7 +222,6 @@ suiteGroups =
     SuiteGroup "Spec.UI.Browser" PingLane Browser.spec,
     SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
-    SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s
     SuiteGroup "Spec.Suite.Assignment" PingLane (Assignment.spec suiteGroups suiteColocations)
   ]
 

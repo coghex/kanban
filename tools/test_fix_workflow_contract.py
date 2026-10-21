@@ -941,20 +941,6 @@ class OriginBrandGateTests(unittest.TestCase):
                 f"{relative} demands the WRONG brand's origin marker",
             )
 
-    def test_the_marker_rules_the_assets_cite_really_exist(self):
-        # Non-vacuous anchor: the assets tell an agent to apply
-        # `originFromBody`'s rules, so those rules must still be the ones the
-        # Haskell enforces.
-        flow = read(REPO_ROOT / "src/Kanban/PullRequestFlow.hs")
-        self.assertIn("originFromBody :: Text -> Either Text PullRequestOrigin", flow)
-        for rejection in (
-            "PR body contains both pr-origin markers",
-            "PR body contains a duplicate pr-origin marker",
-            "PR origin marker must be the final non-whitespace content",
-            "PR body has no valid pr-origin marker",
-        ):
-            self.assertIn(rejection, flow, f"originFromBody no longer rejects: {rejection}")
-
 
 class ReusedWorktreeSafetyTests(unittest.TestCase):
     """A reused worktree may not smuggle commits onto the reviewed head.

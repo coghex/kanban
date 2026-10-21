@@ -42,7 +42,7 @@ sanitizationSpec = do
 -- of it being read as Markdown.
 --
 -- Provider event types travel through this rather than through 'excerpt'
--- ("Kanban.Solve.Parse"), and a type shaped like a heading or a comment is a
+-- (as the removed solve parser did), and a type shaped like a heading or a comment is a
 -- type like any other. Reading one as structure would leave it blank and fold
 -- every such type in with the payloads that genuinely name none.
 oneLineSpec :: Spec
