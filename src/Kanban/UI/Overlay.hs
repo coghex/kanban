@@ -176,8 +176,7 @@ drawOverlayBox state overlay geometry =
     interior = geometry.overlayGeometryInterior
     -- Windowed, the box is centered and 'vLimit' only caps it, so a panel
     -- whose rows are all fixed draws a border tight around them -- which is
-    -- how every session, settings, process, and incident box has always
-    -- looked. Fullscreen the height is measured against the footer instead,
+    -- how every incident box has always looked. Fullscreen the height is measured against the footer instead,
     -- so a box that stopped at its content would leave a strip of board
     -- between its bottom border and the hint row rather than running down to
     -- it.
@@ -326,13 +325,13 @@ elidedLine line = Widget Fixed Fixed $ do
 
 -- | The overall "nothing needs attention" claim is only ever made from a
 -- drainer observation that reported no incidents. With the source still
--- being checked or unavailable, the panel can only speak for the sessions it
--- holds itself, and says exactly that.
+-- being checked or unavailable the panel has nothing else to speak for, so it
+-- says only what is true of the drainer.
 emptyStateText :: DrainerSourceState -> Text
 emptyStateText source = case source of
   DrainerSourceReported _ -> "Nothing needs attention."
-  DrainerSourceChecking -> "No Kanban session needs attention; the PR drainer has not answered yet."
-  DrainerSourceUnavailable _ -> "No Kanban session needs attention; the PR drainer's open incidents are unavailable."
+  DrainerSourceChecking -> "The PR drainer has not answered yet."
+  DrainerSourceUnavailable _ -> "The PR drainer's open incidents are unavailable."
 
 -- | Says which of the source's states produced the list above, so an empty
 -- panel is never read as a verdict the drainer did not give. The detail is

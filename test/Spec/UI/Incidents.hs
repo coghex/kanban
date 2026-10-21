@@ -393,13 +393,18 @@ spec = do
       checking <- unansweredState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing)
       let checkingLines = panelLines (applyIncidentsAction OpenIncidentsPanel checking)
       checkingLines `shouldSatisfy` any (Data.Text.isInfixOf "checking for open incidents")
+      checkingLines `shouldSatisfy` any (Data.Text.isInfixOf "The PR drainer has not answered yet.")
       checkingLines `shouldSatisfy` not . any (Data.Text.isInfixOf "Nothing needs attention.")
+      -- Nothing monitors sessions any more, so neither state may speak for one.
+      checkingLines `shouldSatisfy` not . any (Data.Text.isInfixOf "session")
 
       unavailable <- unansweredState (DrainerStatus DrainerError "the PR drainer is not installed" DrainerServiceUnknown Nothing)
       let unavailableLines = panelLines (applyIncidentsAction OpenIncidentsPanel unavailable)
       unavailableLines
         `shouldSatisfy` any (Data.Text.isInfixOf "open incidents unavailable · the PR drainer is not installed")
+      unavailableLines `shouldSatisfy` any (Data.Text.isInfixOf "The PR drainer's open incidents are unavailable.")
       unavailableLines `shouldSatisfy` not . any (Data.Text.isInfixOf "Nothing needs attention.")
+      unavailableLines `shouldSatisfy` not . any (Data.Text.isInfixOf "session")
 
       -- A controller that answered without reporting a set at all is the
       -- same unanswered source, and must not be described as though the
