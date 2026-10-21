@@ -21,8 +21,8 @@
 -- 'StreamJsonProtocol' is the CLI channel "Kanban.Review.Stream" decodes.
 --
 -- Also the compatibility facade for the whole @Kanban.Review.*@ group: this
--- module's export list is what "Kanban.UI", "Kanban.Preflight", and the
--- test suite import, so the focused modules behind it can be rearranged
+-- module's export list is what "Kanban.UI" and the test suite
+-- import, so the focused modules behind it can be rearranged
 -- without touching a consumer.
 module Kanban.Review
   ( CanonicalIssueReviewResult (..),

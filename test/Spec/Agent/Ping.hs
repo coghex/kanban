@@ -54,7 +54,6 @@ import Kanban.Ping
     runPing,
     sweepOwnedGroup,
   )
-import Kanban.Preflight (gatherPreflightEnvironment)
 import Kanban.Process (ProcessIdentity (..))
 import Kanban.Usage (UsageAcquisition (..), acquireUsageReport)
 import Options.Applicative (defaultPrefs, execParserPure, getParseResult)
@@ -595,11 +594,6 @@ spec = do
         config <- refreshingConfig root
         _ <- acquireUsageReport UsageForceFresh False DualMode config
         refreshesRecorded root `shouldReturn` ["codex", "claude"]
-        pingsRecorded root `shouldReturn` []
-
-    it "launches no ping from the readiness gathering behind --doctor and preflight" $
-      withPingRoot $ \root -> do
-        _ <- gatherPreflightEnvironment "."
         pingsRecorded root `shouldReturn` []
 
     -- Release verification is the same account-status probe path, which

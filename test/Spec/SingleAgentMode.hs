@@ -5,8 +5,7 @@
 -- Where that module asks what a board refuses, this one asks what a board
 -- /selects/: every pull-request action, the embedded review's backend and the
 -- prose it runs under, a fresh solve, the usage probes and the sidebar blocks
--- they feed, @--ping@'s brand, and the preflight checks each of those
--- actually depends on.
+-- they feed, and @--ping@'s brand.
 --
 -- Two variants throughout, never one standing in for the other. A Codex-only
 -- install and a Claude-only install are the same mode and opposite answers,
@@ -21,8 +20,8 @@
 -- entry point only projects -- 'agentForAction' and 'pullRequestAssignment'
 -- for routing, 'recordedPullRequestBrand' for a worker that already exists,
 -- 'embeddedReviewProvider' for the review backend, 'usageProviders' for the
--- probes, 'pingBrandRefusal' for the
--- command line, and 'actionReport' for readiness -- so the whole matrix is
+-- probes, and 'pingBrandRefusal' for the
+-- command line -- so the whole matrix is
 -- settled with no terminal, no subprocess, and no provider account.
 module Spec.SingleAgentMode (spec) where
 
@@ -49,12 +48,6 @@ import Kanban.Models
     recordAssignment,
   )
 import Kanban.Ping (PingBrand (..), pingBrandName, pingBrandRefusal)
-import Kanban.Preflight
-  ( IssueOrigin (..),
-    PreflightAction (..),
-    PreflightProblem (..),
-    ProviderProbe (..),
-  )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestOrigin (..),
@@ -66,7 +59,7 @@ import Kanban.PullRequestFlow
     solveReviewerAssignment,
   )
 import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReviewCell, embeddedReviewProvider, githubToolName, questionToolName, reviewDeveloperInstructions)
-import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor, providerForBrand)
+import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
 import Kanban.UI.Theme (themeFor)
@@ -74,7 +67,6 @@ import Kanban.UI.Types (AppState (..))
 import Kanban.Usage (usageProviders)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard, testOptions)
-import Spec.Support.Preflight (blockedProblemsIn, blockedProblemsWith, readyPreflightEnvironment, readyProviderProbe, withClaudeProbe, withCodexProbe)
 import Spec.Support.Render (renderWidgetLines)
 import Spec.Support.Roster (cellOf, claudeOnlyRoster, codexOnlyRoster)
 import Test.Hspec
@@ -86,7 +78,6 @@ spec = describe "single-agent operating mode" $ do
   reviewSpec
   usageSpec
   pingSpec
-  preflightSpec
 
 -- ---------------------------------------------------------------------------
 -- The two installs
@@ -102,14 +93,13 @@ data Variant = Variant
   { variantName :: String,
     variantRoster :: ModelRoster,
     variantProvider :: ProviderName,
-    variantBrand :: SolverBrand,
-    variantUnloaded :: SolverBrand
+    variantBrand :: SolverBrand
   }
 
 variants :: [Variant]
 variants =
-  [ Variant "codex-only" codexOnlyRoster CodexProvider CodexSolver ClaudeSolver,
-    Variant "claude-only" claudeOnlyRoster ClaudeProvider ClaudeSolver CodexSolver
+  [ Variant "codex-only" codexOnlyRoster CodexProvider CodexSolver,
+    Variant "claude-only" claudeOnlyRoster ClaudeProvider ClaudeSolver
   ]
 
 -- | The mode a variant's own roster derives, taken through 'operatingModeFor'
@@ -543,135 +533,3 @@ pingSpec = describe "the ping it refuses" $ do
   where
     brandOfPing PingCodex = CodexSolver
     brandOfPing PingClaude = ClaudeSolver
-
--- ---------------------------------------------------------------------------
--- Readiness
--- ---------------------------------------------------------------------------
-
-preflightSpec :: Spec
-preflightSpec = describe "the executables it does not require" $ do
-  -- The review's second spec addition. A check is a claim that this machine
-  -- must be able to run a specific executable, and this mode never spawns the
-  -- brand it does not load, so blocking on a missing one would refuse actions
-  -- the install is perfectly able to run.
-  it "blocks on nothing when only the loaded provider is installed" $
-    sequence_
-      [ (variant.variantName, action, blockedProblemsIn (without variant) (variantMode variant) action)
-          `shouldBe` (variant.variantName, action, [])
-      | variant <- variants,
-        action <- modeSensitiveActions variant
-      ]
-
-  -- The positive half: the provider it /does/ load is still required, so this
-  -- is a narrowing of the check set rather than its removal.
-  it "still blocks when the loaded provider is missing" $
-    sequence_
-      [ (variant.variantName, action, blockedProblemsIn (withoutLoaded variant) (variantMode variant) action)
-          `shouldBe` (variant.variantName, action, [ExecutableUnavailable])
-      | variant <- variants,
-        action <- modeSensitiveActions variant
-      ]
-
-  -- The other half of D-7, and the one the two arms above create the room for:
-  -- a session that already exists spawns the provider its own specification
-  -- recorded, whatever the mode now routes to, so its readiness has to be
-  -- about that provider and not about the routed one.
-  --
-  -- Without this the two correct rules meeting produce a hole: preflight
-  -- clears the loaded provider while the launch replays the other one, and a
-  -- resumed worker reaches an executable nothing probed. Every route is
-  -- crossed with a record naming the brand this install does /not/ load,
-  -- because that is the only combination in which the two answers differ.
-  it "checks the provider a recorded assignment will really launch, not the routed one" $
-    sequence_
-      [ (variant.variantName, origin, action, blocked)
-          `shouldBe` (variant.variantName, origin, action, [ExecutableUnavailable])
-      | variant <- variants,
-        (origin, action) <- everyRoute,
-        -- The install loads its own provider and has only that executable;
-        -- the resumed worker's record names the other one.
-        let blocked =
-              blockedProblemsWith
-                (without variant)
-                (variantMode variant)
-                (Just (recordedOn variant.variantUnloaded action))
-                (ActionPullRequestFlow origin action)
-      ]
-
-  -- The control that keeps the arm above from passing on any missing probe:
-  -- the same recorded launch, on a machine that does have that executable, is
-  -- ready -- so it is the record's own provider being probed rather than
-  -- readiness having simply become stricter.
-  it "clears that same recorded launch when its own provider is installed" $
-    sequence_
-      [ (variant.variantName, origin, action, blocked)
-          `shouldBe` (variant.variantName, origin, action, [])
-      | variant <- variants,
-        (origin, action) <- everyRoute,
-        let blocked =
-              blockedProblemsWith
-                readyPreflightEnvironment
-                (variantMode variant)
-                (Just (recordedOn variant.variantUnloaded action))
-                (ActionPullRequestFlow origin action)
-      ]
-
-  -- A fresh action has no record, so it still asks the mode -- which is what
-  -- every arm above this one covers, restated here as the boundary between
-  -- the two.
-  it "still asks the mode when nothing was recorded" $
-    sequence_
-      [ (variant.variantName, action, blockedProblemsWith (without variant) (variantMode variant) Nothing action)
-          `shouldBe` (variant.variantName, action, [])
-      | variant <- variants,
-        action <- modeSensitiveActions variant
-      ]
-
-  -- The negative control. Dual mode still requires both, so an autosolve run
-  -- or a Codex-origin review on a machine with no Claude is still blocked.
-  it "still requires both brands in dual mode" $ do
-    blockedProblemsIn withoutClaude DualMode (ActionAutoSolve CodexSolver) `shouldBe` [ExecutableUnavailable]
-    blockedProblemsIn withoutClaude DualMode (ActionPullRequestFlow PullRequestCodex PullRequestReview)
-      `shouldBe` [ExecutableUnavailable]
-    blockedProblemsIn withoutClaude DualMode (ActionIssueReview IssueOriginUnmarked)
-      `shouldBe` [ExecutableUnavailable]
-    -- A Claude-origin revision authors its amendment through
-    -- kanban_run_claude, so dual mode still needs that CLI for it.
-    blockedProblemsIn withoutClaude DualMode (ActionIssueRevision IssueOriginClaude)
-      `shouldBe` [ExecutableUnavailable]
-  where
-    -- Every action whose provider set the mode moves: the canonical issue
-    -- review, the supported embedded revisions -- whose coordinator and whose
-    -- amendment author both collapse onto the loaded provider -- an autosolve
-    -- run's own review of its pull request, every supported pull-request
-    -- route, and the nested rereview a revision or repair spawns from inside
-    -- its own session.
-    --
-    -- Every issue origin for the two issue-side actions, because in dual mode
-    -- the origin is what picks the second brand, and this mode is where that
-    -- second brand stops existing.
-    --
-    -- The autosolve run is the loaded brand's, because a solve's brand is the
-    -- caller's choice rather than the mode's -- the chooser auto-selects the
-    -- loaded provider, and a run recorded on the other brand is still owed a
-    -- block for the executable it really would spawn.
-    modeSensitiveActions variant =
-      [ActionIssueReview origin | origin <- issueReviewOrigins]
-        <> [ActionIssueRevision origin | origin <- issueRevisionOrigins]
-        <> [ActionAutoSolve variant.variantBrand]
-        <> [ActionPullRequestFlow origin action | (origin, action) <- everyRoute]
-    issueReviewOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginGoogle, IssueOriginUnmarked]
-    issueRevisionOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked]
-    -- What a worker created before the roster moved recorded: that brand's
-    -- own cell for the role the action takes, built the way a launch builds
-    -- it rather than as a bare provider name.
-    recordedOn brand action =
-      recordAssignment
-        (providerForBrand brand)
-        (cellOf (assignmentFor defaultRoster (roleOfAction action) (providerForBrand brand)))
-    without variant = probeless variant.variantUnloaded
-    withoutLoaded variant = probeless variant.variantBrand
-    withoutClaude = probeless ClaudeSolver
-    probeless CodexSolver = withCodexProbe missing
-    probeless ClaudeSolver = withClaudeProbe missing
-    missing = (readyProviderProbe CodexSolver) {probeExecutable = Nothing}

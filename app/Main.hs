@@ -2,14 +2,12 @@ module Main (main) where
 
 import Control.Monad (unless)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
 import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
 import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
 import Kanban.Ping (PingMode (..), pingBrandRefusal, pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
-import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
 import Kanban.ReviewToolServer (serveReviewTools)
 import Kanban.UI (runDashboard)
@@ -73,13 +71,6 @@ main = do
     ReviewToolServerMode endpointDirectory ->
       exitWith =<< serveReviewTools stdin stdout endpointDirectory
     GlyphTestMode -> runGlyphTest
-    -- Read-only, and deliberately ahead of configuration and repository
-    -- resolution: a fresh clone with no configured remote still needs to be
-    -- able to ask why an AI action would not start.
-    DoctorMode -> do
-      environment <- gatherPreflightEnvironment parsedOptions.optionPath
-      mapM_ TextIO.putStrLn (doctorLines environment)
-      unless (doctorReady environment) exitFailure
     -- Configuration but no repository: usage is global (§14), so this answers
     -- from a directory that is not a checkout at all, while still honoring an
     -- explicit --config and the global timeout and cache settings it carries.

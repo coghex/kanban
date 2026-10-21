@@ -818,7 +818,6 @@ class SingleSourceInstallPathTests(unittest.TestCase):
         "tools/approve_issues_service.py",
         "src/Kanban/ManagedPaths.hs",
         "src/Kanban/Review/Canonical.hs",
-        "src/Kanban/Preflight.hs",
     )
     TOOLS = Path(__file__).resolve().parent
     REPO_ROOT = TOOLS.parent

@@ -168,9 +168,9 @@ data IssueReviewerSource
   deriving stock (Eq, Show)
 
 -- | Select where the canonical reviewer should be, without yet asking
--- whether it is there. Preflight needs the selection alone: it tells a
--- never-installed path apart from one occupied by something else, and a
--- resolution that failed on absence would collapse that distinction.
+-- whether it is there. The selection alone tells a never-installed path
+-- apart from one occupied by something else, and a resolution that failed on
+-- absence would collapse that distinction.
 --
 -- Precedence is @KANBAN_ISSUE_REVIEW_INSTALL_DIR@, then the recorded
 -- backend, then the directory the record itself lives in. An override that

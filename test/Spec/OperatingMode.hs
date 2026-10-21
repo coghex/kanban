@@ -192,7 +192,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, True, True, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, True, True, False]
 
   -- The mission modes are gone, not merely unselected: the parser turns each
   -- spelling away as an option it does not know, so no invocation can reach a
@@ -241,6 +241,34 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
       Failure failure -> fst (renderFailure failure "kanban") `shouldNotSatisfy` isInfixOf "--worker-spec"
       _ -> expectationFailure "--help did not render help"
 
+  -- The readiness mode removed with the probe behind it, refused the same way
+  -- in either argument order and named in the diagnostic: a flag the parser
+  -- no longer knows cannot be rescued by sitting before or after a mode that
+  -- still exists.
+  it "refuses --doctor as an unknown option, naming it" $
+    sequence_
+      [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
+        | arguments <-
+            [ ["--doctor"],
+              ["--doctor", "--usage"],
+              ["--usage", "--doctor"]
+            ],
+          let refusal = case execParserPure defaultPrefs optionsParserInfo arguments of
+                Failure failure ->
+                  let (message, code) = renderFailure failure "kanban"
+                   in Just (code, "Invalid option `--doctor'" `isInfixOf` message)
+                _ -> Nothing
+      ]
+
+  it "renders --help without listing --doctor" $
+    case execParserPure defaultPrefs optionsParserInfo ["--help"] of
+      Failure failure -> do
+        let (message, code) = renderFailure failure "kanban"
+        code `shouldBe` ExitSuccess
+        message `shouldSatisfy` isInfixOf "--usage"
+        message `shouldNotSatisfy` isInfixOf "--doctor"
+      _ -> expectationFailure "--help did not render help"
+
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
       [ (mode, launchModeRefusal mode (Right noAgentRoster)) `shouldBe` (mode, Just noAgentModeMessage)
@@ -264,8 +292,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
       ]
 
   -- Everything else answers about the terminal, the environment, or the
-  -- board, so none of it is refused — `--doctor` least of all, since saying
-  -- why an AI action would not start is what it is for.
+  -- board, so none of it is refused.
   it "refuses no other mode, whatever the roster" $
     sequence_
       [ (mode, launchModeRefusal mode loaded) `shouldBe` (mode, Nothing)
@@ -283,7 +310,6 @@ everyMode =
     launchMode
     [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
       testOptions {optionGlyphTest = True},
-      testOptions {optionDoctor = True},
       testOptions {optionUsage = True},
       testOptions {optionPing = ["codex"]},
       testOptions
