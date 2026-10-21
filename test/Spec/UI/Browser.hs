@@ -55,7 +55,7 @@ import Kanban.Domain
 import Kanban.Filter (FilterCriteria (..), LifecycleFacet (..))
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Events (BoardActionGate (..), blockedByCompletedLoad, boardActionGate, mutatesSelectedWork)
-import Kanban.UI.Keys (BoardAction (..), requiresLoadedAgent)
+import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Selection (selectedBoardItem)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, itemUrl, selectedRow, shownNotice)
@@ -273,10 +273,9 @@ openerSpec = describe "running the opener" $ do
 
 keySpec :: Spec
 keySpec = describe "the w binding" $ do
-  -- The review's classification, as the three total predicates that decide
+  -- The review's classification, as the two total predicates that decide
   -- where a binding is live, and the gate they compose into.
-  it "is available without an agent, mutates nothing, and is inert under the blocker" $ do
-    requiresLoadedAgent OpenCardPage `shouldBe` False
+  it "mutates nothing and is inert under the blocker" $ do
     mutatesSelectedWork OpenCardPage `shouldBe` False
     blockedByCompletedLoad OpenCardPage `shouldBe` True
     plain <- boardState

@@ -16,7 +16,6 @@ import Data.Foldable (for_)
 import Data.Text (Text)
 import qualified Data.Text
 import Kanban.Domain
-import Kanban.Models (OperatingMode (..))
 import Kanban.UI (drawApplication)
 import Kanban.UI.Events
   ( IncidentsAction (..),
@@ -132,21 +131,21 @@ spec = do
     it "never hands an overlay a smaller box than its windowed one" $
       for_ [(overlay, width, height, reserved) | overlay <- everyOverlay, width <- terminalWidths, height <- terminalHeights, reserved <- reservedRows] $
         \(overlay, width, height, reserved) -> do
-          let windowed = overlayGeometryFor DualMode overlay False width height reserved
-              full = overlayGeometryFor DualMode overlay True width height reserved
+          let windowed = overlayGeometryFor overlay False width height reserved
+              full = overlayGeometryFor overlay True width height reserved
               label = (name overlay, width, height, reserved)
           (label, full.overlayGeometryWidth >= windowed.overlayGeometryWidth) `shouldBe` (label, True)
           (label, full.overlayGeometryHeight >= windowed.overlayGeometryHeight) `shouldBe` (label, True)
 
     it "keeps the windowed box exactly what it has always been" $
       for_ everyOverlay $ \overlay -> do
-        let windowed = overlayGeometryFor DualMode overlay False 200 48 4
+        let windowed = overlayGeometryFor overlay False 200 48 4
         (name overlay, (windowed.overlayGeometryWidth, windowed.overlayGeometryHeight))
-          `shouldBe` (name overlay, windowedOverlayBox DualMode overlay)
+          `shouldBe` (name overlay, windowedOverlayBox overlay)
         (name overlay, windowed.overlayGeometryInterior) `shouldBe` (name overlay, BoundedInterior)
 
     it "spans the terminal less one column of frame on each side when it fits" $ do
-      let full = overlayGeometryFor DualMode HelpOverlay True 200 48 4
+      let full = overlayGeometryFor HelpOverlay True 200 48 4
       full.overlayGeometryWidth `shouldBe` 200 - 2 * fullscreenSideMargin
       full.overlayGeometryHeight `shouldBe` 48 - 4
       full.overlayGeometryInterior `shouldBe` GreedyInterior

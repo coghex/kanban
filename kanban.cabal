@@ -136,7 +136,6 @@ library kanban-internal
     Kanban.GitHub
     Kanban.Layout
     Kanban.ManagedPaths
-    Kanban.Models
     Kanban.Paths
     Kanban.Process
     Kanban.Provider
@@ -228,7 +227,6 @@ test-suite kanban-test
     Spec.Board.Workflow
     Spec.Config.Consumers
     Spec.Config.Loading
-    Spec.Config.Models
     Spec.Design.Entries
     Spec.Design.Witnesses
     Spec.Drainer
@@ -241,12 +239,10 @@ test-suite kanban-test
     Spec.GitHub.RecordLock
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
-    Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease
     Spec.Repository.State
-    Spec.SingleAgentMode
     Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe
@@ -263,7 +259,6 @@ test-suite kanban-test
     Spec.Support.ReaderProbes
     Spec.Support.RecordWriters
     Spec.Support.Render
-    Spec.Support.Roster
     Spec.Support.UsageWriters
     Spec.Suite.Assignment
     Spec.UI.Browser

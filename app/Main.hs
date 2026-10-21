@@ -2,11 +2,10 @@ module Main (main) where
 
 import Control.Monad (unless)
 import qualified Data.Text as Text
-import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
-import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
 import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
@@ -21,31 +20,7 @@ main = do
   -- the one decision about which invocations become a board -- and therefore
   -- which of them take the repository's lease -- lives where the test suite
   -- can reach it. This module is not built by @test-suite kanban-test@.
-  let selectedMode = launchMode parsedOptions
-  -- The operating mode gate (§14): a mode that reaches a provider has nothing
-  -- to reach when the roster loads none. Asked only of the modes that need
-  -- one, so the dashboard does not read models.toml twice. The decision is
-  -- 'launchModeRefusal' in the library, which the suite covers; this reports
-  -- what it answered and nothing more.
-  loadedRoster <-
-    if launchModeNeedsProvider selectedMode
-      then Just <$> loadModelRoster
-      else pure Nothing
-  case launchModeRefusal selectedMode <$> loadedRoster of
-    Just (Just message) -> do
-      hPutStrLn stderr ("kanban: " <> Text.unpack message)
-      exitFailure
-    _ -> pure ()
-  -- The provider set the run-and-exit mode below reports on, retained from
-  -- the read the gate above already made rather than loading the file a
-  -- second time. Single-agent narrows it to the one loaded brand (§14).
-  --
-  -- 'NoAgentMode' stands for "this invocation loaded no roster", which the
-  -- usage arm below cannot observe: 'launchModeNeedsProvider' is exactly the
-  -- set of modes that load one, and the gate above has already exited for a
-  -- roster that loads no provider.
-  let operatingMode = maybe NoAgentMode loadedOperatingMode loadedRoster
-  case selectedMode of
+  case launchMode parsedOptions of
     GlyphTestMode -> runGlyphTest
     -- Configuration but no repository: usage is global (§14), so this answers
     -- from a directory that is not a checkout at all, while still honoring an
@@ -71,7 +46,7 @@ main = do
                     usageModeCache = cacheOn,
                     usageModeJson = parsedOptions.optionJson
                   }
-          produced <- runUsageMode mode operatingMode resolvedConfig
+          produced <- runUsageMode mode resolvedConfig
           unless produced exitFailure
     DashboardMode -> do
       -- An explicit --config is resolved against kanban's own launch

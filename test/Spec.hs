@@ -25,7 +25,6 @@ import qualified Spec.Board.Tracker as Tracker
 import qualified Spec.Board.Workflow as Workflow
 import qualified Spec.Config.Consumers as ConfigConsumers
 import qualified Spec.Config.Loading as ConfigLoading
-import qualified Spec.Config.Models as Models
 import qualified Spec.Design.Witnesses as DesignWitnesses
 import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
@@ -36,12 +35,10 @@ import qualified Spec.GitHub.ConcurrentReaders as ConcurrentReaders
 import qualified Spec.GitHub.RecordLock as RecordLock
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
-import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.Lease as RepositoryLease
 import qualified Spec.Repository.State as RepositoryState
-import qualified Spec.SingleAgentMode as SingleAgentMode
 import Spec.Support.Lanes
   ( Colocation (..),
     Lane (..),
@@ -131,7 +128,6 @@ main = do
 suiteGroups :: [SuiteGroup]
 suiteGroups =
   [ SuiteGroup "Spec.Agent.ManagedProcess.Lifecycle" LifecycleLane ManagedProcess.lifecycleSpec, -- 53.8s
-    SuiteGroup "Spec.Config.Models" PingLane Models.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
     SuiteGroup "Spec.Repository.Authority" PingLane RepositoryAuthority.spec,
     SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
@@ -157,8 +153,6 @@ suiteGroups =
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,
-    SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,
-    SuiteGroup "Spec.SingleAgentMode" PingLane SingleAgentMode.spec,
     SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,

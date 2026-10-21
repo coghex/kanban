@@ -17,7 +17,6 @@ module Kanban.UI.Refresh
     startFocusRefresh,
     startQueuedBoardRefresh,
     startUsageRefreshes,
-    usageRefreshProviders,
   )
 where
 
@@ -37,7 +36,6 @@ import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
 import Kanban.Domain
-import Kanban.Models (OperatingMode)
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhFetchGuard,
@@ -89,32 +87,14 @@ startFocusRefresh = do
   inFlight <- liftIO (coordinatorOpenCycleInFlight state.appRefreshCoordinator)
   when (focusRefreshDue now state inFlight) startAllRefreshes
 
--- | The usage half of an update: one refresh per provider the operating mode
--- has to observe.
+-- | The usage half of an update: one refresh per provider.
 --
--- Startup, @u@, the sidebar's @↻@, and eligible focus events all reach this,
--- so gating it here keeps a board that loads no provider from spawning a
--- usage probe. Each of those entry points still updates GitHub in every mode.
---
--- Which providers those are is 'usageRefreshProviders', a pure function,
--- because an 'EventM' cannot be run outside brick and the suite has to be
--- able to hold this arm to something.
+-- Startup, @u@, the sidebar's @↻@, and eligible focus events all reach this.
+-- The providers are 'Kanban.Usage.usageProviders' rather than a list of this
+-- module's own, so the board's refresh, the sidebar's blocks, and
+-- @kanban --usage@ cannot disagree about which accounts are read.
 startUsageRefreshes :: EventM Name AppState ()
-startUsageRefreshes = do
-  state <- get
-  mapM_ startProviderRefresh (usageRefreshProviders state.appOperatingMode)
-
--- | The providers one update probes.
---
--- 'Kanban.Usage.usageProviders' rather than a list of its own, so the board's
--- refresh, the sidebar's blocks, and @kanban --usage@ cannot disagree about
--- which accounts this install reads: both in dual mode, the loaded one alone
--- in single-agent, and none at all with no provider loaded.
---
--- Kept as a name here because it is the arm 'startUsageRefreshes' holds and
--- the suite reaches, not because the decision is this module's.
-usageRefreshProviders :: OperatingMode -> [UsageProvider]
-usageRefreshProviders = usageProviders
+startUsageRefreshes = mapM_ startProviderRefresh usageProviders
 
 -- | The refresh one provider starts. Total in 'UsageProvider', so a provider
 -- added to that type cannot be listed above without a refresh to start.

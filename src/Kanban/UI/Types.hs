@@ -72,7 +72,6 @@ import Kanban.GitHub
     RefreshCoordinator
     )
 import Kanban.Provider (ProviderError (..) )
-import Kanban.Models (OperatingMode)
 import Kanban.UI.Notice (NoticeState)
 
 data Name
@@ -430,15 +429,6 @@ data AppState = AppState
     -- keeps the budget a card is measured at, drawn at, and has its
     -- measurement invalidated by one number rather than three.
     appExcerptsVisible :: Bool,
-    -- | The operating mode the model roster derives (D-8): dual for two
-    -- loaded providers, single-agent for one, no-agent for none or for a
-    -- roster that would not load at all.
-    --
-    -- Seated once at startup from 'Kanban.Models.loadedOperatingMode'; the
-    -- dashboard no longer holds the roster itself. It narrows the usage
-    -- sidebar and hides the @a@ control, and is retired with the roster in
-    -- the provider-backend child of epic #794.
-    appOperatingMode :: OperatingMode,
     appIncidentSelection :: IncidentSelection,
     appOverlay :: Maybe Overlay,
     -- | Whether the open overlay is drawn fullscreen rather than in its

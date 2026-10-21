@@ -24,7 +24,6 @@ import Kanban.ApprovalService
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
-import Kanban.Models (defaultRoster, loadedOperatingMode)
 import Kanban.UI.Notice (emptyNoticeState)
 import Kanban.UI.Types
   ( AppState (..),
@@ -69,10 +68,6 @@ testAppState board = do
         appSearch = Nothing,
         appSidebarVisible = True,
         appExcerptsVisible = defaultExcerptsVisible,
-        -- Derived from the pure compiled roster, not a load: a test state
-        -- must not read the developer's real XDG configuration. A test naming
-        -- another mode sets the field.
-        appOperatingMode = loadedOperatingMode (Right defaultRoster),
         appIncidentSelection = IncidentSelection Nothing 0,
         appOverlay = Nothing,
         appOverlayFullscreen = False,

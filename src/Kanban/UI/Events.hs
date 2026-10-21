@@ -16,7 +16,6 @@ module Kanban.UI.Events
     handleEvent,
     incidentsAction,
     mutatesSelectedWork,
-    settleBoardAction,
     overlayExtent,
     overlayMouseAction,
     quitDecision,
@@ -337,38 +336,15 @@ data BoardActionGate
   deriving stock (Eq, Show)
 
 -- | Everything that can stand between a key press and its arm, as one pure
--- decision, in the order the three are asked.
---
--- The operating mode is asked first, and that ordering is the contract rather
--- than an accident: the two gates below it resolve the card in front of the
--- user, and a board that spawns nothing must refuse `a` with the reason that
--- is actually true of it -- the roster loads no provider -- however the
--- selection happens to be sitting. Settled history and the completed-history
--- blocker are facts about /that card/, and they are the right answer only once
--- there is a mode in which the key could work at all.
+-- decision, in the order the two are asked.
 --
 -- Pure, and the whole of what 'applyBoardAction' decides, so a press can be
 -- taken and inspected without a terminal.
 boardActionGate :: AppState -> BoardAction -> BoardActionGate
 boardActionGate state action
-  | Just refusal <- agentSurfaceRefusal state.appOperatingMode action = RefuseBoardAction refusal
   | completedCardsBlocked state && blockedByCompletedLoad action = IgnoreBoardAction
   | Just notice <- readOnlyHistoryGate state action = RefuseBoardAction notice
   | otherwise = DispatchBoardAction
-
--- | What a press the gate settled does to the state, and the whole of it.
---
--- A refusal writes one field and nothing else -- no overlay opens, no process
--- is spawned or killed, and the approval service is neither started nor
--- stopped -- because that is what
--- 'Kanban.UI.State.setNotice', the arm above, does. Written out here so the
--- suite can take a populated dashboard through a refused press and hold every
--- one of those to it.
-settleBoardAction :: BoardActionGate -> AppState -> AppState
-settleBoardAction gate = case gate of
-  DispatchBoardAction -> id
-  IgnoreBoardAction -> id
-  RefuseBoardAction notice -> noticeSet notice
 
 -- | Which bindings the completed-history blocker makes inert.
 --

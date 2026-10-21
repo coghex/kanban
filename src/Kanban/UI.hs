@@ -65,7 +65,6 @@ import Kanban.Drainer
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Repository (RepositoryRoster, rosterDegradationNotices)
 import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
-import Kanban.Models (loadModelRoster, loadedOperatingMode)
 import Kanban.Workflow (deriveBoard )
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -108,9 +107,6 @@ runHeldDashboard authority options config repository roster = do
   drainerController <- discoverDrainerController repository
   approvalController <- discoverApprovalController repository
   approvalEpoch <- newIORef 0
-  -- Loaded once beside the resolved configuration, and kept only as the
-  -- operating mode it derives: the dashboard no longer holds the roster.
-  modelRoster <- loadModelRoster
   eventChannel <- newBChan 256
   historyTraversal <- newHistoryTraversal
   -- One coordinator per repository for the dashboard's lifetime, started
@@ -193,7 +189,6 @@ runHeldDashboard authority options config repository roster = do
             -- above reads, so the first settle finds the budget already
             -- current and the layout epoch stays zero.
             appExcerptsVisible = defaultExcerptsVisible,
-            appOperatingMode = loadedOperatingMode modelRoster,
             appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
             -- Nothing is open, so nothing is fullscreen. Never restored from

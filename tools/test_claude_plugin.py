@@ -104,8 +104,8 @@ ORIGINAL_BUNDLE_VERSION = "1.0.0"
 COMMAND_SIGIL = "/"
 
 # The canonical reviewer's model and effort are roster cells, so the gate
-# below reads the tracked example roster -- which Spec.Config.Models holds
-# byte-for-byte against the compiled defaults the spawn sites resolve.
+# below reads the tracked example roster -- which tools/test_kanban_models.py
+# holds byte-for-byte against the reader's compiled defaults.
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 TRACKED_ROSTER_READER = REPO_ROOT / "tools" / "kanban_models.py"
 BUNDLED_ROSTER_READER = PLUGIN_ROOT / "scripts" / "kanban_models.py"
@@ -942,9 +942,9 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
     arbitrary local default.
 
     The reference is the pr_review roster cell: roles.pr_review.<provider> in
-    the tracked models.toml.example, which Spec.Config.Models holds
-    byte-for-byte against the compiled defaults. Since MODEL-4 the Python
-    half is roster-backed too: the
+    the tracked models.toml.example, which tools/test_kanban_models.py holds
+    byte-for-byte against the reader's compiled defaults. Since MODEL-4 the
+    Python half is roster-backed too: the
     coordinator resolves the same cells through its own bundled
     kanban_models.py, and its four constants are the compiled fallbacks that
     reader is handed for a host carrying no roster file at all. Holding those
