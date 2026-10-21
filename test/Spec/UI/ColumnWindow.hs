@@ -38,8 +38,6 @@ import Kanban.CLI (Options (..))
 import Kanban.Domain
 import Kanban.Layout (responsiveColumnWidths)
 import Kanban.UI (drawApplication)
-import Kanban.Card (displayWidth)
-import Kanban.Config (ResolvedConfig (..))
 import Kanban.UI.Board
   ( ColumnPiece (..),
     columnBody,
@@ -48,25 +46,21 @@ import Kanban.UI.Board
     columnScrollStep,
     columnWindowFor,
     drawColumnItem,
-    pullRequestPhaseGlyphFor,
     refreshColumnWindows,
-    reviewPhaseGlyphFor,
-    solvePhaseGlyphFor,
   )
 import Kanban.UI.Events (BoardMouseAction (..), boardMousePress)
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.Filter (FilterBox (..), KindFacet (..), everyFilterBox, toggleFilterBox)
 import Kanban.UI.Filter (applyCriteriaChange, facetCount, filteredCount, focusFilterPanel, rawEntryCount, refreshVisibleBoard, settleFacetCounts)
-import Kanban.UI.Reconcile (reconcilePullRequestSessions, reconcileReviewSessions)
 import Kanban.UI.Search (columnCountText, columnItemsIn, entriesFor, expandedTrackersFor, moveSelectionBy, selectableRowsIn)
 import Kanban.UI.Selection (toggleTrackerState)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
 import Kanban.UI.Util (allColumns, relativeAge, selectedRow, showText)
 import Kanban.Workflow (entryItem)
-import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession, testSolveSession, withSolveSession)
+import Spec.Support.App (testAppState)
 import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
+import Spec.Support.Fixtures (baseIssue, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
 import Spec.Support.Render (FrameCell (..), renderFrameCells, renderWidgetLines)
 import Test.Hspec
 
@@ -82,11 +76,6 @@ spec = describe "board frame cost" $ do
 
     it "measures a collapsed epic's header" $ do
       state <- (\value -> value {appExpandedTrackers = Set.empty}) <$> measuredState 40 0
-      let items = allItems state
-      map (columnItemHeight state issuesWidth) items `shouldBe` map (renderedHeight state) items
-
-    it "measures a card a solve badge has narrowed" $ do
-      state <- withSolveSession (baseIssue 7 []) SolveRunning <$> measuredState 40 0
       let items = allItems state
       map (columnItemHeight state issuesWidth) items `shouldBe` map (renderedHeight state) items
 
@@ -278,42 +267,6 @@ spec = describe "board frame cost" $ do
       measured.runState.appExpandedTrackers `shouldBe` Set.empty
       measured.runFrames `shouldBe` whole.runFrames
 
-  describe "what a badge costs a card" $ do
-    -- The measurement stands on this: every badge is the same width, so which
-    -- cards carry one decides the geometry and which phase they are in does
-    -- not. Asked of every phase of every kind in both glyph sets, so a new
-    -- phase or a re-spelled glyph of another width fails here rather than by
-    -- drawing a card at a height nothing measured.
-    forM_ [("box glyphs", False), ("ascii glyphs", True)] $ \(label, useAscii) ->
-      it ("is two cells wide in every phase, in " <> label) $ do
-        let solveWidths = [displayWidth (solvePhaseGlyphFor useAscii (testSolveSession (baseIssue 1 []) phase)) | phase <- [minBound .. maxBound]]
-            reviewWidths = [displayWidth (reviewPhaseGlyphFor useAscii (testReviewSession (baseIssue 1 []) phase)) | phase <- [minBound .. maxBound]]
-            pullRequestWidths =
-              [ displayWidth (pullRequestPhaseGlyphFor useAscii (testPullRequestSession (basePullRequest 1 [] False []) phase))
-                | phase <- [minBound .. maxBound]
-              ]
-        solveWidths `shouldSatisfy` ((>= 8) . length)
-        reviewWidths `shouldSatisfy` ((>= 8) . length)
-        (solveWidths <> reviewWidths <> pullRequestWidths) `shouldSatisfy` all (== badgeCellWidth)
-
-    it "changes a roster's size when a card starts carrying one" $ do
-      -- Which is what lets three sizes stand for the whole badge geometry.
-      state <- unmeasuredState 20
-      let running = withSolveSession (baseIssue 4 []) SolveRunning state
-      Map.size running.appSolveSessions `shouldNotBe` Map.size state.appSolveSessions
-
-    it "keeps a roster's keys through the reconciliations that rebuild one" $ do
-      -- The other half of that: a size stands for a membership only while
-      -- nothing removes a key, and these two are the only paths that rebuild
-      -- a roster at all.
-      state <- unmeasuredState 20
-      let sessions = (withSolveSession (baseIssue 4 []) SolveRunning state).appSolveSessions
-          reviews = Map.fromList [(4, testReviewSession (baseIssue 4 []) ReviewRunning)]
-          pullRequests = Map.fromList [(9, testPullRequestSession (basePullRequest 9 [] False []) SolveRunning)]
-      Map.keys (reconcileReviewSessions state.appConfig.resolvedWorkflow [] reviews) `shouldBe` Map.keys reviews
-      Map.keys (reconcilePullRequestSessions [] pullRequests) `shouldBe` Map.keys pullRequests
-      Map.keys sessions `shouldBe` [4]
-
   describe "what invalidates a measurement" $ do
     it "keeps one taken from the state that is still current" $ do
       state <- measuredState 200 0
@@ -343,17 +296,6 @@ spec = describe "board frame cost" $ do
       let toggled = toggleTrackerState Issues 0 epicNumber state
       toggled.appExpandedTrackers `shouldNotBe` state.appExpandedTrackers
       toggled.appExpansionEpoch `shouldNotBe` state.appExpansionEpoch
-
-    it "stops trusting one taken before a badge appeared beside a card" $ do
-      -- A badge takes cells from the width its card wraps at, so a
-      -- measurement taken without it no longer describes the column. The
-      -- settle is what notices, because noticing costs the sessions the
-      -- dashboard holds and a frame's own check has to stay constant-time.
-      state <- measuredState 200 0
-      let running = settle (withSolveSession (baseIssue 4 []) SolveRunning state)
-      running.appLayoutEpoch `shouldNotBe` state.appLayoutEpoch
-      columnWindowFor running {appColumnWindows = state.appColumnWindows} Issues issuesWidth
-        `shouldSatisfy` (not . measurementHeld)
 
     it "drops one whose earliest relative age has since changed wording" $ do
       state <- measuredState 200 0
@@ -440,19 +382,6 @@ spec = describe "board frame cost" $ do
     it "keeps none while the panel is hidden" $ do
       prepared <- panelState 300
       (settleFacetCounts prepared {appFilterPanel = Nothing}).appFacetCounts `shouldBe` Nothing
-
-  describe "what a settle costs" $
-    it "stops growing with the sessions a dashboard has kept" $ do
-      -- Deciding whether a measurement still holds must not cost the agent
-      -- sessions a long-lived dashboard has accumulated. Both settles below
-      -- find everything current and rebuild nothing, so what they differ by is
-      -- exactly the cost of asking.
-      few <- withRetainedSessions 2 <$> measuredState 200 0
-      many <- withRetainedSessions 2000 <$> measuredState 200 0
-      fewCost <- settleAllocations few
-      manyCost <- settleAllocations many
-      Map.size many.appSolveSessions `shouldBe` 2000
-      manyCost `shouldBe` fewCost
 
   describe "what a frame costs" $
     forM_ selectionCases $ \(label, row) ->
@@ -706,51 +635,6 @@ costGrowth row adjust = do
   large <- selectedState 5000 (row 5000) 0 >>= frameAllocations . adjust
   pure (fromIntegral large / fromIntegral (max 1 small))
 
--- | A dashboard holding @count@ finished sessions of each kind, none of which
--- any card on these boards is for.
-withRetainedSessions :: Int -> AppState -> AppState
-withRetainedSessions count state =
-  state
-    { appSolveSessions = Map.fromList [(number, testSolveSession (baseIssue number []) SolveFinished) | number <- numbers],
-      appReviewSessions = Map.fromList [(number, testReviewSession (baseIssue number []) ReviewFinished) | number <- numbers],
-      appPullRequestReviewSessions =
-        Map.fromList [(number, testPullRequestSession (basePullRequest number [] False []) SolveFinished) | number <- numbers]
-    }
-  where
-    numbers = [100000 .. 100000 + count - 1]
-
--- | Bytes one settle allocates once everything it could prepare is already
--- prepared -- which is what every selection, wheel, and animation event pays.
-settleAllocations :: AppState -> IO Int64
-settleAllocations state = do
-  -- Two settles first: the first notices the sessions and measures every
-  -- column against them, the second finds that measurement current. What is
-  -- measured is a third, which has nothing left to do but ask whether the
-  -- measurement still holds.
-  settled <- evaluate (settleAt 0 (settleAt 0 state))
-  _ <- evaluate (measurementSize settled)
-  allocationsDuring (evaluate (measurementSize (settleAt 0 settled)))
-
--- | Everything a settle decides, forced. 'AppState' holds channels and
--- mutable cells and so cannot be forced whole; this is the part a settle
--- writes, and reading it is what makes the measurement above the settle's own
--- work rather than a thunk's.
-measurementSize :: AppState -> Int
-measurementSize state =
-  state.appLayoutEpoch
-    + sum
-      [ window.windowTotal
-          + window.windowLeading
-          + window.windowShownCount
-          + window.windowAdmittedCount
-          + window.windowTop
-          + Vector.length window.windowItems
-          + Vector.sum window.windowTops
-          + Vector.sum window.windowHeights
-          + Vector.sum window.windowItemRows
-        | window <- Map.elems state.appColumnWindows
-      ]
-
 frameAllocations :: AppState -> IO Int64
 frameAllocations state = do
   -- A first frame, discarded: it forces whatever in the board itself was still
@@ -802,10 +686,6 @@ allocationsDuring action = do
   _ <- action
   closing <- getAllocationCounter
   pure (opening - closing)
-
--- | The cells every badge takes, whatever its phase or glyph set.
-badgeCellWidth :: Int
-badgeCellWidth = 2
 
 -- | The epic every one of these columns opens with.
 epicNumber :: Int

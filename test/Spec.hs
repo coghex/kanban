@@ -16,8 +16,6 @@
 -- module states is checked by the suite it composes.
 module Main (main) where
 
-import qualified Spec.Action.AutoSolve as ActionAutoSolve
-import qualified Spec.Action.Registry as ActionRegistry
 import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.Compatibility as Compatibility
@@ -73,7 +71,6 @@ import Spec.Support.RecordWriters (recordWriterVariable, runRecordWriter)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
-import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Browser as Browser
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.ColumnWindow as ColumnWindow
@@ -89,11 +86,7 @@ import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Keys as Keys
 import qualified Spec.UI.Layout as Layout
 import qualified Spec.UI.OpenData as OpenData
-import qualified Spec.UI.ReviewSession as ReviewSession
 import qualified Spec.UI.Search as Search
-import qualified Spec.UI.SessionCore as SessionCore
-import qualified Spec.UI.Settings as UISettings
-import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
 import qualified Spec.UI.Usage as UIUsage
 import Kanban.ReviewToolServer (serveReviewTools)
@@ -190,8 +183,6 @@ suiteGroups =
     SuiteGroup "Spec.Agent.PullRequestFlow" PingLane PullRequestFlow.spec, -- 1.9s
     SuiteGroup "Spec.Agent.Roster" LifecycleLane AgentRoster.spec,
     SuiteGroup "Spec.Agent.Compatibility" PingLane Compatibility.spec,
-    SuiteGroup "Spec.UI.ReviewSession" PingLane ReviewSession.spec,
-    SuiteGroup "Spec.UI.SessionCore" PingLane SessionCore.spec,
     SuiteGroup "Spec.Repository.Identity" PingLane RepositoryIdentity.spec,
     SuiteGroup "Spec.Repository.Authority" PingLane RepositoryAuthority.spec,
     SuiteGroup "Spec.UI.Text" PingLane UIText.spec,
@@ -210,7 +201,6 @@ suiteGroups =
     -- until its one-second budget runs out.
     SuiteGroup "Spec.Agent.WorkerPrecondition" DeadlineLane WorkerPrecondition.spec,
     SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
-    SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
     SuiteGroup "Spec.Repository.Lease" UsageLane RepositoryLease.spec, -- 1.7s
     -- Beside "Spec.Repository.Lease" for the reason 'suiteColocations' records
@@ -236,13 +226,6 @@ suiteGroups =
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
     SuiteGroup "Spec.UI.Cards" PingLane Cards.spec,
     SuiteGroup "Spec.UI.ColumnWindow" PingLane ColumnWindow.spec,
-    SuiteGroup "Spec.UI.AutoSolve" PingLane AutoSolve.spec,
-    -- Beside the preflight group rather than spread for cost: its dispatch
-    -- examples install fake providers on a temporary PATH and let a launch
-    -- write its specification, which is the same machinery that lane already
-    -- serialises.
-    SuiteGroup "Spec.Action.Registry" SupervisionLane ActionRegistry.spec,
-    SuiteGroup "Spec.Action.AutoSolve" PingLane ActionAutoSolve.spec,
     SuiteGroup "Spec.Config.Loading" PingLane ConfigLoading.spec,
     SuiteGroup "Spec.UI.Layout" PingLane Layout.spec,
     SuiteGroup "Spec.UI.OpenData" PingLane OpenData.spec,
@@ -258,7 +241,6 @@ suiteGroups =
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
     SuiteGroup "Spec.UI.Browser" PingLane Browser.spec,
-    SuiteGroup "Spec.UI.Settings" PingLane UISettings.spec,
     SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
     SuiteGroup "Spec.Agent.Ping" PingLane Ping.spec, -- 46.1s

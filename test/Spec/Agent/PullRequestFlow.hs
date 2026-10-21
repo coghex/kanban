@@ -7,7 +7,6 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.List (findIndex)
 import qualified Data.Text
 import qualified Data.Text.IO as TextIO
-import Data.Time (UTCTime (..), fromGregorian)
 import Kanban.Domain
 import Kanban.Models (Assignment (..), ModelRoster, OperatingMode (..), defaultRoster, recordedAssignmentCell)
 import Kanban.Process (identityForPid, managedProcessPid, matchingIdentities, readProcessSnapshot)
@@ -40,20 +39,9 @@ import Kanban.Solve
     unknownNoticeSamples
   )
 import Kanban.StreamReader (handleReadLine)
-import Kanban.UI.AutoSolve (autoSolveRevisionPrompt)
-import Kanban.UI.Session (pullRequestSessionReusable)
-import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), PullRequestDetail (..))
-import Kanban.UI.Worker (recoveredPullRequestSession)
-import Kanban.Worker
-  ( PullRequestWorkerTask (..),
-    WorkerDescriptor (..),
-    WorkerId (..),
-    WorkerSpec (..),
-    WorkerTask (..),
-  )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Roster (cellOf, rerosteredDefaults)
-import Spec.Support.Fixtures (basePullRequest, epoch)
+import Spec.Support.Fixtures (basePullRequest)
 import Spec.Support.Process
   ( chattyProvider,
     chattyProviderLines,
@@ -247,15 +235,6 @@ spec = do
       resumedPrompt `shouldContain` "Continue the same repair workflow"
       resumedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
-    it "reattaches a persisted repair worker as a repair session on the PR's own brand" $ do
-      let task = PullRequestWorkerTask 900 PullRequestClaude PullRequestRepair
-          descriptor = repairWorkerDescriptor task
-          session = recoveredPullRequestSession (Right defaultRoster) 0 descriptor approvedFixture task
-      session.sessionDetail.pullRequestSessionAction `shouldBe` PullRequestRepair
-      session.sessionDetail.pullRequestSessionOrigin `shouldBe` PullRequestClaude
-      session.sessionDetail.pullRequestSessionBrand `shouldBe` ClaudeSolver
-      session.sessionTranscript.fullTranscript `shouldSatisfy` Data.Text.isInfixOf "reattached persistent PR repair worker"
-
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
       let codexOriginRevisionPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
           claudeOriginRevisionPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
@@ -281,18 +260,6 @@ spec = do
     it "always tells a spawned reviewer to pass Kanban's own resolved --repo to the canonical coordinator, even without a fork override" $ do
       let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
           forkPrompt = last (pullRequestArgumentsOn defaultRoster 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
-      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
-
-    it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
-      let repository = Repository "/tmp/repo" "coghex" "kanban"
-          configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") repository ClaudeSolver 42 1)
-          defaultPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing repository ClaudeSolver 42 1)
-      configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
-      defaultPrompt `shouldNotContain` "--config"
-
-    it "always tells a resumed autosolve pr-revise to pass Kanban's own resolved --repo, even without a fork override" $ do
-      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
-          forkPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing forkRepository ClaudeSolver 42 1)
       forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
@@ -324,23 +291,6 @@ spec = do
 
     it "derives a post-revision verdict using a configured approval label" $
       pullRequestVerdictForLabels (defaultWorkflowConfig {approvalLabel = "lgtm"}) ["lgtm"] `shouldBe` PullRequestVerdictApproved
-
-    it "starts a fresh r-key revision round instead of reopening a finished one when the PR changed since it launched" $ do
-      let launchedAt = UTCTime (fromGregorian 2026 7 18) 0
-          unchanged = launchedAt
-          afterFreshVerdict = UTCTime (fromGregorian 2026 7 19) 0
-      -- A finished PullRequestRevision session addressing the same unchanged
-      -- state (no new push, comment, or label change) is safely reused.
-      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` True
-      -- pr-revise's own canonical rereview lands a fresh reviewed:changes
-      -- verdict, so the recomputed action repeats (PullRequestRevision) but
-      -- the PR has changed since this session launched: it must not reuse
-      -- the finished session and instead start another canonical round.
-      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` False
-      -- A still-active session is always reused regardless of PR changes.
-      pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
-      -- forceFresh always starts a new session.
-      pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
 
     it "identifies the session before forwarding agent output, and reports normal completion" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -536,48 +486,6 @@ approvalLabelChip = Label "reviewed:approve" "0e8a16"
 
 withLabels :: [Label] -> PullRequest
 withLabels labels = approvedFixture {pullRequestLabels = labels}
-
--- | A discovered persistent worker carrying the given PR task, which is all
--- 'recoveredPullRequestSession' reads: the paths are never touched by the
--- pure reattach it performs.
-repairWorkerDescriptor :: PullRequestWorkerTask -> WorkerDescriptor
-repairWorkerDescriptor task =
-  WorkerDescriptor
-    { workerDescriptorSpec =
-        WorkerSpec
-          { workerId = WorkerId "pr-900-repair",
-            workerRepository = Repository "/tmp/repo" "coghex" "kanban",
-            workerTask = PullRequestWorkerTaskKind task,
-            workerExistingSession = Just "repair-session",
-            workerExistingLogPath = Just "/tmp/repair.jsonl",
-            workerResumeProvenance = ResumeAnswer,
-            workerUserMessage = "",
-            workerParent = Nothing,
-            workerCreatedAt = epoch,
-            workerMaxRuntimeSeconds = 60,
-            workerConfigPath = Nothing,
-            workerWorkflowConfig = defaultWorkflowConfig,
-            -- A worker whose spec predates the recorded field: what the
-            -- reattach reads, and what its first resume then resolves once
-            -- and records.
-            workerAssignment = Nothing,
-            workerExpectedTarget = Nothing,
-            workerInvocation = Nothing
-          },
-      workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
-      workerDescriptorRosterPath = "/tmp/pr-900-repair.roster.toml",
-      workerDescriptorEventPath = "/tmp/pr-900-repair.events.jsonl",
-      workerDescriptorStatePath = "/tmp/pr-900-repair.state.json",
-      workerDescriptorAckPath = "/tmp/pr-900-repair.ack",
-      workerDescriptorLeasePath = "/tmp/pr-900-repair.lease",
-      workerDescriptorLeaseOwnerPath = "/tmp/pr-900-repair.lease.owner",
-      workerDescriptorPendingTerminationPath = "/tmp/pr-900-repair.terminating",
-      workerDescriptorHandoffPath = "/tmp/pr-900-repair.handing-off",
-      workerDescriptorCommandPath = "/tmp/pr-900-repair.commands.jsonl",
-      workerDescriptorCommandAckPath = "/tmp/pr-900-repair.command-acks.jsonl",
-      workerDescriptorAdoptionPath = "/tmp/pr-900-repair.adoption",
-      workerDescriptorCensusGapPath = "/tmp/pr-900-repair.census-gap"
-    }
 
 -- | Every route this slice migrated to the roster, with the brand
 -- 'agentForAction' routes it to. Enumerated once so the default-roster and

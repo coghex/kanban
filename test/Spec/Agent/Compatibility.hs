@@ -15,7 +15,7 @@
 -- over @src\/@ meaningful: a shim that restated its value would satisfy the
 -- release contract while quietly reintroducing the duplicate.
 --
--- What they are /not/ is proved next door: every surface in
+-- What they are /not/ is proved next door: every assignment in
 -- "Spec.Agent.Roster" moves with the operator's roster, while these do not.
 module Spec.Agent.Compatibility (spec) where
 
@@ -23,6 +23,7 @@ import qualified Data.Text
 import Kanban.Models
   ( Assignment (..),
     ProviderName (..),
+    RecordedAssignment (..),
     RoleName (..),
     assignmentFor,
     defaultRoster,
@@ -33,9 +34,9 @@ import Kanban.Solve
     claudeSolverModel,
     codexReviewerModel,
     codexSolverModel,
+    solveAssignment,
     solverLabel,
   )
-import Kanban.UI.Overlay (solveChooserDisplay)
 import Spec.Support.Roster (cellOf, distinctDisplays)
 import Test.Hspec
 
@@ -52,11 +53,13 @@ spec =
       map solverLabel [CodexSolver, ClaudeSolver]
         `shouldBe` ["codex · GPT-6-Sol high", "claude · Opus 5.5 high"]
 
-    -- The whole point of retaining them as shims: a surface answers from the
-    -- roster in force, and these answer from the compiled default, so on any
-    -- roster that moved a display the two must disagree.
-    it "are not what a surface reads: a moved roster moves the surface and not the shim" $
-      solveChooserDisplay (Right distinctDisplays) CodexSolver `shouldNotBe` codexSolverModel
+    -- The whole point of retaining them as shims: a caller resolving an
+    -- assignment answers from the roster in force, and these answer from the
+    -- compiled default, so on any roster that moved a display the two must
+    -- disagree.
+    it "are not what a caller resolves: a moved roster moves the assignment and not the shim" $
+      fmap (.recordedAssignmentDisplay) (solveAssignment distinctDisplays CodexSolver)
+        `shouldNotBe` Right codexSolverModel
 
 displayOf :: RoleName -> ProviderName -> Data.Text.Text
 displayOf role provider = (cellOf (assignmentFor defaultRoster role provider)).assignmentDisplay

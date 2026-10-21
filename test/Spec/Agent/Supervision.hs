@@ -6,12 +6,10 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.List (isInfixOf)
-import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text
 import Kanban.Models (Assignment (..), defaultRoster)
 import Kanban.Process (killManagedProcess)
-import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review
   ( CommandBounds (..),
     ConnectionId (..),
@@ -32,25 +30,9 @@ import Kanban.Review
     stopReviewClient,
     withReservedToolSlot
   )
-import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI.Events (killSelectionNotice)
-import Kanban.UI.Review (canonicalReviewActivity, canonicalReviewNotice)
-import Kanban.UI.Session (sessionAlreadyResolved)
-import Kanban.UI.SessionCore (newAgentSession)
-import Kanban.UI.Types
-  ( ChatTranscript (..),
-    PullRequestDetail (..),
-    PullRequestReviewSession,
-    SolveDetail (..),
-    SolvePhase (..),
-    SolveSession,
-  )
-import Kanban.UI.Util (failureActivity)
-import Kanban.UI.Session (orphanMessage)
-import Kanban.Worker (workerDeadlineReason)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust, requireLeft, requireRight, shouldMention, shouldNotMention)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureReviewThread)
+import Spec.Support.Fixtures (fixtureReviewThread)
 import Spec.Support.Roster (cellOf)
 import Spec.Support.Process
   ( canonicalSessionLogText,
@@ -388,17 +370,6 @@ spec = do
         message `shouldMention` "Check the issue's current comments and labels"
         message `shouldNotMention` "this tool"
 
-    it "renders a canonical outcome-unknown result to the operator without claiming the review failed" $ do
-      unknown <-
-        withFakeCanonicalReviewer ["sleep 30"] $ \_ repository reviewerPath ->
-          requireLeft "expected an unfinished canonical review to be reported as outcome-unknown"
-            =<< runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
-      canonicalReviewActivity unknown `shouldBe` "outcome unknown"
-      canonicalReviewNotice unknown `shouldNotMention` "failed"
-      canonicalReviewNotice unknown `shouldMention` "could not be observed"
-      canonicalReviewActivity "python3 was not found on PATH" `shouldBe` "failed"
-      canonicalReviewNotice "python3 was not found on PATH" `shouldBe` "Canonical issue review failed: python3 was not found on PATH"
-
     -- The Claude reviewer was the third short-lived runner in this module and
     -- the one #15 never enumerated, so it kept the very hGetContents-plus-
     -- takeMVar shape that fix existed to remove (issue #154). Its answer is
@@ -467,93 +438,6 @@ spec = do
         message `shouldMention` "boom"
         message `shouldNotMention` "Incomplete output"
         message `shouldNotMention` "timed out"
-
-  describe "persistent worker deadline UI projections" $ do
-    it "renders the deadline reason distinctly from a generic provider failure" $ do
-      failureActivity workerDeadlineReason `shouldBe` "deadline exceeded"
-      failureActivity "some other unexpected failure" `shouldBe` "failed"
-
-    it "renders the deadline reason distinctly for orphan-pending subprocesses, for both solve and PR workers" $ do
-      orphanMessage (SolveFailed workerDeadlineReason) "2" "the solver"
-        `shouldBe` "deadline exceeded; 2 subprocesses survived termination; press x to terminate the orphaned process tree"
-      orphanMessage SolveCompleted "2" "the solver"
-        `shouldBe` "2 subprocesses survived the solver; press x to terminate the orphaned process tree"
-      orphanMessage (SolveFailed workerDeadlineReason) "1" "the PR agent"
-        `shouldBe` "deadline exceeded; 1 subprocesses survived termination; press x to terminate the orphaned process tree"
-      orphanMessage SolveCompleted "1" "the PR agent"
-        `shouldBe` "1 subprocesses survived the PR agent; press x to terminate the orphaned process tree"
-
-    it "tells an operator with nothing selected to press the kill binding rather than the select-previous binding" $ do
-      -- The board dispatches the kill on 'x'; 'k' selects the previous card,
-      -- so a notice naming 'k' silently moves the selection instead. The Esc
-      -- and Ctrl-L halves of this keyboard-contract fix dispatch in brick's
-      -- 'EventM' (and Ctrl-L needs a live Vty handle), which no unit test
-      -- here can drive; they stay covered by the manual checks in the PR.
-      killSelectionNotice `shouldMention` "pressing x"
-      killSelectionNotice `shouldNotMention` "pressing k"
-      killSelectionNotice `shouldBe` "Select a working issue or PR before pressing x"
-
-    it "suppresses a late WorkerAgentOutput/WorkerDiagnostic projection once a solve or PR session has already resolved" $ do
-      -- 'applyWorkerProtocolEvent' cannot be exercised directly in a unit
-      -- test (it runs in brick's 'EventM', which exposes no way to run an
-      -- action against a plain state outside a live Vty event loop); this
-      -- instead directly covers 'sessionAlreadyResolved', the pure
-      -- predicate solve and PR sessions now share, which
-      -- decides whether a trailing 'WorkerAgentOutput'/'WorkerDiagnostic'
-      -- event -- which 'streamOutput'/'streamDiagnostics' can still emit
-      -- after the watchdog has already committed 'WorkerOrphansDetected' or
-      -- 'WorkerFinished' -- gets applied at all.
-      let solveSessionWith :: SolvePhase -> SolveSession
-          solveSessionWith phase =
-            newAgentSession
-              0
-              phase
-              "thinking"
-              (Just epoch)
-              (ChatTranscript "" "" "")
-              SolveDetail
-                { solveSessionIssue = baseIssue 787 [],
-                  solveSessionWorkflow = SolveOnly,
-                  solveSessionBrand = CodexSolver,
-                  solveSessionId = Nothing,
-                  solveSessionAutoProgress = Nothing,
-                  solveSessionResumeProvenance = ResumeAnswer,
-                  solveSessionAssignment = Nothing
-                }
-          solveSessionsWith phase = Map.fromList [(787, solveSessionWith phase)]
-      mapM_
-        (\phase -> sessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` True)
-        [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
-      mapM_
-        (\phase -> sessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` False)
-        [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
-      sessionAlreadyResolved 999 (solveSessionsWith SolveFinished) `shouldBe` False
-      let pullRequestSessionWith :: SolvePhase -> PullRequestReviewSession
-          pullRequestSessionWith phase =
-            newAgentSession
-              0
-              phase
-              "thinking"
-              (Just epoch)
-              (ChatTranscript "" "" "")
-              PullRequestDetail
-                { pullRequestSessionPullRequest = basePullRequest 826 [] False [],
-                  pullRequestSessionOrigin = PullRequestCodex,
-                  pullRequestSessionAction = PullRequestReview,
-                  pullRequestSessionLaunchedForUpdatedAt = epoch,
-                  pullRequestSessionBrand = CodexSolver,
-                  pullRequestSessionId = Nothing,
-                  pullRequestSessionResumeProvenance = ResumeAnswer,
-                  pullRequestSessionAssignment = Nothing
-                }
-          pullRequestSessionsWith phase = Map.fromList [(826, pullRequestSessionWith phase)]
-      mapM_
-        (\phase -> sessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` True)
-        [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
-      mapM_
-        (\phase -> sessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` False)
-        [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
-      sessionAlreadyResolved 999 (pullRequestSessionsWith SolveFinished) `shouldBe` False
 
 -- | The display the fake-CLI client's own roster assigns
 -- @issue_revise.claude@, which is the cell @kanban_run_claude@ resolves.

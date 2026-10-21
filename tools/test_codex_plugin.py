@@ -104,7 +104,6 @@ NON_WORKFLOW_KEYWORDS = {"kanban"}
 
 SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
-UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, and Review/Canonical.hs asks it rather than
@@ -743,10 +742,6 @@ class WorkflowNameParityTests(unittest.TestCase):
             "src/Kanban/PullRequestFlow.hs commandName tokens changed",
         )
 
-        ui_source = UI_HS.read_text(encoding="utf-8")
-        ui_tokens = set(re.findall(r'commandName "([\w-]+)"', ui_source))
-        self.assertLessEqual(ui_tokens, pr_flow_tokens, "src/Kanban/UI.hs invokes a command PullRequestFlow.hs does not")
-
         all_tokens = solve_tokens | pr_flow_tokens
         self.assertEqual(all_tokens, HASKELL_PARITY_SKILL_NAMES)
 
@@ -756,7 +751,7 @@ class WorkflowNameParityTests(unittest.TestCase):
         # this module's parity set is wrong, not that the non-parity set
         # should grow.
         haskell_sources = "\n".join(
-            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS, UI_HS)
+            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS)
         )
         spawned = set(re.findall(r'(?:workflowName \w+ \w+ = "|commandName ")[/$]?([\w-]+)"', haskell_sources))
         # Non-vacuous: the same scan must still recover every name Kanban does

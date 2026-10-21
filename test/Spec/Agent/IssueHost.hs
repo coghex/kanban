@@ -47,8 +47,6 @@ import Kanban.Review
     reviewTurnResumable,
   )
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI.Session (reviewSessionInputLive)
-import Kanban.UI.Review (reviewOutcomePhase)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
@@ -1929,19 +1927,16 @@ everyReviewEvent =
 
 outcomeSpec :: Spec
 outcomeSpec = describe "what settles a child" $ do
-  -- The one spelling of resumability, and the reason it has to be one. The
-  -- overlay decides from it whether to keep offering an input line, and the
-  -- host decides from it whether the child behind that line is still there to
-  -- receive what is typed.
-  it "keeps a child alive exactly while its overlay still offers a line" $
+  -- The host's own application of the one spelling of resumability: it keeps
+  -- a child alive exactly when 'reviewTurnResumable' says the turn can be
+  -- resumed, and settles it for every other stage, outcome and result.
+  it "keeps a child alive exactly when its turn is resumable, and settles it otherwise" $
     sequence_
-      [ (stage, outcome, resultKind, hostKeepsAlive, overlayOffersLine)
-          `shouldBe` (stage, outcome, resultKind, overlayOffersLine, overlayOffersLine)
+      [ (stage, outcome, resultKind, revisionTurnOutcome stage outcome result == Nothing)
+          `shouldBe` (stage, outcome, resultKind, stage == IssueRevision && outcome == TurnInterrupted)
         | stage <- [InitialReview, IssueRevision, IssueRereview],
           outcome <- [TurnSucceeded, TurnFailed, TurnInterrupted],
-          (resultKind, result) <- [("with a result" :: String, Just sampleResult), ("without one", Nothing)],
-          let hostKeepsAlive = revisionTurnOutcome stage outcome result == Nothing,
-          let overlayOffersLine = reviewSessionInputLive stage (reviewOutcomePhase stage outcome result)
+          (resultKind, result) <- [("with a result" :: String, Just sampleResult), ("without one", Nothing)]
       ]
 
   it "leaves only an interrupted revision resumable" $
@@ -3424,9 +3419,8 @@ commandNumbered ordinal descriptor payload = do
   identifier <- newReviewCommandId
   now <- getCurrentTime
   -- Correlated against what the child currently records, which is exactly
-  -- what 'Kanban.UI.Review.submitReviewCommand' reads when the overlay
-  -- submits one. A fixture that named a thread of its own would be testing a
-  -- command no dashboard writes.
+  -- what a dashboard reads when it submits one. A fixture that named a thread
+  -- of its own would be testing a command no dashboard writes.
   recorded <- decodeChildState descriptor
   pure
     ReviewCommand

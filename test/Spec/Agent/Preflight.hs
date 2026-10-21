@@ -37,8 +37,6 @@ import Kanban.Preflight
   )
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve (SolverBrand (..))
-import Kanban.UI.Review (canonicalReviewActivity, canonicalReviewNotice)
-import Kanban.UI.Util (agentFailureNotice, failureActivity)
 import Spec.Support.Expect (shouldMention)
 import Spec.Support.Preflight
   ( BackendFixture (..),
@@ -390,29 +388,6 @@ spec = do
         preflightDiagnosticDetail (preflightDiagnostic "install the bundle") `shouldBe` Just "install the bundle"
       it "leaves an ordinary agent failure unclassified" $
         preflightDiagnosticDetail "codex was not found on PATH" `shouldBe` Nothing
-      it "reports a setup gap as unavailable rather than as another failed agent" $ do
-        canonicalReviewNotice (preflightDiagnostic "no canonical issue reviewer. Run setup.")
-          `shouldSatisfy` Data.Text.isInfixOf "cannot start"
-        canonicalReviewNotice (preflightDiagnostic "no canonical issue reviewer. Run setup.")
-          `shouldSatisfy` Data.Text.isInfixOf "Run setup."
-      it "keeps a generic provider failure reading as a failure" $
-        canonicalReviewNotice "the backend crashed" `shouldSatisfy` Data.Text.isInfixOf "failed:"
-      it "distinguishes a setup gap from a generic failure in the activity text" $ do
-        failureActivity (preflightDiagnostic "bundle absent") `shouldBe` "setup required"
-        failureActivity "provider exited 1" `shouldBe` "failed"
-      -- The revision path reports through canonicalReviewActivity whether
-      -- the coordinator rejected the turn or preflight stopped it against
-      -- an already-running backend, so both readings live here.
-      it "classifies a revision start failure by cause" $ do
-        canonicalReviewActivity (preflightDiagnostic "claude was not found on PATH") `shouldBe` "setup required"
-        canonicalReviewActivity "the coordinator rejected the turn" `shouldBe` "failed"
-      it "names the remediation when a revision cannot start" $ do
-        agentFailureNotice "Issue revision" (preflightDiagnostic "claude was not found on PATH. Install it.")
-          `shouldSatisfy` Data.Text.isInfixOf "Issue revision cannot start — "
-        agentFailureNotice "Issue revision" (preflightDiagnostic "claude was not found on PATH. Install it.")
-          `shouldSatisfy` Data.Text.isInfixOf "Install it."
-        agentFailureNotice "Issue revision" "the coordinator rejected the turn"
-          `shouldSatisfy` Data.Text.isInfixOf "Issue revision failed: "
 
     describe "hermetic fresh-machine probing" $ do
       it "reports a fully provisioned machine as ready for every action" $

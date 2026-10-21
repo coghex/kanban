@@ -268,8 +268,6 @@ test-suite kanban-test
   hs-source-dirs: test
   main-is: Spec.hs
   other-modules:
-    Spec.Action.AutoSolve
-    Spec.Action.Registry
     Spec.ApprovalService
     Spec.Agent.Adapter
     Spec.Agent.Capture
@@ -337,7 +335,6 @@ test-suite kanban-test
     Spec.Support.Roster
     Spec.Support.UsageWriters
     Spec.Suite.Assignment
-    Spec.UI.AutoSolve
     Spec.UI.Browser
     Spec.UI.Cards
     Spec.UI.ColumnWindow
@@ -353,11 +350,7 @@ test-suite kanban-test
     Spec.UI.Layout
     Spec.UI.Notice
     Spec.UI.OpenData
-    Spec.UI.ReviewSession
     Spec.UI.Search
-    Spec.UI.SessionCore
-    Spec.UI.Settings
-    Spec.UI.SolveChooser
     Spec.UI.Text
     Spec.UI.Usage
   ghc-options: -threaded -with-rtsopts=-N1

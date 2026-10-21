@@ -71,7 +71,6 @@ module Spec.Support.Process
     encodedValue,
     undeliveredSteers,
     protocolWarnings,
-    plainChatTranscript,
     withFakeGitHubCli,
     runBoundedGitHubTool,
     withFakeClaudeCli,
@@ -164,7 +163,6 @@ import Kanban.Solve
     solveAssignment,
     unknownNoticeSamples
   )
-import Kanban.UI.Types (ChatTranscript (..))
 import Kanban.Worker
   ( SolveWorkerTask (..),
     WorkerEvent (..),
@@ -1267,9 +1265,6 @@ protocolWarnings = filter isWarning
   where
     isWarning ReviewProtocolWarning {} = True
     isWarning _ = False
-
-plainChatTranscript :: Text -> ChatTranscript
-plainChatTranscript value = ChatTranscript value value value
 
 -- | A 'DrainerController' pointing at a shell script, so the invocation path
 -- can be driven with a chosen exit code, streams, and staying power. The
