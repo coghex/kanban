@@ -85,7 +85,6 @@ module Spec.Support.Process
     canonicalSessionLogText,
     fakeController,
     fakeApprovalController,
-    fakeMissionRunnerController,
     writeTerminalMissionWorker
   )
 where
@@ -105,8 +104,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime (..))
 import Kanban.Domain
 import Kanban.ApprovalService (ApprovalBackend (..), ApprovalController (..))
-import Kanban.Drainer (DrainerBackend (..), DrainerController (..), normalizedRepositoryIdentity)
-import Kanban.MissionRunnerService (MissionRunnerBackend (..), MissionRunnerController (..))
+import Kanban.Drainer (DrainerBackend (..), DrainerController (..))
 import Kanban.Process
   ( ManagedProcess,
     ProcessIdentity (..),
@@ -1293,24 +1291,6 @@ fakeApprovalController temporaryRoot scriptLines = do
   ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
   setFileMode scriptPath 0o700
   pure (ApprovalController scriptPath [] ApprovalLaunchd)
-
--- | And for the mission runner. Unlike the two above, its controller carries
--- the checkout and the identity every invocation is bound to rather than a
--- rebound argument prefix, because that controller declares @--path@ and
--- @--repo@ on each subcommand's own parser.
-fakeMissionRunnerController :: FilePath -> Repository -> [ByteString.ByteString] -> IO MissionRunnerController
-fakeMissionRunnerController temporaryRoot repository scriptLines = do
-  let scriptPath = temporaryRoot </> "mission-runner-controller"
-  ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
-  setFileMode scriptPath 0o700
-  pure
-    ( MissionRunnerController
-        scriptPath
-        []
-        repository.repositoryRoot
-        (normalizedRepositoryIdentity repository)
-        MissionRunnerLaunchd
-    )
 
 -- | The PID a fixture recorded for itself. Read only after the invocation
 -- under test has returned, by which point the shell has long since written

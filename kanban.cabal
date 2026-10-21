@@ -311,6 +311,7 @@ test-suite kanban-test
     Spec.Agent.Transcript
     Spec.Agent.Usage
     Spec.Agent.UsageMode
+    Spec.Agent.WorkerPrecondition
     Spec.Board.Tracker
     Spec.Board.Workflow
     Spec.Config.Consumers
@@ -330,19 +331,12 @@ test-suite kanban-test
     Spec.GitHub.RecordLock
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
-    Spec.Mission
-    Spec.Mission.Admission
-    Spec.Mission.Runner
-    Spec.Mission.Scheduler
-    Spec.MissionRunnerService
     Spec.OperatingMode
-    Spec.ProviderLimit
     Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease
     Spec.Repository.State
     Spec.SingleAgentMode
-    Spec.Support.AgentSlots
     Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe
@@ -355,9 +349,6 @@ test-suite kanban-test
     Spec.Support.Lanes
     Spec.Support.LeaseProbes
     Spec.Support.Locale
-    Spec.Support.MissionProbes
-    Spec.Support.NotifyProbe
-    Spec.Support.SchedulerProbe
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.ReaderProbes

@@ -1250,8 +1250,8 @@ spec = do
   -- reclaims it, and nothing about what may be signalled.
   describe "the writer a recorded gh belongs to" $ do
     -- The reproduction: two readers that share the record but not a lock, as a
-    -- mission runner's board read and a worker's precondition reread do beside
-    -- a dashboard. The first reader's gh is on the record and running when the
+    -- worker's precondition reread and an issue-review host's do beside a
+    -- dashboard. The first reader's gh is on the record and running when the
     -- second reads it, and it is live work, not a ghost.
     it "lets an independent reader fetch while another reader's gh is still running, and both complete" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

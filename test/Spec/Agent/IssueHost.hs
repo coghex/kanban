@@ -3174,8 +3174,7 @@ readLogBytes path =
 -- and the host reads a child's ledger on every poll, so the open is refused
 -- whenever the two overlap. Production never meets that, since the host runs
 -- in its own supervisor process. One @write(2)@ carries the whole record, and
--- a short one is reported rather than resumed, as
--- 'Kanban.Mission.Journal.appendMissionEvent' does.
+-- a short one is reported rather than resumed.
 appendCommandThroughDescriptor :: WorkerDescriptor -> ReviewCommand -> IO (Either Text ())
 appendCommandThroughDescriptor descriptor command = do
   let path = descriptor.workerDescriptorCommandPath

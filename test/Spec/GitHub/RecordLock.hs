@@ -2,7 +2,7 @@
 --
 -- Every read-modify-write of a repository's record is serialised on
 -- 'Kanban.Cache.ghGroupRecordLockPath' as well as on the in-process mutex, so
--- a dashboard, a mission runner, and a worker's precondition reread -- three
+-- a dashboard, an issue-review host, and a worker's precondition reread -- three
 -- processes each holding a record lock of their own -- cannot lose each other's
 -- entries. These examples hold that from the outside: two real processes
 -- rewriting one record, the lease the lock sits beside, the lock file's mode,
@@ -60,7 +60,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "the gh record's cross-process transaction lock" $ do
   -- The lost-update probe. Two processes, each with a record lock of its own
-  -- -- which is all a mission runner beside a dashboard has -- rewrite one
+  -- -- which is all a worker beside a dashboard has -- rewrite one
   -- repository's record through the production transaction, side by side for
   -- a few hundred transactions each. Every entry either was told it recorded
   -- must be in the file afterwards. Without the file lock the interleaved
@@ -74,7 +74,7 @@ spec = describe "the gh record's cross-process transaction lock" $ do
             (root </> "cache")
             repository
             writerOverlap
-            [RecordWriter "dashboard" 100000, RecordWriter "runner" 200000]
+            [RecordWriter "dashboard" 100000, RecordWriter "worker" 200000]
         map (recordWriterFailures . snd) outcomes `shouldBe` [[], []]
         -- Each writer went on for the whole overlap after seeing the other, so
         -- neither can have recorded fewer than that; asserting it keeps a writer
