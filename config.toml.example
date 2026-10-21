@@ -8,6 +8,12 @@
 # do not prevent loading.
 #
 # All keys shown here are global defaults.
+#
+# Some keys below are read only by the scripts under tools/ (approve_issues.py,
+# drain_prs.py and the mission-runner settings they share). The kanban
+# application ignores each of them, wherever it appears and whatever its value:
+# it neither validates them nor warns about them. They are marked
+# "script-owned" where they appear.
 
 cache = true
 remote_name = "origin"
@@ -37,14 +43,16 @@ ui_style_labels = []
 # other. Never list a document a test parses in either -- a change to one
 # really can fail CI.
 #
-# coordination_paths: the PR DRAINER's merge exception. The drainer may merge a
+# coordination_paths (script-owned, ignored by the kanban application): the PR
+# DRAINER's merge exception. The drainer may merge a
 # candidate whose only distance from the default branch is a change to these,
 # instead of first rebuilding it on a new base that cannot change its result. A
 # rename counts both endpoints, so a rename out of a declared directory is not a
 # covered advance. Empty by default, which requests a branch update for every
 # advance as before. This key grants NO publication lane.
 coordination_paths = []
-# direct_publication_paths: the AGENT PUBLICATION lane -- which documents a
+# direct_publication_paths (script-owned, ignored by the kanban application):
+# the AGENT PUBLICATION lane -- which documents a
 # document workflow may push straight to the default branch, unattended, in the
 # same run that approves the mutation. Read only by
 # tools/publish_coordination_doc.py, and only for a repository
@@ -69,22 +77,15 @@ excerpt_lines = 3
 # many pages gets the full budget for each of them. Values are positive whole
 # seconds.
 #
-# codex_seconds and claude_seconds bound an account-status read. The
-# ping_* keys bound the single model request `kanban --ping codex` and
-# `kanban --ping claude` submit, which is a much longer operation, so they
-# are separate keys with their own 120-second defaults.
+# codex_seconds and claude_seconds bound an account-status read.
 #
-# worker_deadline_seconds is the odd one in this table: it does not bound a
-# request Kanban makes, it is the deadline every action worker records in its
-# own durable specification at launch -- solve, pull-request, issue-host,
-# issue-action, and every registry-dispatched worker alike. Omit it and it
-# stays the 14400 seconds (four hours) it has always been. It is a positive
-# whole number of seconds up to a maximum of 604800 (seven days); zero, a
-# negative value, and anything above that maximum all fail startup naming the
-# full key path, because a bound no watchdog would ever reach is not a bound.
-# Editing it changes only workers launched afterwards: a worker already
-# running is bounded by the value its own specification recorded, so recovery
-# and reattachment never re-resolve it.
+# ping_codex_seconds, ping_claude_seconds and worker_deadline_seconds are
+# script-owned: the scripts under tools/ read them and the kanban application
+# ignores them, in this table and in a repository's, whatever their values
+# (including values the scripts would reject). The ping keys bound a single
+# model request and default to 120 seconds; worker_deadline_seconds is the
+# deadline an action worker records at launch, 14400 seconds (four hours) by
+# default, up to a maximum of 604800 (seven days).
 [timeouts]
 github_seconds = 30
 codex_seconds = 10
@@ -104,7 +105,7 @@ worker_deadline_seconds = 14400
 # costs that provider, as a whole percentage of a window: an integer from 1
 # through 100, and anything else is a startup error. It is independent of
 # `command` — either key may be set without the other — and setting it makes
-# `kanban --usage`, `kanban --ping`, and the sidebar report roughly how many
+# `kanban --usage` and the sidebar report roughly how many
 # rounds the remaining percentage buys, rounded down. Omit it and no estimate
 # is shown; there is no default. Both keys are global, like the rest of
 # [usage]; they cannot be set per repository.
@@ -116,6 +117,11 @@ worker_deadline_seconds = 14400
 # command = ["/usr/local/bin/my-claude-usage", "--json"]
 # estimated_percent_per_solve_round = 12
 
+# Script-owned: the [missions] tables are read by tools/kanban_config.py and
+# the scripts that import it, and the kanban application ignores them -- also
+# inside a [repositories."owner/name"] table, whatever they hold. They are kept
+# here because the scripts still read them.
+#
 # How many mission-dispatched agents may be live at once for this machine's
 # checkouts of one repository: a solve, a pull-request task, or one issue
 # review on the repository's review host, started by any mission, counted
@@ -139,9 +145,8 @@ worker_deadline_seconds = 14400
 agent_ceiling = 2
 
 # Whether Kanban tells you that a mission is waiting on a person, and what it
-# runs to do so. Read only by `kanban --mission-scheduler`, which is the
-# unattended pass `tools/mission_runner_service.py` supervises; no other mode
-# consults it.
+# runs to do so. Read only by the scripts under tools/; the kanban application
+# does not consult it.
 #
 # `enabled` defaults to false. Off means the command is never launched, not
 # that it is launched and ignored, so a command can be written down here and
@@ -204,9 +209,8 @@ agent_ceiling = 2
 # the mission's attention and never stops the scheduler.
 #
 # Every [missions] key is global, like [usage]; setting `missions` inside a
-# [repositories."owner/name"] table is a startup error rather than a warning,
-# because a notification command is the operator's rather than one
-# repository's.
+# [repositories."owner/name"] table is a startup error for the scripts, which
+# the kanban application ignores.
 [missions.notifications]
 enabled = false
 # command = ["/usr/local/bin/my-kanban-notifier"]
@@ -222,8 +226,8 @@ enabled = false
 # `coghex/kanban` key below.
 #
 # Only [workflow], [limits], [timeouts], and `path` may appear below the key.
-# `cache`, `remote_name`, `usage`, and `missions` are global-only and fail if
-# set here.
+# `cache`, `remote_name`, and `usage` are global-only and fail if set here
+# (`missions` is script-owned and ignored by the kanban application).
 # Omitted values inherit from the global table; an array replaces the global
 # array in full rather than extending it.
 #

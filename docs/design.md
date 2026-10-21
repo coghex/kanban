@@ -1515,6 +1515,10 @@ The approval predicate is configurable: the approval label (default
 `reviewed:approve`), GitHub's native `reviewDecision == APPROVED`, or either.
 The default is label-only, matching label-driven review workflows.
 
+Which open pull requests Done holds is `classifyPullRequest`'s own verdict over
+that predicate, and it is read-only: the board does not merge, or otherwise act
+on, what it puts in Done.
+
 ### Completed cards are read-only
 
 The board has no action that acts on the work a card stands for, so a
