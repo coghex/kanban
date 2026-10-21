@@ -1,5 +1,13 @@
 # Managed paths design
 
+> **Retired in part, 2026-10-20 (epic #794, #800; owner, through request
+> `kan-strip-20261020`).** The Haskell resolution point (`Kanban.ManagedPaths`)
+> and PATH-3, which routed the Haskell consumers through it, are retired: the
+> application no longer discovers either managed install, and the module was
+> removed by #799. The Python resolution point (`tools/kanban_config.py`), the
+> bundles' own resolution and the per-platform relocation stand and are
+> unchanged. The processing status below is history and is not rewritten.
+
 Kanban installs two things into the user's home: the PR drainer and the
 canonical issue-review backend. Both spell their install directories,
 discovery records, runtime state, and logs as macOS `~/Library/…` paths at

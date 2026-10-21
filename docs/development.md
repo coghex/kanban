@@ -59,7 +59,7 @@ Run the Haskell suite:
 cabal test all --test-show-details=direct
 ```
 
-The Haskell suite runs as five concurrent processes — lanes — and prints each
+The Haskell suite runs as four concurrent processes — lanes — and prints each
 one's output in turn under an `== lane <name>` heading, followed by a combined
 `N examples, M failures` summary for the whole run. See `docs/design.md`
 section 18 for why the isolation boundary is a process. To repeat one lane on
@@ -247,13 +247,13 @@ hand-edited and whose own `autosolve` renders from its separate source.
 ## Source layout
 
 - `app/` — executable entry point.
-- `src/Kanban/` — board, GitHub, terminal interface, worker, review, and settings code.
+- `src/Kanban/` — board, GitHub, usage, terminal interface, and configuration code.
 - `test/` — Haskell tests.
 - `tools/` — PR drainer, issue approval service, both of their controllers,
   installers, workflow setup, and Python tests.
-- `codex-plugin/`, `claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`, `claude-copilot-plugin/` — the tracked workflow bundles. Claude and Codex each ship the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, plus the drafting and document workflows you invoke yourself in a session, which no Kanban action spawns. Grok, Kimi, and Google are not spawned providers: each ships `/solve` and `/autosolve` so its session can open a grok-origin, kimi-origin, or google-origin pull request and obtain a Codex review. The Kimi and Google bundles are Copilot CLI marketplaces, loaded in a Kimi-model or Gemini-model session via `--plugin-dir` or `kanban@kanban-kimi` / `kanban@kanban-google`. `claude-copilot-plugin/` is the same `/solve` and `/autosolve` for a Copilot CLI session running a Claude model, which is a Claude participant and stamps a claude origin; it loads via `--plugin-dir` or `kanban@kanban-claude`.
+- `codex-plugin/`, `claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`, `claude-copilot-plugin/` — the tracked workflow bundles. Claude and Codex each ship the solve, PR-review, PR-rereview, PR-revise, and repair workflows, plus the drafting and document workflows, all of which you invoke yourself in a session; the application spawns none of them. Grok, Kimi, and Google are not providers the pipeline spawns: each ships `/solve` and `/autosolve` so its session can open a grok-origin, kimi-origin, or google-origin pull request and obtain a Codex review. The Kimi and Google bundles are Copilot CLI marketplaces, loaded in a Kimi-model or Gemini-model session via `--plugin-dir` or `kanban@kanban-kimi` / `kanban@kanban-google`. `claude-copilot-plugin/` is the same `/solve` and `/autosolve` for a Copilot CLI session running a Claude model, which is a Claude participant and stamps a claude origin; it loads via `--plugin-dir` or `kanban@kanban-claude`.
 - `.github/workflows/` — continuous integration.
 
 ## Further detail
 
-See [design.md](design.md) for the complete behavior contract, architecture notes, and implementation history, and [workflow-setup.md](workflow-setup.md) for installing and diagnosing the optional AI-action components.
+See [design.md](design.md) for the complete behavior contract, architecture notes, and implementation history, and [workflow-setup.md](workflow-setup.md) for installing the optional skill components.

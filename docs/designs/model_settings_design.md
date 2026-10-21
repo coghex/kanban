@@ -1,5 +1,14 @@
 # Model settings design
 
+> **Retired in part, 2026-10-20 (epic #794, #800; owner, through request
+> `kan-strip-20261020`).** The Haskell roster, the settings screen, the Haskell
+> spawn sites and the application's operating modes are retired: the application
+> reads no `models.toml`, shows no roster and spawns no agent, and the code was
+> removed by #798. `tools/kanban_models.py` and the bundles' and scripts'
+> resolution of the same roster — including the dual, single-agent and no-agent
+> routing the coordinators and the drainer still perform — stand and are
+> unchanged. The processing status below is history and is not rewritten.
+
 Every model identifier and reasoning-effort level the agent pipeline uses is a
 bare literal today, duplicated across nine invocation sites in three languages,
 with display strings and prompt prose that have already drifted from the wire

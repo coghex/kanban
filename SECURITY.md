@@ -56,8 +56,8 @@ The `kanban` executable and the terminal UI, with no optional component
 installed. This covers at least:
 
 - **The user's authenticated CLIs.** Kanban invokes the terminal user's own
-  `gh`, `codex`, and `claude` with their credentials — `kanban --doctor` runs
-  the preflight that confirms it reaches all three. A path by which board state,
+  `gh`, `codex`, and `claude` with their credentials to read GitHub data and
+  provider usage. A path by which board state,
   repository data, or external text causes an invocation the user did not
   ask for, or reaches a repository outside the configured one, is in scope.
 - **On-disk caches.** Cache directories are created `0700` and cache files
@@ -68,8 +68,8 @@ installed. This covers at least:
   by omission, so anything that loosens those permissions, writes cached
   content outside the intended directories, or puts an *open* private item's
   body on disk is in scope.
-- **External text reaching the terminal.** Issue and pull-request text, agent
-  output, and other data Kanban does not author are sanitized by `Kanban.Text`
+- **External text reaching the terminal.** Issue and pull-request text, provider
+  usage output, and other data Kanban does not author are sanitized by `Kanban.Text`
   before they are drawn. A way to get escape sequences, control characters, or
   other terminal-controlling bytes past that sanitization and into the
   terminal is in scope.

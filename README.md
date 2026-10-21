@@ -7,9 +7,11 @@ keystroke away instead of one browser tab away.
 
 It is for people who already live in a terminal and want the board there too:
 it starts fast, stays idle when you are not using it, makes no network request
-you did not ask for, and uses the GitHub CLI login you already have. Beyond the
-board, it can optionally show Codex and Claude usage, start work on an issue,
-run a review, and track those jobs without leaving the terminal.
+you did not ask for, and uses the GitHub CLI login you already have. Beside the
+board it shows Codex and Claude usage. The repository also tracks the owner's
+workflow skills and scripts — a PR drainer, an issue approval service and the
+skill bundles — which are installed separately; Kanban itself starts, controls
+and watches none of them.
 
 ![The Kanban board filling a terminal: a usage sidebar showing Codex and Claude limits beside the Issues, Active, Reviewing, and Done columns, which hold issue and pull-request cards with labels, review state, and CI status, one card selected](docs/media/board-wide.png)
 
@@ -98,14 +100,11 @@ The keys that matter first:
 | `s` | Search a column by number and title |
 | `F` | Filter which cards the board shows, including closed history |
 | `u` | Refresh the board and usage information |
-| `p` | Show running and completed jobs |
-| `i` | Show everything needing attention, and go to it |
 | `?` | Show all controls |
 | `q` / `Ctrl-C` | Quit |
 
 Mouse selection, scrolling, and details are also supported. The
-[user guide](docs/user-guide.md) documents every key, including the ones that
-start the optional AI actions.
+[user guide](docs/user-guide.md) documents every key.
 
 ### Install from a source checkout
 
@@ -141,9 +140,9 @@ this project, so nothing in this section claims verification on a Linux host.
 | Component | macOS | Linux | Notes |
 | --- | --- | --- | --- |
 | Core board | Supported | Built and tested in CI, not a supported user path | The required `build-test` check aggregates the `haskell` and `python` jobs, both on `ubuntu-latest`: `haskell` runs the warning-clean build — `cabal.project` applies `-Werror` — and the whole Haskell suite, the golden Brick frames included, while `python` runs the tool suite. No interactive board session on a Linux host has been manually verified. |
-| Optional AI actions | Supported | Setup documented, not verified end to end | [Workflow setup and preflight](docs/workflow-setup.md) documents the setup path for both platforms: the components, the discovery record, removal, and the logs each name their Linux location beside their macOS one. What is not recorded anywhere is a live Linux run — no end-to-end installation followed by an AI action on Linux has been performed. |
+| Optional workflow skills | Supported | Setup documented, not verified end to end | [Workflow setup](docs/workflow-setup.md) documents the setup path for both platforms: the components, the discovery record, removal, and the logs each name their Linux location beside their macOS one. What is not recorded anywhere is a live Linux run — no end-to-end installation followed by running a skill on Linux has been performed. |
 | Codex / Claude usage sidebar | Supported | Not verified | Kanban spawns the provider's own CLI and applies no platform check of its own. The Claude probe composes the util-linux `script` form on every non-darwin host, and the suite asserts the composed operands for both that dialect and the BSD one. No live usage refresh on Linux has been recorded. |
-| PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs take each platform's own convention: `~/Library` on macOS, and `$XDG_DATA_HOME` and `$XDG_STATE_HOME` (`~/.local/share` and `~/.local/state` by default) on Linux, where an installation predating that is relocated once by the next default installer run. The board resolves that record the same way the Python side does — `src/Kanban/ManagedPaths.hs` probes the XDG location and then `~/Library` on both platforms — so an XDG-installed drainer is discovered from the board too. |
+| PR drainer | Supported | Supported on a host with a systemd user session | The drainer is managed by whichever service manager the host has — launchd on macOS, a systemd user unit on Linux — and refuses only where neither is reachable. A dedicated CI job runs the whole install, start, status, stop, and uninstall lifecycle against a real systemd user session. Its install record, runtime state, and logs take each platform's own convention: `~/Library` on macOS, and `$XDG_DATA_HOME` and `$XDG_STATE_HOME` (`~/.local/share` and `~/.local/state` by default) on Linux, where an installation predating that is relocated once by the next default installer run. |
 | Issue approval service | Supported | Supported on a host with a systemd user session | Managed through the same service-manager boundary as the drainer, so installing and controlling it needs launchd or a reachable `systemctl --user`, and refuses only where neither is. Its unit location is XDG-aware, but — unlike the drainer's — its record, runtime state, and logs stay under macOS-shaped `~/Library` paths on both platforms. Interactive operation on Linux has not been manually verified. |
 
 Only the core board row is needed to use Kanban. Every other row is an optional
@@ -152,7 +151,7 @@ feature you can leave uninstalled.
 ### Component lifecycle
 
 Every row above has a named place for each of the four things you can do to it.
-The optional-AI-actions row is four separately installed components, so it is
+The optional-workflow-skills row is four separately installed components, so it is
 listed here as four.
 
 Two rows install nothing of their own. The core board *is* the executable, and
@@ -165,20 +164,21 @@ through the executable's own lifecycle.
 | --- | --- | --- | --- | --- |
 | Core board | [Install from a release archive](#install-from-a-release-archive) | [Step 2](#2-install-the-new-executable) | [Step 7](#7-verify-every-component) — `kanban --version`, then open a repository | [Removing the executable](#removing-the-executable) |
 | Codex / Claude usage sidebar | Part of the executable | With the executable, [step 2](#2-install-the-new-executable) | [Step 7](#7-verify-every-component) — `kanban --usage --fresh` | With the executable |
-| Optional AI actions: `issue-review` | [Optional AI actions](#optional-ai-actions) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `kanban --doctor` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
-| Optional AI actions: `legacy-launcher` | [Components](docs/workflow-setup.md#components) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 9](#9-confirm-nothing-still-resolves-through-the-old-archive) — nothing in Kanban resolves it, so no readiness check reports it | [Workflow-setup removal](docs/workflow-setup.md#removal) |
-| Optional AI actions: `codex-plugin` | [Optional AI actions](#optional-ai-actions) | [Step 5](#5-move-a-provider-registration-off-the-old-archive) then [step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `kanban --doctor` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
-| Optional AI actions: `claude-plugin` | [Optional AI actions](#optional-ai-actions) | [Step 5](#5-move-a-provider-registration-off-the-old-archive) then [step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `kanban --doctor` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
+| Optional workflow skills: `issue-review` | [Optional workflow skills](#optional-workflow-skills) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `tools/setup_workflows.py` without `--apply` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
+| Optional workflow skills: `legacy-launcher` | [Components](docs/workflow-setup.md#components) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 9](#9-confirm-nothing-still-resolves-through-the-old-archive) — nothing tracked here resolves it, so no check reports it | [Workflow-setup removal](docs/workflow-setup.md#removal) |
+| Optional workflow skills: `codex-plugin` | [Optional workflow skills](#optional-workflow-skills) | [Step 5](#5-move-a-provider-registration-off-the-old-archive) then [step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `tools/setup_workflows.py` without `--apply` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
+| Optional workflow skills: `claude-plugin` | [Optional workflow skills](#optional-workflow-skills) | [Step 5](#5-move-a-provider-registration-off-the-old-archive) then [step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — `tools/setup_workflows.py` without `--apply` | [Workflow-setup removal](docs/workflow-setup.md#removal) |
 | PR drainer | [Optional PR drainer](#optional-pr-drainer) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — its controller's `status` | [Removing the drainer](docs/pr-drainer.md#removing-the-drainer) |
 | Issue approval service | [Optional issue approval service](#optional-issue-approval-service) | [Step 6](#6-re-run-each-installed-components-setup-from-the-new-archive) | [Step 7](#7-verify-every-component) — its controller's `status` | [Uninstalling](docs/issue-approval.md#uninstalling) |
 
-## Optional AI actions
+## Optional workflow skills
 
-Kanban can start a solve, a review, or a revision on the selected card. Having
+The tracked skills — canonical issue review and the
+`solve`/`pr-review`/`pr-rereview`/`pr-revise`/`repair` workflow bundles, among
+others — run in your own Codex or Claude session, not from the board. Having
 Codex or Claude installed and signed in is necessary but not sufficient: the
-canonical issue-review backend and the Kanban-owned
-`solve`/`pr-review`/`pr-rereview`/`pr-revise`/`repair` workflow bundles have to
-be installed once as well.
+canonical issue-review backend and the Kanban-owned workflow bundles have to be
+installed once.
 
 One opt-in command covers all of them, and reports exactly what it would do
 before changing anything. Run it from the extracted release directory or a
@@ -189,21 +189,11 @@ python3 tools/setup_workflows.py --all --scope user
 python3 tools/setup_workflows.py --all --scope user --apply
 ```
 
-To see whether an AI action is ready, and what to run if it is not:
-
-```console
-kanban --doctor
-```
-
-`--doctor` is a read-only report on AI-action readiness: it installs nothing,
-starts nothing, and changes nothing. It exits nonzero when an action is
-blocked, which is a statement about that optional action only — the board runs
-either way.
-
-See [workflow setup and preflight](docs/workflow-setup.md) for the components,
-scopes, recovery steps, and removal, and
+Run again without `--apply`, the same command reports what is installed and
+what, if anything, would change. See [workflow setup](docs/workflow-setup.md)
+for the components, scopes, recovery steps, and removal, and
 [the agent-workflow contract](docs/agent-workflow-contract.md) for the full
-dependency list and what each action requires.
+dependency list and what each skill requires.
 
 ## Optional PR drainer
 
@@ -223,8 +213,10 @@ release — an archive is not a repository — so the archive form names it and 
 installer refuses rather than guessing. The tracked modules it links still come
 from the archive, through `--asset-root`, which already defaults to it.
 
-Installation does not start the drainer. Press `d` in Kanban when you are ready
-to run it.
+Installation does not start the drainer. Start it with its controller when you
+are ready to run it — [Manual status](docs/pr-drainer.md#manual-status) shows how
+to resolve that controller, and the [drainer guide](docs/pr-drainer.md) covers
+starting and stopping it.
 
 ## Optional issue approval service
 
@@ -240,11 +232,11 @@ python3 tools/install_issue_approval.py --repo /path/to/project
 `--repo` and `--asset-root` mean here exactly what they mean for the PR drainer
 above, and for the same reason.
 
-Installation starts nothing. Press `a` in Kanban when you are ready to run it —
-and mean it: a running service publishes real review verdicts and moves real
-labels. It needs the canonical issue-review backend from
-[optional AI actions](#optional-ai-actions) above, which it resolves rather than
-installs. See [the issue approval guide](docs/issue-approval.md).
+Installation starts nothing. Start it with its controller when you are ready to
+run it — and mean it: a running service publishes real review verdicts and
+moves real labels. It needs the canonical issue-review backend from
+[optional workflow skills](#optional-workflow-skills) above, which it resolves
+rather than installs. See [the issue approval guide](docs/issue-approval.md).
 
 ## Upgrade to a new release
 
@@ -310,7 +302,7 @@ archive](#install-from-a-release-archive) applies to this build too.
 Do this **before** stopping anything. After step 4 you can no longer tell which
 jobs were running, and step 8 restores exactly that.
 
-For the AI-action components, start with the `issue-review` install directory,
+For the skill components, start with the `issue-review` install directory,
 which steps 6 and 9 both need. This resolves it exactly as everything that
 consults the backend does — a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
 first, then the record's `backend_path`, then the record's own directory when
@@ -420,8 +412,8 @@ repository's, not only the one you are upgrading from. Both installers refuse
 while their job is live, and the PR drainer additionally refuses to relocate
 its shared links while *any* recorded repository's drainer is running.
 
-Press `d` and `a` in Kanban for the repository each job is for, or drive that
-service's own controller directly — one line per job you are stopping:
+Drive that service's own controller directly — one line per job you are
+stopping, for the repository each job is for:
 
 ```console
 python3 "$DRAINER_CONTROL" --path /path/to/project --json stop
@@ -462,7 +454,7 @@ convergent: it re-points what the old archive left and reports `unchanged` for
 anything already correct. Preview first — a run without `--apply`, or with
 `--dry-run`, writes nothing at all.
 
-The AI-action components, named individually so nothing you did not have gets
+The skill components, named individually so nothing you did not have gets
 installed:
 
 ```console
@@ -547,15 +539,14 @@ controller](docs/issue-approval.md#from-the-controller), copying each result
 into `DRAINER_CONTROL` and `APPROVAL_CONTROL` as step 3 did.
 
 Verify each row of [the support table](#platform-and-component-support)
-with the check that can actually observe it. `kanban --doctor` is **not** that
-check for most of them: it is a read-only report on AI-action readiness alone,
-and says nothing about the board, the usage sidebar, the PR drainer, or the
-issue approval service.
+with the check that can actually observe it. No single command covers them
+all: the executable reports nothing about the PR drainer or the issue approval
+service, whose controllers' `status` is what observes them.
 
 | Component | Check | What it proves |
 | --- | --- | --- |
 | Core board | `kanban --version`, then `kanban --path /path/to/project` | The executable on `PATH` is the new build, and it opens the selected repository. |
-| Optional AI actions | `python3 tools/setup_workflows.py` from the new directory with step 6's selection and scope and no `--apply`, then `kanban --doctor` | Setup has converged against the new archive — every component you have reports `unchanged` — and readiness is reported per AI action. |
+| Optional workflow skills | `python3 tools/setup_workflows.py` from the new directory with step 6's selection and scope and no `--apply` | Setup has converged against the new archive — every component you have reports `unchanged`. |
 | Codex / Claude usage sidebar | `kanban --usage --fresh` | Every provider you have answered *now* — one that is not installed reports itself as unavailable rather than being left out, and the command succeeds as long as one answered. A plain `kanban --usage` prints whatever is already cached and only asks a provider that has nothing cached, so it can report a window the previous executable stored. Add `--json` for the machine-readable form. |
 | PR drainer | `python3 "$DRAINER_CONTROL" --path /path/to/project --json status` | That repository's job is installed and in the state you expect — the one step 3 recorded, until step 8. |
 | Issue approval service | `python3 "$APPROVAL_CONTROL" --path /path/to/project --json status` | The same, for that repository's approval job. |
@@ -565,10 +556,9 @@ the one you happened to be in.
 
 ### 8. Restart only what was running
 
-Start again exactly the jobs step 3 found live, and no others. Press `d` or `a`
-in Kanban for each, or use the controllers step 7 resolved — the drainer's for a
-drainer, the approval service's for an approval job, one line per job you are
-restarting:
+Start again exactly the jobs step 3 found live, and no others. Use the
+controllers step 7 resolved — the drainer's for a drainer, the approval service's
+for an approval job, one line per job you are restarting:
 
 ```console
 python3 "$DRAINER_CONTROL" --path /path/to/project --json start
@@ -713,8 +703,7 @@ that name where things live, and that is repair, not loss.
 
 **Kept, and not rewritten:**
 
-- Kanban's own configuration and display settings, its board and usage caches,
-  its agent logs, and its background job records — the files
+- Kanban's own configuration and its board and usage caches — the files
   [Local files](docs/user-guide.md#local-files) lists.
 - Each service's durable state, according to that service's existing contract:
   the PR drainer's and issue approval service's runtime state, logs, open
@@ -751,7 +740,7 @@ directory yourself is yours to move before step 10.
 Each optional component is removed by its own documented path, and none of them
 removes another:
 
-- **Optional AI actions** — [Removal](docs/workflow-setup.md#removal) covers all
+- **Optional workflow skills** — [Removal](docs/workflow-setup.md#removal) covers all
   four components: the provider commands for the two bundles, and the
   Kanban-namespaced directories for `issue-review` and `legacy-launcher`.
   Uninstall the issue approval service first if you have one, since removing
@@ -777,10 +766,9 @@ component points into it.
 
 Start here:
 
-- [User guide](docs/user-guide.md) — board layout, every control, reviews, and
-  background jobs.
-- [Workflow setup and preflight](docs/workflow-setup.md) — installing the
-  optional AI-action components, and diagnosing why one is not ready.
+- [User guide](docs/user-guide.md) — board layout and every control.
+- [Workflow setup](docs/workflow-setup.md) — installing the optional skill
+  components, and removing them.
 - [PR drainer](docs/pr-drainer.md) — installation, configuration, operation,
   and logs.
 - [Issue approval service](docs/issue-approval.md) — installing, operating, and
@@ -796,7 +784,7 @@ For contributors:
 - [Design and implementation notes](docs/design.md) — the behavior contract and
   the engineering decisions behind it.
 - [Agent-workflow contract](docs/agent-workflow-contract.md) — every external
-  workflow Kanban's AI actions depend on, and who owns each one.
+  dependency of the owner's skills and scripts, and who owns each one.
 - [Claude Code session instructions](CLAUDE.md) — the session contract for
   agents working in this repository.
 - [Documentation index](docs/README.md) — everything else.

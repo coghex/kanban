@@ -1,5 +1,13 @@
 # Overlay fullscreen and session focus design
 
+> **Retired in part, 2026-10-20 (epic #794, #800; owner, through request
+> `kan-strip-20261020`).** OVF-2, the vim-style normal/insert focus model for the
+> session overlays, is retired with those overlays, which were removed by
+> #796. OVF-1 (the `F` filter key), OVF-3 (the `f` fullscreen toggle for the
+> details and help overlays) and OVF-4 (the context-aware footer) stand and are
+> `docs/design.md` §6 and §7. The processing status below is history and is not
+> rewritten.
+
 The overlay subwindows — details, review, solve, PR review, incidents,
 processes, settings, help — draw as small fixed-size centered boxes (88×32
 for most), which Vincent likes on open because the board stays visible

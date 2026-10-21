@@ -24,14 +24,14 @@ That name comes from the remote the **shared** Kanban configuration
 names — the same remote Kanban resolves the board's repository through — and
 never from a `--config` passed to the installer. A repository's own `--config`
 decides what its controller *runs with*; it never decides which repository the
-service is for. Point the dashboard and the service at one repository by setting
+service is for. Point the board and the service at one repository by setting
 `remote_name` in the shared configuration, which moves both together.
 
 ## How it differs from the PR drainer
 
 Both are non-resident per-repository jobs installed by their own installer,
-driven through their own controller, and started and stopped from the sidebar.
-The similarity mostly ends there, and the differences are the ones that matter
+driven through their own controller, and started and stopped from the command
+line. The similarity mostly ends there, and the differences are the ones that matter
 when something goes wrong.
 
 | | Issue approval service | PR drainer |
@@ -227,17 +227,15 @@ the job never ran from would strand the links it actually did.
 
 ## Start and stop
 
-Press `a` in Kanban to start or stop this repository's service, or click the
-`approve_issues.py` control directly above the drainer's in the sidebar. See
-[the user guide](user-guide.md#the-issue-approval-service) for what the control
-shows.
+Start and stop this repository's service with its controller —
+[From the controller](#from-the-controller) shows how to resolve it. Kanban's
+board neither starts, stops nor reports it.
 
 Installation never starts the service. **Starting it begins publishing canonical
 review verdicts on real issues immediately**, including moving `reviewed:approve`
 and `reviewed:changes` labels, so start it when you mean to.
 
-Services for different repositories run independently, and each Kanban window
-reports only its own repository's. Two checkouts of *the same* repository share
+Services for different repositories run independently. Two checkouts of *the same* repository share
 one service, because they are one repository: whichever starts second is refused,
 and the message names the checkout already running it.
 
@@ -248,12 +246,10 @@ generated LaunchAgent sets `RunAtLoad` and `KeepAlive` to false and carries no
 `StartInterval`; every generated systemd unit sets `Restart=no` and carries no
 `[Install]` section, so nothing enables it. Neither manager ever starts the
 service on its own — not at login, not after a run ends, not on a timer. A run
-begins only when something explicitly asks for one: the `a` key in Kanban, or
-the controller's `start`.
+begins only when something explicitly asks for one: the controller's `start`.
 
-Once started, the run outlives whatever asked for it. Quitting Kanban does not
-stop it, and the next Kanban window opened on that repository reports it as
-still running. Press `a` again, or run the controller's `stop`, to end it.
+Once started, the run outlives whatever asked for it. Run the controller's
+`stop` to end it.
 
 A `start` refreshes the installation first — the definition and the record entry
 are rewritten from the same derivations an install uses — and then waits up to
@@ -379,23 +375,22 @@ two documents:
 
 - **`barrier.json`** is the authority. It is what actually stops the queue, and
   it survives an intentional stop and a restart.
-- **A warning incident** is what shows it. The sidebar composes it as
-  `on · unresolved incident · Issue #N requests changes` while the service is on,
-  in warning colour rather than as a failure — the service is healthy and
-  waiting, not broken.
+- **A warning incident** is what shows it. The controller's `status` reports it
+  while the service is on, as a warning rather than a failure — the service is
+  healthy and waiting, not broken.
 
 While barriered, each poll performs one **read-only** gate check of that issue
 and nothing else. No model runs, no review is published, and no
 `--review-queue` pass happens at all, so a barriered service cannot reach any
 issue, let alone a higher-numbered one.
 
-**Repair the named issue with `r` while the service stays on.** That is the
-supported path, and it works because a barriered service's only child is that
-read-only gate check: the board refuses nothing while the barrier stands, for
-that issue or any other. (It is a service that is *running* with a review
-actually in flight that refuses a canonical stage started from a card, until
-that review finishes — for any issue, since the queue reviews in order and
-cannot be asked to skip ahead.) The barrier clears itself on
+**Repair the named issue with the issue-rereview workflow while the service
+stays on.** That is the supported path, and it works because a barriered
+service's only child is that read-only gate check, which refuses nothing while
+the barrier stands, for that issue or any other. (A service that is *running*
+with a review actually in flight holds the canonical approval lock, so another
+canonical review contends with it until it finishes — for any issue, since the queue reviews
+in order and cannot be asked to skip ahead.) The barrier clears itself on
 the next poll after the issue holds a current canonical approval — the warning
 is resolved first, then the record is removed, so an interrupted clearance leaves
 a barriered queue with a stale warning the next start reconciles, never a resumed
@@ -513,7 +508,7 @@ all that moves: the record, the runtime tree, the locks, and the logs stay put.
 The layout differs from the PR drainer's here as well as in the roots the table
 above compares: the drainer's runtime tree sits *inside* its install directory
 and moves with it, while here the runtime root is a sibling of the record, so a
-dashboard that inherits no environment can find both without being told where
+component that inherits no environment can find both without being told where
 the links went.
 
 **The service definition is the service manager's, not the controller's.**
@@ -531,7 +526,7 @@ mean exactly that.
   backend that wrote it, that job's identifier, the definition's path, the
   checkout, the install directory, and any `config_path` and
   `backend_install_dir`. This path is fixed, and `--install-dir` does not move
-  it — a dashboard that inherits no environment still has to find an install made
+  it — a component that inherits no environment still has to find an install made
   anywhere.
 - Installed script links, shared by every repository installed there:
   `~/Library/Application Support/kanban/issue-approval/` — the passwd home's,
@@ -745,19 +740,15 @@ resolve the account its state belongs to.
 
 ## What this guide does not cover
 
-**Live per-issue progress does not exist yet, and its absence is deliberate.**
-The sidebar reports that the service is on, off, barriered, or failed; it does
-not report `reviewing issue #N`, which reviewer is running, or which model. The
-persistent service was scoped without it, and a separate extension design for a
-progress protocol and a richer in-flight UI is still to be written.
-`docs/designs/issue_approval_queue_design.md` records that decision as D-6. Read a
-sidebar with no per-issue detail as the current design rather than as a defect.
+**Live per-issue progress does not exist, and its absence is deliberate.** The
+controller's `status` reports that the service is on, off, barriered, or failed;
+it does not report `reviewing issue #N`, which reviewer is running, or which
+model. The persistent service was scoped without it.
+`docs/designs/issue_approval_queue_design.md` records that decision as D-6.
 
-For the behavior itself — how the dashboard discovers, decodes, polls, and
-interlocks this service, and what each status state means to the board — see
-[docs/design.md](design.md) section 15. This guide deliberately does not restate
-it: two descriptions of one state machine is the drift this repository keeps
-paying for. What the review itself does — reviewer routing, models, spec
+Kanban's board does not read this service's state at all (`docs/design.md`
+section 1): the state machine this guide describes is the controller's and the
+service's own. What the review itself does — reviewer routing, models, spec
 fingerprints, labels, and the approval lock — belongs to the canonical backend
 and is described in
 [the agent-workflow contract](agent-workflow-contract.md#23-canonical-issue-review-rereview-and-the-solve-readiness-gate).
