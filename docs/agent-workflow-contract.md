@@ -214,14 +214,8 @@ everything else.
 - **Failure semantics:** a missing executable surfaces
   `SolveFailed "<name> was not found on PATH"`; a session may pause with a
   trailing `KANBAN_NEEDS_INPUT: <question>` line and resumes with the same
-  session id once the user answers. A failed session a mission dispatched is
-  read once more before its step concludes: a provider rate or usage limit its
-  own structured evidence identifies is the action outcome
-  `ActionCapacityLimited` rather than `ActionFailed`, and the step waits for the
-  limit to lift and is dispatched again (§2.12). The session log above is that
-  evidence for Claude; for Codex it is the account's rate-limit snapshot read
-  after the failure. A solve launched from the board is observed exactly as
-  before.
+  session id once the user answers. A solve launched from the board is
+  observed as the action outcome `ActionFailed` when it fails.
 - **Required authority:** the user's existing `gh auth login` (issue
   assignment, branch push, PR creation); local filesystem access to create a
   worktree.
@@ -387,8 +381,7 @@ that a particular comment should not.
   and serial isolation; the existing review contract and parity tests hold
   the unchanged authority boundaries.
 - **Failure semantics:** the same missing-executable and
-  `KANBAN_NEEDS_INPUT` handoff pattern as solve, and the same provider-limit
-  reading of a failed session a mission dispatched (§2.1, §2.12).
+  `KANBAN_NEEDS_INPUT` handoff pattern as solve.
 - **Issue-gate override:** the coordinator refuses to review a pull request
   whose linked issue lacks a current canonical approval, and clearing that is
   the issue's own review workflow's job. `--override-issue-gate`, paired with a
@@ -1167,8 +1160,7 @@ reimplement the removal, and `--check` remains read-only.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
   `kill`) manages the LaunchAgent on macOS, and `systemctl --user`
   (`daemon-reload`/`reset-failed`/`start`/`stop`/`kill`/`show`) manages the
-  user unit on Linux. `kill --kill-whom=main` is the mission runner's alone: it
-  is how a second stop reaches a draining runner (§2.12). Managing a job is `tools/service_manager.py`'s alone
+  user unit on Linux. Managing a job is `tools/service_manager.py`'s alone
   — the controller and the installer both reach their host's manager through
   that backend, and neither builds a `launchctl` or `systemctl` argument
   vector, reads either one's output, or writes or parses a plist or a unit
@@ -1750,8 +1742,8 @@ reimplement the removal, and `--check` remains read-only.
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
-| `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), the issue approval service's (§2.8), or the mission runner's (§2.12); `/usr/bin/plutil` below only reads the jobs it installs. |
-| `/usr/bin/plutil` | No | Only needed to read those three services' LaunchAgent definitions on macOS. |
+| `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), or the issue approval service's (§2.8); `/usr/bin/plutil` below only reads the jobs it installs. |
+| `/usr/bin/plutil` | No | Only needed to read those two services' LaunchAgent definitions on macOS. |
 | `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control any of those optional services' user units. Kanban reads a unit's own file directly, so Linux needs no reader alongside it. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
@@ -1882,21 +1874,14 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   `systemctl` it spawns `systemctl --user show --property Version --value`
   through `runGroupedProcess` to learn whether this account's user manager
   answers at all, mirroring the installer's own probe so the two agree about
-  which hosts have a service. `src/Kanban/MissionRunnerService.hs` is §2.12's
-  counterpart and asks the same question through that module's own probe
-  rather than a second copy of it, restating only the two-line selection
-  between the managers — whose answer is its own service's type, which it
-  shares with neither of the others. That is why the `launchctl-cli` and
-  `systemctl-cli` rows in §4 name both modules alongside the backend, as the
-  `plutil-cli` row does, and why both are scanned Haskell surfaces: the
-  §6 executable check recovers both names from each. The same listing puts
+  which hosts have a service. That is why the `launchctl-cli` and
+  `systemctl-cli` rows in §4 name this module alongside the backend, as the
+  `plutil-cli` row does, and why it is a scanned Haskell surface: the
+  §6 executable check recovers both names from it. The same listing puts
   the discovery-record location `src/Kanban/ApprovalService.hs` builds into the
   home-relative
   reconciliation, which is what holds that dashboard and its controller to one
-  answer about where the record is; the mission runner's dashboard builds no
-  location of its own and so contributes nothing to that half — it asks
-  `src/Kanban/ManagedPaths.hs` instead, which is where its record's two
-  spellings are already reconciled. Unlike §2.4, the home-relative paths this
+  answer about where the record is. Unlike §2.4, the home-relative paths this
   service's three Python modules build *are* reconciled from
   here: `tools/test_agent_workflow_contract.py` resolves each parsed module for
   every chain of literal path segments reaching a home root — following a name
@@ -2576,9 +2561,9 @@ gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;s
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
-plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
-launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
-systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
+plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
+launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
+systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
@@ -2618,8 +2603,6 @@ mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanba
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 mission-runner-job-label | personal-path | com.coghex.mission-runner | tools/service_manager.py | kanban | supported | no
-mission-runner-discovery-record | personal-path | /Library/Application Support/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
-mission-runner-discovery-record-xdg | personal-path | /.local/share/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
 ```
 
 The six issue-review `personal-path` rows are three locations times two
@@ -2782,18 +2765,13 @@ needed.
 `mission-runner-job-label` is not a location at all: it is the identifier prefix
 `tools/service_manager.py` still derives a job's identifier from, on the terms
 `drainer-launchagent-label` and `issue-approval-job-label` are described under
-above. The mission runner scripts that used it were removed, but
+above. The mission runner that used it was removed with its scripts, but
 `tools/service_manager.py` is outside that removal, so the prefix and its row
 stay with it.
 
-`mission-runner-discovery-record` and its `-xdg` counterpart name
-`src/Kanban/ManagedPaths.hs` alone: that file is where each is spelled whole
-rather than composed, exactly as it is for the drainer's and the issue-review
-backend's record rows. `managedRecordHome` there still takes the passwd
-database's home for the mission runner and `getHomeDirectory` for the other two;
-the Python controller whose account root that mirrored was removed with its
-scripts, so `test/Spec/ManagedPaths.hs` holds the Haskell cases alone, with the
-expected paths written out rather than compared against a Python resolver.
+`managedRecordHome` answers `getHomeDirectory` for both managed components,
+because `tools/kanban_config.py`'s resolvers are `Path.home()`-anchored and
+`src/Kanban/ManagedPaths.hs` is the Haskell counterpart of that one module.
 
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
@@ -3586,8 +3564,7 @@ brand's asset speaking a tool its declaration does not carry.
   backend (`tools/install_issue_approval.py` deliberately installs no backend
   of its own; it resolves and verifies the one that installer made). Until
   then the installed script fails at import against the module set it was
-  installed with. Issue #483's `tools/kanban_models.py` joined the first two
-  sets.
+  installed with. Issue #483's `tools/kanban_models.py` joined both sets.
 
 ## 6. Completeness check
 

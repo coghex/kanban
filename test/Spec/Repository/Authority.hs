@@ -309,27 +309,9 @@ spec = do
                      DoctorMode,
                      UsageQueryMode,
                      PingQueryMode,
-                     MissionMode "mission-0001",
-                     MissionSchedulerMode,
                      DashboardMode
                    ]
-      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, False, False, True]
-
-    -- A mission runner draws no board and writes no durable `gh` record, so
-    -- it has nothing to serialise against; what it does take is that
-    -- mission's own advancement lease (issue #595, requirement 4). Taking the
-    -- board lease as well would refuse to run beside an open dashboard for no
-    -- reason, which is exactly the dashboard requirement 4 expects to be
-    -- attached at the same time.
-    it "leaves the board lease unclaimed for the mission runner" $
-      acquiresRepositoryLease testOptions {optionMission = Just "mission-0001"} `shouldBe` False
-
-    -- And for the scheduler, which draws no board either. What it does take is
-    -- nothing at all: the advancement lease belongs to each mission child it
-    -- launches, so a pass can run beside an open dashboard and beside a
-    -- foreground @--mission@ run of some other mission.
-    it "leaves the board lease unclaimed for the mission scheduler" $
-      acquiresRepositoryLease testOptions {optionMissionScheduler = True} `shouldBe` False
+      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, True]
 
     -- The order is §5's, and the reason it is asserted is that an invocation
     -- naming two modes must resolve to the one that does not take the lease.
@@ -425,8 +407,6 @@ everyMode =
     testOptions {optionDoctor = True},
     testOptions {optionUsage = True},
     testOptions {optionPing = ["codex"]},
-    testOptions {optionMission = Just "mission-0001"},
-    testOptions {optionMissionScheduler = True},
     testOptions {optionColor = ColorNever, optionBorder = BorderOpen}
   ]
 

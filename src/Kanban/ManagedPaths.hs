@@ -1,4 +1,4 @@
--- | Where the three managed installations' discovery records are, on this
+-- | Where the two managed installations' discovery records are, on this
 -- platform and on the one it is not.
 --
 -- The Haskell counterpart of the Python resolvers, and the whole of it:
@@ -15,11 +15,8 @@
 -- for the reason 'managedRecordHome' gives. Nothing an operator already installed has to move, and only when
 -- neither is occupied is the answer this platform's own write default. That
 -- is @installed_issue_review_dir@ and @installed_drainer_dir@ in
--- @tools\/kanban_config.py@ and @installed_service_root@ in
--- @tools\/mission_runner_service.py@ — the mission runner spells its own
--- locations in the module that owns them rather than in the shared
--- configuration parser — and answering the same as those is what this module
--- is for.
+-- @tools\/kanban_config.py@, and answering the same as those is what this
+-- module is for.
 module Kanban.ManagedPaths
   ( ManagedComponent (..),
     managedRecordCandidates,
@@ -37,9 +34,8 @@ import System.Directory (doesPathExist, getHomeDirectory, pathIsSymbolicLink)
 import System.Environment (lookupEnv)
 import System.FilePath (isAbsolute, joinPath, (</>))
 import System.Info (os)
-import System.Posix.User (getRealUserID, getUserEntryForID, homeDirectory)
 
--- | Which managed installation's record is being located. The three are
+-- | Which managed installation's record is being located. The two are
 -- separate installations with separate installers, and — see
 -- 'usableXdgBase' — not one rule for reading the XDG base directory, so
 -- they are asked about one at a time rather than resolved together.
@@ -50,12 +46,6 @@ data ManagedComponent
   | -- | What @tools\/install_drainer.py@ and @tools\/drain_prs_service.py@
     -- recorded, read by "Kanban.Drainer".
     DrainerComponent
-  | -- | What @tools\/install_mission_runner.py@ and
-    -- @tools\/mission_runner_service.py@ record, read by
-    -- "Kanban.MissionRunnerService". This constructor holds the location, and
-    -- the rules that select it, to the one answer the Python resolver gives
-    -- for the same host.
-    MissionRunnerComponent
   deriving stock (Eq, Show)
 
 -- | Both locations a component's record can be, in probe order: the XDG one
@@ -91,8 +81,6 @@ libraryRecordPath IssueReviewComponent home =
   home <> "/Library/Application Support/kanban/issue-review/config.json"
 libraryRecordPath DrainerComponent home =
   home <> "/Library/Application Support/kanban/pr-drainer/config.json"
-libraryRecordPath MissionRunnerComponent home =
-  home <> "/Library/Application Support/kanban/mission-runner/config.json"
 
 -- | The XDG data location: this component's namespace under @$XDG_DATA_HOME@
 -- when that variable is usable by this component's rule, and the
@@ -112,8 +100,6 @@ homeRelativeXdgRecordPath IssueReviewComponent home =
   home <> "/.local/share/kanban/issue-review/config.json"
 homeRelativeXdgRecordPath DrainerComponent home =
   home <> "/.local/share/kanban/pr-drainer/config.json"
-homeRelativeXdgRecordPath MissionRunnerComponent home =
-  home <> "/.local/share/kanban/mission-runner/config.json"
 
 -- | The record's path below whichever base directory it hangs off, as path
 -- segments rather than as a literal, because they are joined onto a base
@@ -121,7 +107,6 @@ homeRelativeXdgRecordPath MissionRunnerComponent home =
 recordNamespace :: ManagedComponent -> [FilePath]
 recordNamespace IssueReviewComponent = ["kanban", "issue-review", "config.json"]
 recordNamespace DrainerComponent = ["kanban", "pr-drainer", "config.json"]
-recordNamespace MissionRunnerComponent = ["kanban", "mission-runner", "config.json"]
 
 -- | The XDG base directory this component accepts, or nothing when it
 -- accepts none and the home-relative fallback applies.
@@ -135,11 +120,6 @@ recordNamespace MissionRunnerComponent = ["kanban", "mission-runner", "config.js
 -- @~\/.local\/share@ fallback for the drainer. Picking one rule for all of
 -- them here would make the board disagree with the installer about where one
 -- of them put its record.
---
--- The mission runner takes the drainer's absolute-only rule, for the drainer's
--- stated reason and by requirement rather than by resemblance: the systemd
--- unit that runs that job and @tools\/mission_runner_service.py@'s own
--- @_xdg_service_root@ have to read the environment identically.
 usableXdgBase :: ManagedComponent -> Maybe String -> Maybe FilePath
 usableXdgBase component xdgDataHome = do
   base <- xdgDataHome
@@ -147,7 +127,6 @@ usableXdgBase component xdgDataHome = do
   case component of
     IssueReviewComponent -> pure base
     DrainerComponent -> base <$ guard (isAbsolute base)
-    MissionRunnerComponent -> base <$ guard (isAbsolute base)
 
 -- | Whether anything at all occupies a record's path, including an entry
 -- that cannot be followed to a file.
@@ -186,48 +165,18 @@ managedRecordPathAt hostOperatingSystem home xdgDataHome component = do
           then libraryCandidate
           else managedRecordWriteDefault hostOperatingSystem component home xdgDataHome
 
--- | The home directory this component's record hangs off.
---
--- Not one answer, and the difference is the Python side's rather than this
--- module's. @tools\/kanban_config.py@ anchors the issue-review and drainer
--- locations to @Path.home()@, which is @$HOME@ whenever that is set, while
--- @tools\/mission_runner_service.account_home@ resolves the account from the
--- passwd database and deliberately ignores @$HOME@ — a location a caller's
--- environment can move cannot serialize anything. Answering what those modules
--- answer means carrying that difference here too: on a host whose @$HOME@ names
--- something other than its passwd home, one spelling for all three would have
--- the dashboard looking for the mission runner's record where its own
--- controller never writes one.
+-- | The home directory this component's record hangs off: @$HOME@ whenever
+-- that is set, which is what @tools\/kanban_config.py@ anchors the
+-- issue-review and drainer locations to with @Path.home()@.
 managedRecordHome :: ManagedComponent -> IO FilePath
-managedRecordHome MissionRunnerComponent = accountHome
 managedRecordHome IssueReviewComponent = getHomeDirectory
 managedRecordHome DrainerComponent = getHomeDirectory
-
--- | The passwd database's home directory for the account this process runs as.
---
--- The counterpart of @tools\/mission_runner_service.account_home@, down to
--- requiring an absolute directory. Where that function refuses a host it cannot
--- answer for, this one falls back to 'getHomeDirectory': a refusal there is the
--- controller declining to write anything at all, so there is no installation
--- for this reader to find and no diagnostic it could usefully publish, while
--- throwing from a path resolution would take a dashboard down over a record it
--- was only asking about.
-accountHome :: IO FilePath
-accountHome = do
-  entry <- try @IOException (getRealUserID >>= getUserEntryForID)
-  case entry of
-    Right user
-      | let home = homeDirectory user,
-        not (null home),
-        isAbsolute home ->
-          pure home
-    _ -> getHomeDirectory
 
 -- | Where this host's record for @component@ is, against the real
 -- environment.
 --
--- None of @KANBAN_ISSUE_REVIEW_INSTALL_DIR@, @KANBAN_DRAINER_INSTALL_DIR@ or
--- @KANBAN_MISSION_RUNNER_INSTALL_DIR@ is read here, and none of them may be:
+-- Neither @KANBAN_ISSUE_REVIEW_INSTALL_DIR@ nor @KANBAN_DRAINER_INSTALL_DIR@
+-- is read here, and neither may be:
 -- each relocates the install directory its record points into, while the
 -- record's own path is the one thing that cannot move — that is what lets a
 -- dashboard which never saw @--install-dir@ discover an installation made

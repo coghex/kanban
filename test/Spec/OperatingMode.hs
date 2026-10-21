@@ -19,11 +19,12 @@
 -- with no terminal, no subprocess, and no provider account.
 module Spec.OperatingMode (spec) where
 
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..))
-import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, missionSelectionConflict)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (FilterCriteria (..), LifecycleFacet (..))
@@ -38,6 +39,7 @@ import Kanban.Models
     operatingModeFor,
   )
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
+import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, renderFailure)
 import Kanban.Solve (SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Events
   ( BoardActionGate (..),
@@ -86,6 +88,7 @@ import Spec.Support.App (testAppState, withPullRequestSession, withReviewSession
 import Spec.Support.Fixtures (baseIssue, basePullRequest, fixtureBoard, testOptions)
 import Spec.Support.Process (workerFixtureSpec)
 import Spec.Support.Roster (claudeOnlyRoster, noAgentRoster)
+import System.Exit (ExitCode (..))
 import Test.Hspec
 
 spec :: Spec
@@ -412,37 +415,33 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False, False, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False]
 
-  -- The mission runner is the one mode that reaches providers and still
-  -- answers 'False', and the reason is requirements 6 and 7: reattaching to a
-  -- live worker, resolving an unknown outcome, and ending a subtree all need
-  -- no provider, and refusing the mode outright would let an unusable
-  -- @models.toml@ block the recovery of a mission already under way. A
-  -- transition that would launch a provider-backed worker fails at that
-  -- launch instead, in the roster's own words.
-  it "lets the mission runner start on a roster that loads nothing" $ do
-    launchModeNeedsProvider (MissionMode "mission-0001") `shouldBe` False
-    launchModeRefusal (MissionMode "mission-0001") (Right noAgentRoster) `shouldBe` Nothing
-    launchModeRefusal (MissionMode "mission-0001") (Left unusableRoster) `shouldBe` Nothing
+  -- The mission modes are gone, not merely unselected: the parser turns each
+  -- spelling away as an option it does not know, so no invocation can reach a
+  -- process that claims a mission or sweeps a repository's. @app/Main.hs@
+  -- parses before it dispatches, which makes this the boundary that stops a
+  -- launch.
+  it "refuses each removed mission option as an unknown one" $
+    sequence_
+      [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
+        | arguments <-
+            [ ["--mission", "mission-0001"],
+              ["--mission-scheduler"],
+              ["--mission-result", "/tmp/result.json"],
+              ["--mission-invocation", "invocation-1"]
+            ],
+          let refusal = case execParserPure defaultPrefs optionsParserInfo arguments of
+                Failure failure ->
+                  let (message, code) = renderFailure failure "kanban"
+                   in Just (code, "Invalid option" `isInfixOf` message)
+                _ -> Nothing
+      ]
 
-  -- And the scheduler above it, for the same reason one level up: its pass
-  -- reads durable records and launches mission children that load their own
-  -- rosters, so a repository whose @models.toml@ loads nothing can still be
-  -- swept, reported on, and notified about.
-  it "lets the mission scheduler start on a roster that loads nothing" $ do
-    launchModeNeedsProvider MissionSchedulerMode `shouldBe` False
-    launchModeRefusal MissionSchedulerMode (Right noAgentRoster) `shouldBe` Nothing
-    launchModeRefusal MissionSchedulerMode (Left unusableRoster) `shouldBe` Nothing
-
-  -- Requirement 1's exclusivity. Two mission selections is not a precedence
-  -- question, so the conflict is reported as itself and neither one runs.
-  it "refuses an invocation that names a mission and the scheduler together" $ do
-    missionSelectionConflict testOptions {optionMission = Just "mission-0001", optionMissionScheduler = True}
-      `shouldBe` Just "--mission names one mission and --mission-scheduler selects them; name only one of the two"
-    missionSelectionConflict testOptions {optionMission = Just "mission-0001"} `shouldBe` Nothing
-    missionSelectionConflict testOptions {optionMissionScheduler = True} `shouldBe` Nothing
-    missionSelectionConflict testOptions `shouldBe` Nothing
+  it "lists none of them in --help" $
+    case execParserPure defaultPrefs optionsParserInfo ["--help"] of
+      Failure failure -> fst (renderFailure failure "kanban") `shouldNotSatisfy` isInfixOf "mission"
+      _ -> expectationFailure "--help did not render help"
 
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
@@ -490,8 +489,6 @@ everyMode =
       testOptions {optionDoctor = True},
       testOptions {optionUsage = True},
       testOptions {optionPing = ["codex"]},
-      testOptions {optionMission = Just "mission-0001"},
-      testOptions {optionMissionScheduler = True},
       testOptions
     ]
 

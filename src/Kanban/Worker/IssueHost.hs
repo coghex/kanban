@@ -1011,7 +1011,7 @@ runChildStage host child = do
 --
 -- A child whose target moved, or whose target cannot be read at all, is
 -- settled with the typed refusal and mutates nothing. Neither is a failure of
--- the review: nothing was attempted, and the mission that dispatched it
+-- the review: nothing was attempted, and what dispatched it
 -- replans from a fresh reading or waits, according to which refusal it was.
 dispatchChildStage :: IssueReviewHost -> HostChild -> IO ()
 dispatchChildStage host child = do
@@ -1752,7 +1752,7 @@ settleSettledChild host child outcome = do
 -- a process nothing has shown gone; clearing the record would leave a terminal
 -- action whose running descendant no count of running agents could find. So
 -- the pid and whatever identity was recorded stay on the terminal state,
--- which is what "Kanban.Mission.Admission" reads before it frees the slot.
+-- which is what a count of running agents must see before it frees the slot.
 settledChildState :: GateSettlement -> SolveOutcome -> WorkerState -> WorkerState
 settledChildState settlement outcome current =
   current
