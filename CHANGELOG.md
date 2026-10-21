@@ -15,6 +15,19 @@ created above it.
 
 ### Unreleased
 
+- Removed the model roster and the operating mode (epic #794, child 4, #798;
+  part 3 of its split). The application no longer reads `models.toml`: a
+  missing, malformed, empty or single-provider file neither narrows nor refuses
+  anything. `kanban --usage` and the usage sidebar always show both providers,
+  Codex then Claude, with the same `--json` document and the same exit rule
+  (success when at least one provider produced windows). The dashboard probes
+  both providers on every refresh, the `a` binding is always available, and the
+  sidebar always draws the approval control; there is no single-agent or
+  no-agent mode any more. `Kanban.Models` is deleted, with its tests and the two
+  `-no-agent` golden frames; no other frame moves. `[usage.*]` keys keep their
+  meaning, and `timeouts.ping_codex_seconds` and `ping_claude_seconds` still
+  parse, unused. `models.toml` itself and the scripts and skills that resolve
+  models from it are untouched.
 - Removed the review backend, the provider adapter and the review tool server
   (epic #794, child 4, #815; part 2 of #798's split). `kanban --review-tools`
   no longer exists: the parser refuses it as an unknown option, alone and beside
