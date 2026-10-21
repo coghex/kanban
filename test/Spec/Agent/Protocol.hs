@@ -71,11 +71,6 @@ import Kanban.StreamReader
     runStreamReader,
     runStreamReaderWith
   )
-import Kanban.UI.Overlay (drawUndeliveredSteers)
-import Kanban.UI.Review (applyUndeliveredSteer)
-import Kanban.UI.Theme (themeFor)
-import Kanban.UI.SessionCore (newAgentSession)
-import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env
   ( createTemporaryDirectory,
     withEnvironmentValue,
@@ -83,7 +78,6 @@ import Spec.Support.Env
     withTemporaryCacheRoot,
   )
 import Spec.Support.Expect (isRight, requireJust, shouldMention, shouldNotMention)
-import Spec.Support.Fixtures (baseIssue, fixtureReviewThread, testOptions)
 import Spec.Support.Process
   ( encodedValue,
     fakeProviderDiagnostic,
@@ -93,7 +87,6 @@ import Spec.Support.Process
     managedProcessFor,
     nextClientRequest,
     nextClientLine,
-    plainChatTranscript,
     protocolWarnings,
     readRecordedPids,
     shouldHaveBeenSwept,
@@ -113,7 +106,6 @@ import Spec.Support.Process
     withManagedShell,
     withRecordingReviewClient
   )
-import Spec.Support.Render (renderWidgetLines)
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -432,74 +424,6 @@ spec = do
         recorded <- readIORef events
         undeliveredSteers recorded `shouldBe` []
         protocolWarnings recorded `shouldBe` []
-
-  -- The session half of issue #17. 'applyReviewEvent' runs in brick's
-  -- 'EventM', which no unit test here can drive, so the transition a
-  -- 'ReviewSteerUndelivered' causes lives in 'applyUndeliveredSteer' and is
-  -- covered directly.
-  describe "undelivered review message recovery" $ do
-    let steerMessage = "actually, check the drainer path too" :: Text
-        laterMessage = "and the label cleanup" :: Text
-        undeliveredSession :: Text -> [Text] -> ReviewSession
-        undeliveredSession input undelivered =
-          ( newAgentSession
-              0
-              ReviewRunning
-              "thinking"
-              Nothing
-              (plainChatTranscript ("\nYou: " <> steerMessage <> "\n"))
-              ReviewDetail
-                { reviewSessionIssue = baseIssue 17 [],
-                  reviewSessionStage = InitialReview,
-                  reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
-                  reviewSessionTurnId = Just "turn-2",
-                  reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = undelivered,
-                  reviewSessionAwaiting = [],
-                  reviewSessionRestored = Nothing
-                }
-          )
-            {sessionInput = input}
-
-    it "restores the rejected message to an input line the user left alone" $ do
-      let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
-      recovered.sessionInput `shouldBe` steerMessage
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` []
-
-    it "qualifies the optimistic transcript entry rather than leaving it claiming delivery" $ do
-      let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> steerMessage)
-
-    it "keeps a draft typed after the send, queueing the rejected message behind it" $ do
-      let draft = "wait, ignore that"
-          recovered = applyUndeliveredSteer steerMessage (undeliveredSession draft [])
-      recovered.sessionInput `shouldBe` draft
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [steerMessage]
-
-    it "preserves every independently rejected steer instead of overwriting the first" $ do
-      let draft = "wait, ignore that"
-          recovered =
-            applyUndeliveredSteer laterMessage (applyUndeliveredSteer steerMessage (undeliveredSession draft []))
-      recovered.sessionInput `shouldBe` draft
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [steerMessage, laterMessage]
-
-    it "returns queued messages oldest first once the input line is free again" $ do
-      let recovered = applyUndeliveredSteer laterMessage (undeliveredSession "" [steerMessage])
-      recovered.sessionInput `shouldBe` steerMessage
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [laterMessage]
-
-    it "shows what is still waiting inside the session overlay, not only in a transient notice" $ do
-      let rendered =
-            renderWidgetLines
-              (themeFor testOptions)
-              60
-              (drawUndeliveredSteers (undeliveredSession "wait, ignore that" [steerMessage]))
-      Data.Text.unlines rendered `shouldMention` "NOT DELIVERED"
-      Data.Text.unlines rendered `shouldMention` steerMessage
-
-    it "renders nothing at all when no message is waiting" $
-      renderWidgetLines (themeFor testOptions) 60 (drawUndeliveredSteers (undeliveredSession "" []))
-        `shouldBe` []
 
   -- MODEL-14: a review client holds a pool of provider connections rather
   -- than one process. What that has to buy is isolation between them, and

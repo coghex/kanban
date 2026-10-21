@@ -20,11 +20,9 @@ awareness of HTML comments.
 So an editor who pastes a marker into the ORIGIN COMMENT to show a contributor
 what one looks like -- the exact mistake that comment warns against -- turns
 every agent-authored pull request opened from the template into a
-duplicate-marker body. The Haskell reader surfaces that as a notice
-(`src/Kanban/UI/PullRequest.hs`) or halts autosolve
-(`src/Kanban/UI/AutoSolve.hs`); the two coordinators silently route the review
-to both brands, reaching the self-review hazard by another door. Required CI
-stays green throughout.
+duplicate-marker body. The Haskell reader refuses it; the two coordinators
+silently route the review to both brands, reaching the self-review hazard by
+another door. Required CI stays green throughout.
 
 Issue #435 made this a requirement and checkable, but discharged it by hand in
 PR #456's body. This module is the committed equivalent, and the Python half of

@@ -67,7 +67,7 @@ import Kanban.GitHub
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Process (identityForPid, readProcessSnapshot)
-import Kanban.UI.Events (QuitDecision (..), quitDecision, stoppingGitHubWorkNotice)
+import Kanban.UI.Events (QuitDecision (..), QuitRequest (..), dashboardQuitRequest, quitDecision, stoppingGitHubWorkNotice)
 import Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
     boardRefreshDispatch,
@@ -804,6 +804,19 @@ spec = do
 
     it "says it is stopping GitHub work while the cancellation runs" $
       stoppingGitHubWorkNotice `shouldMention` "Stopping GitHub work"
+
+  -- The quit key's decision depends on the GitHub work this dashboard owns and
+  -- on nothing else: the dashboard starts no agent process, so no agent
+  -- process can hold a quit back.
+  describe "the quit key's decision" $ do
+    it "halts immediately with nothing queued or running" $ do
+      state <- testAppState (fixtureBoard [])
+      dashboardQuitRequest state False `shouldBe` QuitImmediate
+
+    it "still settles GitHub work first, and still reports an in-flight settle" $ do
+      state <- testAppState (fixtureBoard [])
+      dashboardQuitRequest state True `shouldBe` QuitMustSettle
+      dashboardQuitRequest state {appQuitPending = True} False `shouldBe` QuitAlreadySettling
 
   describe "coordinated board refreshes against gh" $ do
     it "runs two requested refreshes one at a time and leaves the durable gh record empty" $

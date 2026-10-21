@@ -29,56 +29,57 @@ import Control.Monad (void)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.List (isInfixOf, isSuffixOf, sort)
-import Brick (BrickEvent (..))
-import Brick.BChan (newBChan, readBChan)
-import qualified Graphics.Vty as Vty
 import Data.Text (Text)
-import Data.Time (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time (getCurrentTime)
 import qualified Data.Text
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Kanban.Domain (Issue (..), Repository (..), defaultWorkflowConfig)
+import Kanban.Domain (Repository (..), defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
     ProviderName (..),
     RecordedAssignment (..),
     RoleName (..),
-    RosterDefect (..),
-    RosterFailure (..),
-    RosterLoadError (..),
     assignmentFor,
     decodeRoster,
     defaultRoster,
     encodeRoster,
-    loadModelRoster,
     providerKey,
     recordAssignment,
     recordedAssignmentCell,
-    roleKey,
-    rosterPath,
-    saveModelRoster,
+    roleKey
   )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
-    PullRequestFlowEvent (..),
     PullRequestOrigin (..),
-    externalOwnBrandUnsupportedMessage,
     pullRequestAssignment,
-    pullRequestRole,
+    pullRequestRole
   )
 import Kanban.Review
   ( CommandBounds (..),
     ReviewClient,
     ReviewEvent (..),
-    ReviewStage (..),
     authenticatedClaudeArguments,
     beginIssueReview,
     claudeStartedEvent,
     claudeTool,
     issueReviseAssignment,
     reviewDeveloperInstructions,
-    sendReviewMessage,
+    sendReviewMessage
+  )
+import Kanban.Worker
+  ( PullRequestWorkerTask (..),
+    SolveWorkerTask (..),
+    WorkerId (..),
+    WorkerParent (..),
+    WorkerSpec (..),
+    WorkerTask (..),
+    WorkerDeadline (..),
+    launchPullRequestWorker,
+    launchSolveWorker,
+    runWorker,
+    workerDirectory
   )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -88,40 +89,8 @@ import Kanban.Solve
     solveArguments,
     solveAssignment,
   )
-import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
-import Kanban.UI.Overlay (solveChooserDisplay)
-import Kanban.UI.PullRequest (failPullRequestLaunch, freshPullRequestTranscript, pullRequestStartRefusal)
-import Kanban.UI.Review (claudeTranscriptStart, issueReviewStartRefusal)
-import Kanban.UI.Session (agentSessionEntries, pullRequestSessionReusable, solvePhaseActive)
-import Kanban.UI.Settings
-  ( RosterWrite (..),
-    SettingsOutcome (..),
-    applyRosterWrite,
-    openSettings,
-    settingsInput,
-    settingsOutcome,
-  )
-import Kanban.UI.Solve (failSolveLaunch, freshSolveTranscript)
-import Kanban.UI.Types (AgentSession (..), AgentSessionEntry (..), AppEvent (..), AppState (..), ChatTranscript (..), Name, PullRequestDetail (..), SolveDetail (..), SolvePhase (..), SolveSession, withModelRoster)
-import Kanban.UI.Util (launchAssignment, pullRequestSessionLabel, resolvedRosterCellFor, solveReviewerDisplay, solveSessionLabel)
-import Kanban.UI.Worker (recoveredAutoSolveParentSession, recoveredPullRequestSession, recoveredSolveSession)
-import Kanban.Worker
-  ( PullRequestWorkerTask (..),
-    SolveWorkerTask (..),
-    WorkerId (..),
-    WorkerParent (..),
-    WorkerSpec (..),
-    WorkerTask (..),
-    descriptorForSpec,
-    WorkerDeadline (..),
-    launchPullRequestWorker,
-    launchSolveWorker,
-    runWorker,
-    workerDirectory,
-  )
-import Spec.Support.App (testAppState, testPullRequestSession, testSolveSession)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard, fixtureReviewThread)
+import Spec.Support.Fixtures (epoch, fixtureReviewThread)
 import Spec.Support.Process
   ( encodedValue,
     expectNoFurtherClientRequests,
@@ -162,42 +131,7 @@ spec = do
         (\roster -> decodeRoster (encodeRoster roster) `shouldBe` Right roster)
         [rerosteredDefaults, distinctDisplays, claudeOnlyRoster, codexOnlyRoster, noAgentRoster]
 
-  describe "the roster a spawn boundary is allowed to launch against" $ do
-    -- D-3: a present-but-unusable file refuses and names itself. This is the
-    -- total decision the three EventM launch arms are projections of.
-    it "refuses a present-but-unusable roster with a message naming the file and the defect" $
-      case resolvedRosterCellFor (`solveAssignment` CodexSolver) (Left unusableRoster) of
-        Right _ -> expectationFailure "an unusable roster must refuse the launch"
-        Left message -> do
-          message `shouldMention` "/home/example/.config/kanban/models.toml"
-          message `shouldMention` "roles.solve.codex"
-
-    -- A valid roster is not automatically a usable one: validation demands a
-    -- cell only for loaded providers, and a run's routing can still select
-    -- one it has nothing for.
-    --
-    -- Which roster reaches that state differs by surface. A solve's brand is
-    -- the caller's, so a reduced roster asked for the other brand still
-    -- refuses; a pull-request action's provider is the mode's, and
-    -- single-agent routes it to the one loaded (issue #589), so the roster
-    -- that refuses there is a dual one missing the cell its own routing
-    -- selects.
-    it "refuses a valid roster that does not load the provider this run's routing selected" $ do
-      resolvedRosterCellFor (`solveAssignment` CodexSolver) (Right claudeOnlyRoster)
-        `shouldSatisfy` refusalMentioning "codex"
-      resolvedRosterCellFor (`solveAssignment` ClaudeSolver) (Right codexOnlyRoster)
-        `shouldSatisfy` refusalMentioning "claude"
-      resolvedRosterCellFor (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right (withoutCell PrReviewRole ClaudeProvider))
-        `shouldSatisfy` refusalMentioning "claude"
-      resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) (Right claudeOnlyRoster)
-        `shouldSatisfy` refusalMentioning "codex"
-      resolvedRosterCellFor (`solveAssignment` CodexSolver) (Right noAgentRoster)
-        `shouldSatisfy` refusalMentioning "codex"
-
-    it "hands back the roster and the cell it resolved once the selected cell resolves" $
-      resolvedRosterCellFor (`solveAssignment` ClaudeSolver) (Right claudeOnlyRoster)
-        `shouldBe` Right (claudeOnlyRoster, cellOf (solveAssignment claudeOnlyRoster ClaudeSolver))
-
+  describe "the role and provider a spawn runs on" $ do
     -- MODEL-2's role matrix, asserted as a matrix rather than one arm
     -- at a time, so an action added to either side has to be placed here.
     it "maps each action to the role and provider its spawn runs on" $ do
@@ -213,104 +147,7 @@ spec = do
       pullRequestAssignment defaultRoster PullRequestClaude PullRequestRepair
         `shouldBe` (recordAssignment ClaudeProvider <$> assignmentFor defaultRoster PrReviseRole ClaudeProvider)
 
-  -- A launch boundary is reached with a session already inserted, and
-  -- 'solvePhaseActive' counts 'SolveStarting' as live work. A refusal that
-  -- only set a notice would strand that session: reopened by the reuse
-  -- predicates rather than retried, and never terminalized.
-  describe "what a refused launch leaves behind" $ do
-    it "settles the solve session with the same diagnostic-then-terminal pair a failed preflight sends" $ do
-      let message = "model roster /home/example/.config/kanban/models.toml is invalid"
-      channel <- newBChan 4
-      failSolveLaunch channel 844 message
-      delivered <- (,) <$> readBChan channel <*> readBChan channel
-      case delivered of
-        (SolveProtocolEvent (SolveDiagnostic diagnosed diagnostic), SolveProtocolEvent (SolveProcessFinished settled (SolveFailed reason))) ->
-          [(diagnosed, diagnostic), (settled, reason)] `shouldBe` [(844, message), (844, message)]
-        _ -> expectationFailure "expected a solve diagnostic followed by a terminal failure"
-
-    it "settles the pull-request session the same way" $ do
-      let message = "model roster does not load provider \"claude\""
-      channel <- newBChan 4
-      failPullRequestLaunch channel 468 message
-      delivered <- (,) <$> readBChan channel <*> readBChan channel
-      case delivered of
-        (PullRequestProtocolEvent (PullRequestFlowDiagnostic diagnosed diagnostic), PullRequestProtocolEvent (PullRequestProcessFinished settled (SolveFailed reason))) ->
-          [(diagnosed, diagnostic), (settled, reason)] `shouldBe` [(468, message), (468, message)]
-        _ -> expectationFailure "expected a pull-request diagnostic followed by a terminal failure"
-
-    -- The press that has not created a session yet refuses before it does,
-    -- so nothing is left for the reuse predicate to hand back.
-    it "refuses a pull-request press before any session exists" $ do
-      state <- testAppState (fixtureBoard [])
-      let rostered = withModelRoster (Right (withoutCell PrReviewRole ClaudeProvider)) state
-      pullRequestStartRefusal rostered PullRequestCodex PullRequestReview
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf "claude")
-      -- Revision reads pr_revise rather than pr_review, and this roster's
-      -- hole is only in the reviewer's cell, so the same press is allowed
-      -- through.
-      pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
-      pullRequestStartRefusal rostered PullRequestGrok PullRequestReview `shouldBe` Nothing
-      pullRequestStartRefusal rostered PullRequestGrok PullRequestRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGrok))
-      pullRequestStartRefusal rostered PullRequestKimi PullRequestReview `shouldBe` Nothing
-      pullRequestStartRefusal rostered PullRequestKimi PullRequestRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
-      pullRequestStartRefusal rostered PullRequestKimi PullRequestRepair
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
-      pullRequestStartRefusal rostered PullRequestGoogle PullRequestReview `shouldBe` Nothing
-      pullRequestStartRefusal rostered PullRequestGoogle PullRequestRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle))
-      pullRequestStartRefusal rostered PullRequestGoogle PullRequestRepair
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle))
-
-    it "refuses a kimi-origin issue revision before any session exists" $ do
-      let kimiIssue = (baseIssue 469 []) {issueBody = "<!-- issue-origin:kimi -->"}
-      issueReviewStartRefusal kimiIssue IssueRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf "kimi-origin issue revision")
-      issueReviewStartRefusal kimiIssue InitialReview `shouldBe` Nothing
-
-    it "refuses a google-origin issue revision before any session exists" $ do
-      let googleIssue = (baseIssue 470 []) {issueBody = "<!-- issue-origin:google -->"}
-      issueReviewStartRefusal googleIssue IssueRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf "google-origin issue revision")
-      issueReviewStartRefusal googleIssue InitialReview `shouldBe` Nothing
-
-    -- Why that pair is the fix rather than a nicety. A session left at
-    -- 'SolveStarting' counts as live, and live is the disjunct that makes the
-    -- reuse predicates hand it back whatever the caller now asks for; a
-    -- settled one gives way as soon as the request differs.
-    it "lands the session in the phase the reuse predicates stop treating as live" $ do
-      solvePhaseActive SolveStarting `shouldBe` True
-      solvePhaseActive SolveFailedPhase `shouldBe` False
-      pullRequestSessionReusable False (solvePhaseActive SolveStarting) PullRequestReview PullRequestRevision epoch laterThanEpoch
-        `shouldBe` True
-      pullRequestSessionReusable False (solvePhaseActive SolveFailedPhase) PullRequestReview PullRequestRevision epoch laterThanEpoch
-        `shouldBe` False
-
   describe "the worker launch boundary" $ do
-    it "starts no worker at all when the roster cannot supply the task's cell" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-              solveDecision = launchAssignment Nothing (`solveAssignment` CodexSolver) (Right claudeOnlyRoster)
-              reviewDecision = launchAssignment Nothing (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right (withoutCell PrReviewRole ClaudeProvider))
-          solveDecision `shouldSatisfy` refusalMentioning "codex"
-          reviewDecision `shouldSatisfy` refusalMentioning "claude"
-          -- The launch is reached only on the 'Right', which is the shape
-          -- both EventM arms have; on the 'Left' nothing downstream runs.
-          mapM_
-            (\assignment -> void (launchSolveWorker assignment repository 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing))
-            solveDecision
-          mapM_
-            (\assignment -> void (launchPullRequestWorker assignment repository 42 PullRequestCodex PullRequestReview Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing))
-            reviewDecision
-          -- No lease, no spec, no directory entry: the refusal lands before
-          -- any durable trace of a worker exists.
-          directory <- workerDirectory repository
-          present <- doesDirectoryExist directory
-          contents <- if present then listDirectory directory else pure []
-          contents `shouldBe` []
-
     -- What the launch leaves on disk is the whole point of this slice: the
     -- specification is the only thing that travels to the supervisor, and
     -- the second artifact that used to describe the same cell is gone.
@@ -389,30 +226,6 @@ spec = do
         run.runCodexArguments
           `shouldCarryArgument` Data.Text.unpack ("model_reasoning_effort=\"" <> (recordedAssignmentCell spawned).assignmentEffort <> "\"")
 
-    -- End to end: the cell is resolved at spawn, the operator's roster then
-    -- changes underneath it, and the resumed launch still reaches the
-    -- provider with the spawn-time model rather than the edited one.
-    it "replays the spawn-time cell on a resume the roster no longer agrees with" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        now <- getCurrentTime
-        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spawned = cellOf (solveAssignment rerosteredDefaults CodexSolver)
-            edited = defaultRoster
-            replayed = launchAssignment (Just spawned) (`solveAssignment` CodexSolver) (Right edited)
-        replayed `shouldBe` Right spawned
-        replayed `shouldNotBe` Right (cellOf (solveAssignment edited CodexSolver))
-        case replayed of
-          Left message -> expectationFailure ("the resume was refused: " <> Data.Text.unpack message)
-          Right assignment -> do
-            let fixture =
-                  (workerFixtureSpec repository (WorkerId "solve-847-resume") 847)
-                    { workerCreatedAt = now,
-                      workerExistingSession = Just "spawn-time-session",
-                      workerAssignment = Just assignment
-                    }
-            run <- runWorkerFromSpec temporaryRoot fixture "solve-847-resume"
-            assertProviderRanOn spawned (cellOf (solveAssignment edited CodexSolver)) run.runCodexArguments run.runJournal
-
     -- The recorded provider is authoritative too, not just the model and
     -- effort. Proved with a specification whose recorded provider disagrees
     -- with the brand this task's routing selects today, which is the only
@@ -439,156 +252,6 @@ spec = do
         assertProviderRanOn recorded routed run.runClaudeArguments run.runJournal
         run.runClaudeArguments
           `shouldCarryArgument` Data.Text.unpack (recordedAssignmentCell recorded).assignmentEffort
-
-  -- Replay, refusal, and the legacy migration, as the one total decision
-  -- both EventM launch arms are projections of. Both task kinds are asserted,
-  -- because the solve and pull-request boundaries are separate code.
-  describe "what a resume runs on" $ do
-    it "replays a recorded assignment for either task kind, whatever the roster now says" $
-      mapM_
-        ( \(recorded, cell) -> do
-            -- A roster that no longer carries the recorded model...
-            launchAssignment (Just recorded) cell (Right defaultRoster) `shouldBe` Right recorded
-            -- ...one that no longer loads the provider at all...
-            launchAssignment (Just recorded) cell (Right noAgentRoster) `shouldBe` Right recorded
-            -- ...and a file that has become unusable since the spawn.
-            launchAssignment (Just recorded) cell (Left unusableRoster) `shouldBe` Right recorded
-        )
-        [ (cellOf (solveAssignment rerosteredDefaults CodexSolver), (`solveAssignment` CodexSolver)),
-          ( cellOf (pullRequestAssignment rerosteredDefaults PullRequestCodex PullRequestReview),
-            \roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview
-          )
-        ]
-
-    it "refuses on exactly a fresh launch's terms when the session recorded nothing" $
-      mapM_
-        ( \(cell, missing) -> do
-            launchAssignment Nothing cell (Left unusableRoster)
-              `shouldSatisfy` refusalMentioning "/home/example/.config/kanban/models.toml"
-            launchAssignment Nothing cell (Right missing) `shouldSatisfy` refusalMentioning "model roster"
-            launchAssignment Nothing cell (Right rerosteredDefaults)
-              `shouldBe` (either (Left . const "unreachable") Right (cell rerosteredDefaults))
-        )
-        [ ((`solveAssignment` CodexSolver), claudeOnlyRoster),
-          (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview, withoutCell PrReviewRole ClaudeProvider)
-        ]
-
-    -- An autosolve pull-request worker's reattach restores the /solver's/
-    -- session too, from the descriptor of the reviewer. Every value that
-    -- identifies the solver has to come from 'WorkerParent': taking the
-    -- recorded assignment off that descriptor instead pairs the solver's own
-    -- resumable session id with the reviewer's provider, so the revision
-    -- this restart is heading for launches the wrong brand.
-    it "restores the solver's own assignment when an autosolve PR worker is reattached" $ do
-      let repository = Repository "/tmp/repo" "coghex" "kanban"
-          solverCell = cellOf (solveAssignment rerosteredDefaults ClaudeSolver)
-          reviewerCell = cellOf (pullRequestAssignment rerosteredDefaults PullRequestClaude PullRequestReview)
-          task = PullRequestWorkerTask 851 PullRequestClaude PullRequestReview
-          parent = autoSolveParent (Just solverCell)
-          reviewerSpec =
-            (workerFixtureSpec repository (WorkerId "pr-851-autosolve") 851)
-              { workerTask = PullRequestWorkerTaskKind task,
-                workerParent = Just parent,
-                workerAssignment = Just reviewerCell
-              }
-      -- The fixture only proves anything while the two really do differ.
-      solverCell `shouldNotBe` reviewerCell
-      state <- testAppState (fixtureBoard [])
-      descriptor <- descriptorForSpec reviewerSpec
-      let restored = recoveredAutoSolveParentSession state descriptor (baseIssue 851 []) parent task
-      -- The resumable id and the cell have to name the same agent.
-      (restored.sessionDetail.solveSessionAssignment, restored.sessionDetail.solveSessionId)
-        `shouldBe` (parent.workerParentSolverAssignment, parent.workerParentSolverSession)
-      -- ...and so does the text this session opens with. The detail is
-      -- overridden after the shared builder runs, so a transcript built from
-      -- the descriptor would keep naming the reviewer while everything else
-      -- named the solver -- which the assertion above cannot see.
-      restored.sessionTranscript.fullTranscript
-        `shouldMention` ("solver: claude · " <> solverCell.recordedAssignmentDisplay)
-      restored.sessionTranscript.fullTranscript
-        `shouldNotMention` reviewerCell.recordedAssignmentDisplay
-      -- ...and the revision this restart is heading for replays exactly that.
-      launchAssignment restored.sessionDetail.solveSessionAssignment (`solveAssignment` ClaudeSolver) (Left unusableRoster)
-        `shouldBe` Right solverCell
-      -- The reviewer's own session is unaffected and still carries its cell.
-      (recoveredPullRequestSession state.appModelRoster 0 descriptor (basePullRequest 851 [] False []) task).sessionDetail.pullRequestSessionAssignment
-        `shouldBe` Just reviewerCell
-
-    -- A session reattached from a pre-MODEL-7 specification carries no
-    -- assignment, resolves once on its first resume, and every resume after
-    -- that replays what it recorded -- proved by making the roster unusable
-    -- for the second one.
-    it "gains an assignment on the first resume of a legacy session, then replays it" $ do
-      let repository = Repository "/tmp/repo" "coghex" "kanban"
-          solveTask = SolveWorkerTask 848 SolveOnly CodexSolver
-          pullRequestTask = PullRequestWorkerTask 849 PullRequestCodex PullRequestReview
-          legacySolve = (workerFixtureSpec repository (WorkerId "solve-848-legacy") 848) {workerAssignment = Nothing}
-          legacyPullRequest = legacySolve {workerId = WorkerId "pr-849-legacy", workerTask = PullRequestWorkerTaskKind pullRequestTask}
-      state <- testAppState (fixtureBoard [])
-      solveDescriptor <- descriptorForSpec legacySolve
-      pullRequestDescriptor <- descriptorForSpec legacyPullRequest
-      -- What the reattach reads off each legacy specification.
-      (recoveredSolveSession state legacySolve.workerAssignment solveDescriptor (baseIssue 848 []) solveTask).sessionDetail.solveSessionAssignment
-        `shouldBe` Nothing
-      (recoveredPullRequestSession state.appModelRoster 0 pullRequestDescriptor (basePullRequest 849 [] False []) pullRequestTask).sessionDetail.pullRequestSessionAssignment
-        `shouldBe` Nothing
-      mapM_
-        ( \cell -> do
-            let first = launchAssignment Nothing cell (Right rerosteredDefaults)
-            first `shouldBe` (either (Left . const "unreachable") Right (cell rerosteredDefaults))
-            case first of
-              Left message -> expectationFailure ("the first resume was refused: " <> Data.Text.unpack message)
-              Right recorded -> launchAssignment (Just recorded) cell (Left unusableRoster) `shouldBe` Right recorded
-        )
-        [ (`solveAssignment` CodexSolver),
-          \roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview
-        ]
-
-  -- The settings screen and the spawn sites, end to end. Every step is the
-  -- real one: the key is decoded by the overlay's own decoder, the roster it
-  -- proposes is written by 'saveModelRoster', the file that produced is read
-  -- back by the loader, and the next worker is a real detached supervisor
-  -- over a fake @codex@ that records its own argv. Nothing between the press
-  -- and that argv is stood in for.
-  describe "an assignment edited on the settings screen" $
-    it "reaches models.toml, the loader, and the next spawned provider" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withEnvironmentValue "XDG_CONFIG_HOME" (temporaryRoot </> "config") $ do
-          now <- getCurrentTime
-          -- Opening the overlay focuses the first row, which is the solve
-          -- codex cell the launch below resolves.
-          opened <- openSettings <$> testAppState (fixtureBoard [])
-          opened.appSettingsFocus `shouldBe` Just (SolveRole, CodexProvider)
-          let pressed = settingsInput (VtyEvent (Vty.EvKey (Vty.KChar 'l') []) :: BrickEvent Name AppEvent)
-          write <- case settingsOutcome pressed opened.appModelRoster opened.appSettingsFocus of
-            SettingsRosterWrite proposal -> pure proposal
-            other -> fail ("the press earned no roster write: " <> show other)
-          saved <- saveModelRoster write.rosterWriteRoster
-          saved `shouldBe` Right ()
-          let edited = applyRosterWrite saved write opened
-          edited.appModelRoster `shouldBe` Right write.rosterWriteRoster
-
-          -- The exact file: byte for byte what the encoder produces, and a
-          -- roster the loader accepts back unchanged.
-          path <- rosterPath
-          written <- readFile path
-          written `shouldBe` Data.Text.unpack (encodeRoster write.rosterWriteRoster)
-          loadModelRoster `shouldReturn` Right write.rosterWriteRoster
-
-          -- And the next launch runs on it. The rejected cell is the compiled
-          -- default the press moved off, so this fails if anything downstream
-          -- resolved the defaults instead of the saved roster.
-          spawned <- case edited.appModelRoster of
-            Right roster -> pure (cellOf (solveAssignment roster CodexSolver))
-            Left failure -> fail ("the edited roster did not load: " <> show failure)
-          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-              fixture =
-                (workerFixtureSpec repository (WorkerId "solve-852-settings") 852)
-                  { workerCreatedAt = now,
-                    workerAssignment = Just spawned
-                  }
-          run <- runWorkerFromSpec temporaryRoot fixture "solve-852-settings"
-          assertProviderRanOn spawned (cellOf (solveAssignment defaultRoster CodexSolver)) run.runCodexArguments run.runJournal
 
   describe "the embedded issue review" $ do
     it "starts its thread and its turns on the roster's issue_review codex cell" $ do
@@ -655,50 +318,9 @@ spec = do
   -- rather than the compiled defaults, because the defaults share a display
   -- across the very pairs a wrong-cell wiring would confuse.
   describe "the model a surface displays" $ do
-    let roster = Right distinctDisplays
-        displayOf role provider = "display:" <> roleKey role <> "." <> providerKey provider
+    let displayOf role provider = "display:" <> roleKey role <> "." <> providerKey provider
 
-    it "renders the cell its own role and provider select, on every surface" $ do
-      -- Chooser row 1 is solve.codex and row 2 is solve.claude.
-      solveChooserDisplay roster CodexSolver `shouldBe` displayOf SolveRole CodexProvider
-      solveChooserDisplay roster ClaudeSolver `shouldBe` displayOf SolveRole ClaudeProvider
-
-      -- A solve session names its own brand's solve cell...
-      solveSessionLabel roster (solveSessionOn CodexSolver Nothing)
-        `shouldBe` ("codex · " <> displayOf SolveRole CodexProvider)
-      solveSessionLabel roster (solveSessionOn ClaudeSolver Nothing)
-        `shouldBe` ("claude · " <> displayOf SolveRole ClaudeProvider)
-
-      -- ...while the reviewer line beside it names the *opposite* brand's
-      -- pr_review cell, which is the one thing a same-cell wiring would miss.
-      solveReviewerDisplay roster CodexSolver `shouldBe` displayOf PrReviewRole ClaudeProvider
-      solveReviewerDisplay roster ClaudeSolver `shouldBe` displayOf PrReviewRole CodexProvider
-
-      -- Review and rereview take pr_review; revision and repair take
-      -- pr_revise, which is the conflation this slice ends.
-      mapM_
-        ( \action ->
-            pullRequestSessionLabel Nothing PullRequestClaude action CodexSolver roster
-              `shouldBe` ("codex · " <> displayOf PrReviewRole CodexProvider)
-        )
-        [PullRequestReview, PullRequestRereview]
-      mapM_
-        ( \action ->
-            pullRequestSessionLabel Nothing PullRequestClaude action ClaudeSolver roster
-              `shouldBe` ("claude · " <> displayOf PrReviseRole ClaudeProvider)
-        )
-        [PullRequestRevision, PullRequestRepair]
-      pullRequestSessionLabel Nothing PullRequestCodex PullRequestRevision CodexSolver roster
-        `shouldBe` ("codex · " <> displayOf PrReviseRole CodexProvider)
-
-      -- The transcript a fresh session opens with, both kinds.
-      freshSolveTranscript roster AutoSolve CodexSolver
-        `shouldMention` ("solver: codex · " <> displayOf SolveRole CodexProvider)
-      freshSolveTranscript roster AutoSolve CodexSolver
-        `shouldMention` ("reviewer: " <> displayOf PrReviewRole ClaudeProvider)
-      freshPullRequestTranscript roster PullRequestClaude PullRequestRevision ClaudeSolver
-        `shouldMention` ("agent: claude · " <> displayOf PrReviseRole ClaudeProvider)
-
+    it "renders the cell its own role and provider select, in the review prose and the tool description" $ do
       -- Review prose: the coordinator's own identity is issue_review.codex,
       -- and every Claude clause is issue_revise.claude.
       let instructions = reviewDeveloperInstructions defaultWorkflowConfig distinctDisplays CodexProvider
@@ -747,105 +369,9 @@ spec = do
               thread `shouldBe` runningThread
               -- Whatever the backend has become by the time this is handled --
               -- stopped, failed, or this second client -- the event still
-              -- carries the first one's cell, and the line renders that.
+              -- carries the first one's cell.
               display `shouldBe` displayOf IssueReviseRole ClaudeProvider
-              claudeTranscriptStart display
-                `shouldMention` ("Starting authenticated " <> displayOf IssueReviseRole ClaudeProvider)
-              claudeTranscriptStart display `shouldMention` "[sonnet]"
-              claudeTranscriptStart display `shouldNotMention` claudeStartDisplay replacement
-              claudeTranscriptStart display `shouldNotMention` "model roster unavailable"
             other -> expectationFailure ("expected a Claude start event, got " <> show other)
-
-    it "renders the recorded cell on a solve session's own surfaces, fresh and recovered" $ do
-      let recorded = cellOf (solveAssignment distinctDisplays ClaudeSolver)
-          task = SolveWorkerTask 853 SolveOnly ClaudeSolver
-          repository = Repository "/tmp/repo" "coghex" "kanban"
-          fixture = (workerFixtureSpec repository (WorkerId "solve-853") 853) {workerTask = SolveWorkerTaskKind task, workerAssignment = Just recorded}
-      state <- withModelRoster roster <$> testAppState (fixtureBoard [])
-      descriptor <- descriptorForSpec fixture
-      let recovered = recoveredSolveSession state fixture.workerAssignment descriptor (baseIssue 853 []) task
-      recovered.sessionTranscript.fullTranscript
-        `shouldMention` ("solver: claude · " <> displayOf SolveRole ClaudeProvider)
-      -- The header over that recovered session says the same thing.
-      solveSessionLabel roster recovered
-        `shouldBe` ("claude · " <> displayOf SolveRole ClaudeProvider)
-
-    it "renders the recorded cell on a pull-request session's own surfaces, fresh and recovered" $ do
-      let recorded = cellOf (pullRequestAssignment distinctDisplays PullRequestClaude PullRequestRevision)
-          task = PullRequestWorkerTask 854 PullRequestClaude PullRequestRevision
-          repository = Repository "/tmp/repo" "coghex" "kanban"
-          fixture = (workerFixtureSpec repository (WorkerId "pr-854") 854) {workerTask = PullRequestWorkerTaskKind task, workerAssignment = Just recorded}
-      descriptor <- descriptorForSpec fixture
-      let recovered = recoveredPullRequestSession roster 0 descriptor (basePullRequest 854 [] False []) task
-      recovered.sessionTranscript.fullTranscript
-        `shouldMention` ("agent: claude · " <> displayOf PrReviseRole ClaudeProvider)
-
-    it "renders the recorded cell on attached process rows and unattached worker rows" $ do
-      let solveCell = cellOf (solveAssignment distinctDisplays ClaudeSolver)
-          reviewCell = cellOf (pullRequestAssignment distinctDisplays PullRequestClaude PullRequestReview)
-          repository = Repository "/tmp/repo" "coghex" "kanban"
-          workerTask = SolveWorkerTask 857 SolveOnly ClaudeSolver
-          workerSpec =
-            (workerFixtureSpec repository (WorkerId "solve-857") 857)
-              { workerTask = SolveWorkerTaskKind workerTask,
-                workerAssignment = Just solveCell
-              }
-      descriptor <- descriptorForSpec workerSpec
-      base <- testAppState (fixtureBoard [])
-      let attachedSolve = (testSolveSession (baseIssue 855 []) SolveRunning) {sessionDetail = (testSolveSession (baseIssue 855 []) SolveRunning).sessionDetail {solveSessionAssignment = Just solveCell}}
-          attachedPullRequest =
-            let session = testPullRequestSession (basePullRequest 856 [] False []) SolveRunning
-             in session {sessionDetail = session.sessionDetail {pullRequestSessionAssignment = Just reviewCell}}
-          state =
-            (withModelRoster roster base)
-              { appSolveSessions = Map.fromList [(855, attachedSolve)],
-                appPullRequestReviewSessions = Map.fromList [(856, attachedPullRequest)],
-                appWorkers = Map.fromList [(WorkerId "solve-857", descriptor)]
-              }
-          providers = map (.agentSessionProvider) (agentSessionEntries state)
-      -- One row per session plus the unattached worker's own row, each naming
-      -- the cell that session or specification actually holds.
-      providers
-        `shouldMatchList` [ "claude · " <> displayOf SolveRole ClaudeProvider,
-                            "codex · " <> displayOf PrReviewRole CodexProvider,
-                            "claude · " <> displayOf SolveRole ClaudeProvider
-                          ]
-
-    -- D-7's ordering, on the display rather than on argv: a record outlives
-    -- the roster it was read from, and only a session that has none resolves.
-    it "keeps a recorded display through a changed and then an unusable roster" $ do
-      let recorded = cellOf (solveAssignment distinctDisplays CodexSolver)
-          session = solveSessionOn CodexSolver (Just recorded)
-      recorded `shouldNotBe` cellOf (solveAssignment defaultRoster CodexSolver)
-      solveSessionLabel (Right defaultRoster) session
-        `shouldBe` ("codex · " <> displayOf SolveRole CodexProvider)
-      solveSessionLabel (Left unusableRoster) session
-        `shouldBe` ("codex · " <> displayOf SolveRole CodexProvider)
-      solveSessionLabel (Right codexOnlyRoster) session
-        `shouldBe` ("codex · " <> displayOf SolveRole CodexProvider)
-      -- The legacy session beside it has nothing to replay and resolves live.
-      solveSessionLabel (Right defaultRoster) (solveSessionOn CodexSolver Nothing)
-        `shouldBe` ("codex · " <> (cellOf (solveAssignment defaultRoster CodexSolver)).recordedAssignmentDisplay)
-
-    -- Requirement 5. Two shapes reach it: a file that will not load at all,
-    -- and a valid roster that simply does not carry the brand this surface
-    -- names. Neither may answer with a compiled default.
-    it "names no model where the roster cannot supply the cell" $ do
-      let unresolvable =
-            [ solveChooserDisplay (Left unusableRoster) CodexSolver,
-              solveChooserDisplay (Right claudeOnlyRoster) CodexSolver,
-              -- The reviewer a Claude solve hands to in dual mode is
-              -- pr_review.codex, and this roster loads Codex without
-              -- carrying that cell.
-              solveReviewerDisplay (Right (withoutCell PrReviewRole CodexProvider)) ClaudeSolver,
-              solveSessionLabel (Left unusableRoster) (solveSessionOn CodexSolver Nothing),
-              solveSessionLabel (Right claudeOnlyRoster) (solveSessionOn CodexSolver Nothing),
-              pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver (Right (withoutCell PrReviewRole CodexProvider)),
-              freshSolveTranscript (Left unusableRoster) AutoSolve CodexSolver,
-              freshPullRequestTranscript (Right (withoutCell PrReviewRole CodexProvider)) PullRequestClaude PullRequestReview CodexSolver
-            ]
-      mapM_ (`shouldMention` "model roster unavailable") unresolvable
-      mapM_ (\rendered -> mapM_ (rendered `shouldNotMention`) namedModels) unresolvable
 
     -- The non-visual arm: prose cannot be dimmed, so it says so instead, and
     -- the Codex identity clauses beside it stay resolved because
@@ -901,29 +427,9 @@ spec = do
         run.runSessionLog
           `shouldContain` Data.Text.unpack ("claude · " <> displayOf SolveRole ClaudeProvider <> " · solve")
 
-    -- Requirement 6: the wording changes this slice does and does not make,
-    -- pinned against the compiled defaults so an unintended one is a failure.
-    it "keeps every default label byte-identical except the two this slice corrects" $ do
-      let defaults = Right defaultRoster
-      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-6-Sol high"
-      solveChooserDisplay defaults ClaudeSolver `shouldBe` "Opus 5.5 high"
-      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-6-Sol high"
-      solveReviewerDisplay defaults CodexSolver `shouldBe` "Opus 5.5 xhigh"
-      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-6-Sol xhigh"
-      pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
-        `shouldBe` "codex · GPT-6-Sol xhigh"
-      withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
-        claudeTranscriptStart (claudeStartDisplay client)
-          `shouldBe` "\n[sonnet] Starting authenticated Fable 5.1 high…\n"
-      -- The PR-revision label reads pr_revise.claude, which the flow has
-      -- always spawned. Its current "Opus 5.5 high" label also belongs to
-      -- solve.claude, so this pair no longer distinguishes
-      -- the two cells on the default roster; 'distinctDisplays' is what
-      -- still does.
-      pullRequestSessionLabel Nothing PullRequestClaude PullRequestRevision ClaudeSolver defaults
-        `shouldBe` "claude · Opus 5.5 high"
-      pullRequestSessionLabel Nothing PullRequestClaude PullRequestRepair ClaudeSolver defaults
-        `shouldBe` "claude · Opus 5.5 high"
+    -- Requirement 6: the wording change this slice makes, pinned against the
+    -- compiled defaults so an unintended one is a failure.
+    it "keeps the default review prose byte-identical except the correction this slice makes" $ do
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high", without reviving
       -- the Kimi or Google amendment path the board and registry refuse.
@@ -939,7 +445,6 @@ spec = do
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 
-
 -- | The display the event 'Kanban.Review.claudeStartedEvent' raises carries,
 -- read back out of the event itself rather than recomputed, so these
 -- assertions cannot pass against a payload the emitter never built.
@@ -947,28 +452,6 @@ claudeStartDisplay :: ReviewClient -> Text
 claudeStartDisplay client = case claudeStartedEvent client (fixtureReviewThread "thread-probe") of
   ReviewClaudeStarted _ display -> display
   other -> error ("expected a Claude start event, got " <> show other)
-
--- | A solve session on one brand, optionally carrying a recorded assignment,
--- which is the only thing its label surfaces read besides the roster.
-solveSessionOn :: SolverBrand -> Maybe RecordedAssignment -> SolveSession
-solveSessionOn brand recorded =
-  let session = testSolveSession (baseIssue 855 []) SolveRunning
-   in session
-        { sessionDetail =
-            session.sessionDetail
-              { solveSessionBrand = brand,
-                solveSessionAssignment = recorded
-              }
-        }
-
--- | Every model name the compiled defaults carry. A surface that could not
--- resolve its cell must contain none of them: naming any one would be the
--- fallback to 'defaultRoster' requirement 5 forbids.
-namedModels :: [Text]
-namedModels =
-  [ assignment.assignmentDisplay
-  | assignment <- Map.elems defaultRoster.rosterAssignments
-  ]
 
 -- | A dual roster that loads both providers and still cannot supply one named
 -- cell -- 'UnassignedCell' rather than 'UnloadedProvider'.
@@ -1169,22 +652,11 @@ fastBounds = CommandBounds {commandDeadlineMicros = 3000000, commandCaptureGrace
 boundedCallMicros :: Int
 boundedCallMicros = 20000000
 
--- | Any instant after 'epoch': what a pull request updated since the session
--- was launched for it looks like.
-laterThanEpoch :: UTCTime
-laterThanEpoch = addUTCTime 60 epoch
-
-unusableRoster :: RosterLoadError
-unusableRoster =
-  RosterLoadError
-    "/home/example/.config/kanban/models.toml"
-    (RosterInvalid [MissingAssignment SolveRole CodexProvider])
+shouldMention :: Text -> Text -> Expectation
+shouldMention subject needle =
+  Data.Text.unpack subject `shouldSatisfy` isInfixOf (Data.Text.unpack needle)
 
 refusalMentioning :: String -> Either Text value -> Bool
 refusalMentioning needle result = case result of
   Left message -> needle `isInfixOf` Data.Text.unpack message
   Right _ -> False
-
-shouldMention :: Text -> Text -> Expectation
-shouldMention subject needle =
-  Data.Text.unpack subject `shouldSatisfy` isInfixOf (Data.Text.unpack needle)

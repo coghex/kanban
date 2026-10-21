@@ -11,7 +11,6 @@ module Spec.ApprovalService (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -26,7 +25,6 @@ import Kanban.Drainer
     DrainerStatus (..),
   )
 import Kanban.Process (identityForPid, readProcessSnapshot)
-import Kanban.Review (ReviewStage (..))
 import Kanban.UI.Approval
   ( ApprovalHandoff (..),
     approvalObservationApplied,
@@ -35,8 +33,6 @@ import Kanban.UI.Approval
     approvalTogglePress,
   )
 import Kanban.UI.PullRequest (drainerTogglePress)
-import Kanban.Review (canonicalLaunchOutcome)
-import Kanban.UI.Review (approvalServiceRefusal)
 import Kanban.UI.Types (AppState (..))
 import Kanban.UI.Util (shownNotice)
 import Spec.Support.App (testAppState)
@@ -138,18 +134,6 @@ withApproval status state =
 
 dashboardShowing :: ApprovalStatus -> IO AppState
 dashboardShowing status = withApproval status <$> testAppState (Board Map.empty)
-
--- | The dashboard, having observed this status with or without a live backend
--- pass under it. The interlock reads that pass rather than the status alone, so
--- a fixture about it has to say which.
-observing :: ApprovalStatus -> Bool -> IO AppState
-observing status passRunning = do
-  state <- dashboardShowing status
-  pure
-    state
-      { appApprovalResult =
-          Just (ApprovalResult status.approvalActivity (Just ApprovalOutcomeIdle) (if passRunning then Just 4242 else Nothing) (Just "t1") Nothing Nothing)
-      }
 
 -- | Runs @action@ with a fake @systemctl@ first on @PATH@.
 withFakeSystemctl :: [ByteString.ByteString] -> IO result -> IO result
@@ -930,198 +914,6 @@ spec = do
       -- cleared was already clear, so control is not refused either.
       approvalToggle failed.appApprovalBusy failed.appApprovalStatus `shouldBe` StopApprovalService
 
-  describe "competing canonical work while the service is live" $ do
-    it "refuses a canonical stage only while a backend pass is actually running" $ do
-      -- Requirement 8 is about a review in flight, not about the service being
-      -- switched on. The controller sleeps between passes with no child at
-      -- all, so a running service with no live pass must let a card review
-      -- through; only the pass itself contends for the backend's lock.
-      reviewing <- observing runningStatus True
-      approvalServiceRefusal reviewing InitialReview `shouldMentionJust` "wait for it to finish or stop the service"
-      approvalServiceRefusal reviewing IssueRereview `shouldMentionJust` "canonical review in flight"
-
-      idle <- observing runningStatus False
-      approvalServiceRefusal idle InitialReview `shouldBe` Nothing
-      approvalServiceRefusal idle IssueRereview `shouldBe` Nothing
-
-    it "refuses the same issue too, not only another one" $ do
-      -- The service reviews in numeric order and cannot be asked to skip to
-      -- the card's issue, so a second canonical child for it is the same
-      -- contention as for any other.
-      reviewing <- observing runningStatus True
-      approvalServiceRefusal reviewing InitialReview `shouldBe` approvalServiceRefusal reviewing IssueRereview
-
-    it "keeps the selected-card workflow available at a barrier, pass or no pass" $ do
-      -- A barriered controller's child is the read-only gate check: no model
-      -- work, and the lock released between checks, so the repair of the
-      -- barriered issue and the rereview after it both stay launchable (D-10).
-      checking <- observing barrierStatus True
-      approvalServiceRefusal checking InitialReview `shouldBe` Nothing
-      approvalServiceRefusal checking IssueRereview `shouldBe` Nothing
-      approvalServiceRefusal checking IssueRevision `shouldBe` Nothing
-
-      waiting <- observing barrierStatus False
-      approvalServiceRefusal waiting IssueRereview `shouldBe` Nothing
-
-    it "never refuses a revision, whatever the service is doing" $ do
-      -- A revision runs the interactive coordinator and performs no canonical
-      -- backend review, so it contends for nothing.
-      reviewing <- observing runningStatus True
-      approvalServiceRefusal reviewing IssueRevision `shouldBe` Nothing
-
-    it "permits canonical work against every settled or unknowable state" $ do
-      stopped <- observing stoppedStatus False
-      approvalServiceRefusal stopped InitialReview `shouldBe` Nothing
-      unsupported <- observing (approvalUnavailableStatus (ApprovalHostUnsupported "unsupported")) False
-      approvalServiceRefusal unsupported InitialReview `shouldBe` Nothing
-      unknown <- observing (ApprovalStatus ApprovalError "no answer" ApprovalServiceUnknown Nothing Nothing) False
-      approvalServiceRefusal unknown InitialReview `shouldBe` Nothing
-      failed <- observing (ApprovalStatus ApprovalError "stopped · a backend pass failed" ApprovalServiceChildFailure Nothing Nothing) False
-      approvalServiceRefusal failed InitialReview `shouldBe` Nothing
-
-    it "permits canonical work before any observation has been applied" $ do
-      -- No evidence of a review is not evidence of one, and the backend's own
-      -- approval lock is what actually decides contention.
-      unobserved <- dashboardShowing stoppedStatus
-      unobserved.appApprovalResult `shouldBe` Nothing
-      approvalServiceRefusal unobserved InitialReview `shouldBe` Nothing
-
-    it "asks the controller again at the asynchronous launch boundary" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- The board's own observation is up to ten seconds old, and the
-        -- service can spawn a canonical child inside that window. The check
-        -- taken at the launch itself therefore reads the controller rather
-        -- than the last poll: a service that was idle when the key was pressed
-        -- and is reviewing by the time the launch runs is still refused.
-        reviewing <-
-          fakeApprovalController
-            temporaryRoot
-            [ByteString.pack ("printf '%s' '" <> LazyByteString.unpack (addressed "running" ["\"backend_pid\":424242"]) <> "'")]
-        contention <- liveApprovalContention boardIdentity (Right reviewing)
-        contention `shouldMentionJust` "canonical review in flight"
-
-    it "lets the launch through when that live read finds no pass" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        idle <-
-          fakeApprovalController
-            temporaryRoot
-            [ByteString.pack ("printf '%s' '" <> LazyByteString.unpack (addressed "running" []) <> "'")]
-        liveApprovalContention boardIdentity (Right idle) `shouldReturn` Nothing
-
-    it "lets the launch through when there is no controller or none can be read" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- Fails open in both directions on purpose. A repository with no
-        -- installed service contends with nothing, and a controller that
-        -- cannot be read has said nothing — refusing on it would let one
-        -- broken service block every card review indefinitely. The backend's
-        -- approval lock is what makes that safe.
-        liveApprovalContention boardIdentity (Left (ApprovalUndiscoverable "not installed")) `shouldReturn` Nothing
-        broken <- fakeApprovalController temporaryRoot ["echo 'the job is not loaded' >&2", "exit 1"]
-        liveApprovalContention boardIdentity (Right broken) `shouldReturn` Nothing
-
-    it "asks the service again after the preflight, not only before it" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- The preflight runs several probes, and the service can take the
-        -- backend's lock while they do. A check taken before it would still
-        -- have seen an idle service and spawned a competing child; the one
-        -- taken directly before the spawn sees what the preflight's own
-        -- duration let happen.
-        let marker = temporaryRoot </> "service-took-the-lock"
-        controller <- switchingApprovalController temporaryRoot marker
-        spawned <- newIORef False
-        outcome <-
-          canonicalLaunchOutcome
-            InitialReview
-            boardIdentity
-            (Right controller)
-            (writeFile marker "" >> pure Nothing)
-            (writeIORef spawned True >> pure (Right ()))
-        outcome `shouldSatisfy` either (Text.isInfixOf "canonical review in flight") (const False)
-        readIORef spawned `shouldReturn` False
-
-    it "spawns when the service is still idle by the time the preflight ends" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let marker = temporaryRoot </> "service-took-the-lock"
-        controller <- switchingApprovalController temporaryRoot marker
-        spawned <- newIORef False
-        outcome <-
-          canonicalLaunchOutcome
-            InitialReview
-            boardIdentity
-            (Right controller)
-            (pure Nothing)
-            (writeIORef spawned True >> pure (Right ()))
-        outcome `shouldBe` Right ()
-        readIORef spawned `shouldReturn` True
-
-    it "never reaches the service, or the spawn, when the preflight blocks" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let marker = temporaryRoot </> "service-took-the-lock"
-        controller <- switchingApprovalController temporaryRoot marker
-        spawned <- newIORef False
-        outcome <-
-          canonicalLaunchOutcome
-            InitialReview
-            boardIdentity
-            (Right controller)
-            (pure (Just "Install the canonical review backend first"))
-            (writeIORef spawned True >> pure (Right ()))
-        outcome `shouldBe` Left "Install the canonical review backend first"
-        readIORef spawned `shouldReturn` False
-
-    it "launches a revision without asking the service at all" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- A revision performs no canonical backend review, so a service that
-        -- is reviewing right now does not hold it up.
-        let marker = temporaryRoot </> "service-took-the-lock"
-        controller <- switchingApprovalController temporaryRoot marker
-        writeFile marker ""
-        spawned <- newIORef False
-        outcome <-
-          canonicalLaunchOutcome
-            IssueRevision
-            boardIdentity
-            (Right controller)
-            (pure Nothing)
-            (writeIORef spawned True >> pure (Right ()))
-        outcome `shouldBe` Right ()
-        readIORef spawned `shouldReturn` True
-
-    it "reads that live check against this repository, never another's" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        -- A foreign document decodes to unknown, which is not a live pass, so
-        -- the launch is never refused on another repository's service.
-        foreignController <-
-          fakeApprovalController
-            temporaryRoot
-            [ ByteString.pack
-                ( "printf '%s' '"
-                    <> "{\"schema\":\"kanban-issue-approval-status\",\"version\":1"
-                    <> ",\"repository\":\"other/repo\",\"state\":\"running\",\"backend_pid\":424242}'"
-                )
-            ]
-        liveApprovalContention boardIdentity (Right foreignController) `shouldReturn` Nothing
-
-    it "stops refusing card reviews once the service can no longer be read" $ do
-      -- The last good observation had a live backend pass, so the interlock was
-      -- refusing. A failed poll says this end cannot vouch for that any more,
-      -- and a reading it has disowned must not go on blocking explicit work —
-      -- the live check at the launch boundary fails open for the same reason.
-      reviewing <- observing runningStatus True
-      approvalServiceRefusal reviewing InitialReview `shouldMentionJust` "canonical review in flight"
-      let (lost, _) = polledAfter reviewing (Left "issue approval status timed out after 4 seconds")
-      lost.appApprovalStatus.approvalActivity `shouldBe` ApprovalServiceUnknown
-      lost.appApprovalResult `shouldBe` Nothing
-      approvalServiceRefusal lost InitialReview `shouldBe` Nothing
-
-    it "stops refusing card reviews when a transition fails instead" $ do
-      reviewing <- observing runningStatus True
-      let (pressed, handoff) = approvalTogglePress reviewing
-          transition = maybe 0 (.approvalHandoffTransition) handoff
-          (failed, _) = approvalToggleApplied transition (Left "the job is not loaded") pressed
-      failed.appApprovalResult `shouldBe` Nothing
-      approvalServiceRefusal failed InitialReview `shouldBe` Nothing
-
   describe "board refresh after a service result" $ do
     it "refreshes for a first observation that already reports a mutation" $ do
       -- The startup fetch and the first poll are started concurrently, so a
@@ -1353,20 +1145,6 @@ spec = do
 -- issued before the press, which is a different test.
 polledAfter :: AppState -> Either Text ApprovalObservation -> (AppState, Bool)
 polledAfter state result = approvalStatusApplied state.appApprovalTransition result state
-
--- | A controller that reports a live canonical pass once @marker@ exists, and
--- an idle service before that. Standing in for the service taking the
--- backend's approval lock partway through a launch.
-switchingApprovalController :: FilePath -> FilePath -> IO ApprovalController
-switchingApprovalController temporaryRoot marker =
-  fakeApprovalController
-    temporaryRoot
-    [ ByteString.pack ("if [ -e " <> marker <> " ]; then"),
-      ByteString.pack ("  printf '%s' '" <> LazyByteString.unpack (addressed "running" ["\"backend_pid\":424242"]) <> "'"),
-      "else",
-      ByteString.pack ("  printf '%s' '" <> LazyByteString.unpack (addressed "running" []) <> "'"),
-      "fi"
-    ]
 
 -- | Whether a press handed controller work off, and which way. The handoff
 -- has no 'Eq' instance and deliberately never gets one: what a test cares

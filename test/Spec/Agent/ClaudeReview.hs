@@ -33,7 +33,6 @@ import Kanban.Models
     assignmentFor,
     defaultRoster,
   )
-import Kanban.Domain (defaultWorkflowConfig)
 import Kanban.Process (killManagedProcess)
 import Kanban.Review
   ( InterruptAcknowledgement (..),
@@ -48,7 +47,6 @@ import Kanban.Review
     ReviewThreadId (..),
     ReviewTurnOutcome (..),
     StreamRecord (..),
-    reviewStageForLabels,
     StreamTurnResult (..),
     beginIssueReview,
     decodeStreamRecord,
@@ -60,24 +58,11 @@ import Kanban.Review
     settleInterrupt,
     stopReviewClient,
     streamInterruptRequest,
-    streamUserMessage,
+    streamUserMessage
   )
 import Kanban.ReviewToolServer (reviewToolServerConfig)
-import Kanban.UI.Review
-  ( applyFailedInterrupt,
-    carryUndelivered,
-    markReviewSessionDisconnected,
-    newReviewSession,
-    reviewOutcomePhase,
-    reviewSessionHoldsUnsentText,
-    undeliveredForIssue,
-  )
-import Kanban.UI.Session (reviewSessionInputLive, reviewSessionReusable)
-import Kanban.UI.SessionCore (newAgentSession)
-import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env (withEnvironmentValue)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
-import Spec.Support.Fixtures (baseIssue, fixtureReviewThread)
 import Spec.Support.Roster (cellOf)
 import System.Environment (getExecutablePath, lookupEnv)
 import System.FilePath ((</>))
@@ -92,7 +77,6 @@ import Spec.Support.Process
     withRoutedReviewClientUsing,
     startFailures,
     threadCreations,
-    plainChatTranscript,
     turnCompletions,
     turnStarts,
     waitForHeldConnections,
@@ -758,234 +742,6 @@ spec = do
         -- connection report first.
         takeWhile (/= "ReviewInterruptFailed") (lifecycle recorded)
           `shouldSatisfy` elem "ReviewConnectionStopped"
-
-  -- The session half of a failed interrupt. 'applyReviewEvent' runs in
-  -- brick's 'EventM', which no unit test here can drive, so the transition a
-  -- 'ReviewInterruptFailed' causes lives in 'applyFailedInterrupt' and is
-  -- covered directly -- the way issue #17's rejected steer is in
-  -- "Spec.Agent.Protocol", and reusing that recovery rather than a second one.
-  describe "recovering a message a failed interrupt was carrying" $ do
-    let guidance = "focus on the parser" :: Text
-        cause = "the interrupt was not performed" :: Text
-        interruptedSession :: Text -> ReviewSession
-        interruptedSession input =
-          ( newAgentSession
-              0
-              ReviewRunning
-              "thinking"
-              Nothing
-              (plainChatTranscript ("\nYou: " <> guidance <> "\n"))
-              ReviewDetail
-                { reviewSessionIssue = baseIssue 588 [],
-                  -- The stage an embedded review runs at, and the only one
-                  -- that ever reads typed text: the others run the canonical
-                  -- gate as a subprocess and hold no thread for an interrupt
-                  -- to fail on.
-                  reviewSessionStage = IssueRevision,
-                  reviewSessionThreadId = Just (fixtureReviewThread "claude-session-1"),
-                  reviewSessionTurnId = Just "turn-1",
-                  reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = [],
-                  reviewSessionAwaiting = [],
-                  reviewSessionRestored = Nothing
-                }
-          )
-            {sessionInput = input}
-        -- The same session as the connection's end leaves it: settled, and
-        -- past the point where its input line takes anything.
-        settledSession :: Text -> ReviewSession
-        settledSession input = (interruptedSession input) {sessionPhase = ReviewFailed}
-
-    it "restores the message to an input line the user left alone, and says what failed" $ do
-      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
-      recovered.sessionInput `shouldBe` guidance
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
-
-    -- The optimistic entry is written the moment the control request goes
-    -- out, so a session shown only the failure would go on claiming the
-    -- provider read text it never saw.
-    it "qualifies the optimistic transcript entry rather than leaving it claiming delivery" $ do
-      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> guidance)
-
-    it "queues it behind a draft typed after the send rather than overwriting it" $ do
-      let recovered = applyFailedInterrupt cause (Just guidance) (interruptedSession "wait, ignore that")
-      recovered.sessionInput `shouldBe` "wait, ignore that"
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
-
-    -- A cancellation carried nothing, so there is nothing to restore -- but
-    -- one that did not happen is exactly what a user watching the turn keep
-    -- running needs told.
-    it "reports a failed cancellation without inventing a message to put back" $ do
-      let recovered = applyFailedInterrupt cause Nothing (interruptedSession "")
-      recovered.sessionInput `shouldBe` ""
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` []
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
-      recovered.sessionTranscript.standardTranscript `shouldNotMention` "[not delivered]"
-
-    -- The connection died, so the session this arrives at is already settled
-    -- and its input line takes no keystrokes and submits nothing
-    -- ('reviewSessionInputLive'). Text parked there would look like a draft
-    -- and behave like a decoration; the session's own queue is drawn in the
-    -- overlay and drains back onto the line the next time one can be sent,
-    -- so that is where a message goes when the line cannot honour it.
-    it "queues the message rather than parking it on a settled session's dead input line" $ do
-      let recovered = applyFailedInterrupt cause (Just guidance) (settledSession "")
-      recovered.sessionInput `shouldBe` ""
-      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> guidance)
-      recovered.sessionTranscript.standardTranscript `shouldMention` ("[interrupt failed] " <> cause)
-
-    -- The whole sequence a dying connection actually produces, in order and
-    -- through the functions that handle it, rather than a session poked into
-    -- a phase by hand. The connection report settles the session, the
-    -- failure hands the message to the only place a settled session can
-    -- keep it, the settled session is then refused as reusable so the next
-    -- press starts a review rather than reopening a dead end, and the
-    -- session that press creates has the message back on a line it can send
-    -- from. Any one of those four links missing loses the message.
-    it "carries the message through the connection's end to a fresh review that can send it" $ do
-      let opened = interruptedSession ""
-          -- The host routes a connection's end only into the children that
-          -- connection was serving (SAG-10), so what reaches this session is
-          -- already known to be its own.
-          settled = markReviewSessionDisconnected "Claude stream-json session exited" opened
-      stranded <- pure (applyFailedInterrupt cause (Just guidance) settled)
-      stranded.sessionPhase `shouldBe` ReviewFailed
-      stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
-      reviewSessionReusable
-        stranded.sessionPhase
-        stranded.sessionDetail.reviewSessionStage
-        IssueRevision
-        False
-        (not (null stranded.sessionDetail.reviewSessionUndelivered))
-        `shouldBe` False
-      -- Built by the constructor the press itself uses, so the last link is
-      -- the session `r` really creates rather than one shaped like it.
-      let (restarted, _) =
-            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      restarted.sessionInput `shouldBe` guidance
-      restarted.sessionDetail.reviewSessionUndelivered `shouldBe` []
-      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
-        `shouldBe` True
-
-    -- The other sequence that hands a message back, and the one whose
-    -- terminal phase is not a failure at all: the turn reached its verdict
-    -- while the interrupt was still unconfirmed. The phase is taken from the
-    -- rule the event handler itself uses rather than named here, so a change
-    -- to what a completed revision settles into cannot leave this asserting
-    -- the wrong thing.
-    it "carries the message on from a turn that reached its verdict first" $ do
-      let settledPhase = reviewOutcomePhase IssueRevision TurnSucceeded (Just (verdictResult 588))
-          finished = (interruptedSession "") {sessionPhase = settledPhase}
-          stranded = applyFailedInterrupt cause (Just guidance) finished
-      -- A verdict, not a failure -- and still a session that can no longer
-      -- be sent to.
-      settledPhase `shouldNotBe` ReviewFailed
-      reviewSessionInputLive IssueRevision settledPhase `shouldBe` False
-      stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
-      reviewSessionReusable
-        settledPhase
-        IssueRevision
-        IssueRevision
-        False
-        (not (null stranded.sessionDetail.reviewSessionUndelivered))
-        `shouldBe` False
-      let (restarted, _) =
-            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      restarted.sessionInput `shouldBe` guidance
-      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
-        `shouldBe` True
-
-    -- The ordering that defeats a queue-only rule. A refused interrupt is
-    -- handled while its target still runs, so the message goes back onto a
-    -- line that is live at that moment and stays there -- and then the turn
-    -- reaches its verdict, settling the session under it. Nothing moved the
-    -- text anywhere, so a rule reading only the queue sees an empty one and
-    -- reopens a session that can no longer send.
-    it "carries a message left on a live line by a turn that then reached its verdict" $ do
-      let refused = applyFailedInterrupt cause (Just guidance) (interruptedSession "")
-          settledPhase = reviewOutcomePhase IssueRevision TurnSucceeded (Just (verdictResult 588))
-          completed = refused {sessionPhase = settledPhase}
-      -- It went to the line, not the queue: the session could still send
-      -- when the interrupt failed.
-      refused.sessionInput `shouldBe` guidance
-      refused.sessionDetail.reviewSessionUndelivered `shouldBe` []
-      -- And the turn's own completion left it somewhere it cannot.
-      reviewSessionInputLive IssueRevision settledPhase `shouldBe` False
-      reviewSessionHoldsUnsentText completed `shouldBe` True
-      reviewSessionReusable settledPhase IssueRevision IssueRevision False (reviewSessionHoldsUnsentText completed)
-        `shouldBe` False
-      let (restarted, _) =
-            carryUndelivered (undeliveredForIssue (Just completed) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      restarted.sessionInput `shouldBe` guidance
-      reviewSessionInputLive restarted.sessionDetail.reviewSessionStage restarted.sessionPhase
-        `shouldBe` True
-
-    -- The other late ordering: the interrupt succeeded, the turn was cut
-    -- short, and the follow-up write failed. That leaves the session
-    -- interrupted -- a phase whose line is deliberately live, because an
-    -- interrupted revision is resumable. It stops being resumable when its
-    -- connection goes, and nothing used to say so.
-    it "carries a message left on an interrupted session whose connection then stopped" $ do
-      let interrupted = (interruptedSession "") {sessionPhase = ReviewInterrupted}
-          held = applyFailedInterrupt cause (Just guidance) interrupted
-          settled = markReviewSessionDisconnected "Claude stream-json session exited" held
-      -- Live while the thread was merely interrupted, so the message is on
-      -- the line ready to resend.
-      reviewSessionInputLive IssueRevision ReviewInterrupted `shouldBe` True
-      held.sessionInput `shouldBe` guidance
-      let stopped = settled
-      -- The connection's end is what makes it unresumable, and says so.
-      stopped.sessionPhase `shouldBe` ReviewFailed
-      reviewSessionReusable
-        stopped.sessionPhase
-        stopped.sessionDetail.reviewSessionStage
-        IssueRevision
-        False
-        (reviewSessionHoldsUnsentText stopped)
-        `shouldBe` False
-      let (restarted, _) =
-            carryUndelivered (undeliveredForIssue (Just stopped) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      restarted.sessionInput `shouldBe` guidance
-
-    -- Where carrying it forward stops. A revision that published its verdict
-    -- moves the labels on, so the next `r` asks for the canonical rereview --
-    -- a stage that runs the gate as a subprocess and holds no thread. The
-    -- stage is derived from the labels that revision publishes rather than
-    -- named, so this is the sequence the board actually produces.
-    it "holds the message for the issue when the next stage could never send it" $ do
-      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "")
-          -- What a published revision leaves on the issue, and what `r` then
-          -- asks for.
-          nextStage = reviewStageForLabels defaultWorkflowConfig ["reviewed:revised"]
-          canonical = newReviewSession (baseIssue 588 []) nextStage 0
-          (replacement, owed) = carryUndelivered (undeliveredForIssue (Just stranded) []) canonical
-      nextStage `shouldNotBe` IssueRevision
-      reviewSessionInputLive nextStage canonical.sessionPhase `shouldBe` False
-      -- Not put into a session that could never send it, and not thrown away
-      -- with the session it was parked in either.
-      replacement.sessionInput `shouldBe` ""
-      replacement.sessionDetail.reviewSessionUndelivered `shouldBe` []
-      owed `shouldBe` [guidance]
-      -- It survives however many canonical stages come and go...
-      let (_, stillOwed) = carryUndelivered (undeliveredForIssue (Just replacement) owed) canonical
-      stillOwed `shouldBe` [guidance]
-      -- ...and the next session that can send is handed it.
-      let (revision, nothingLeft) =
-            carryUndelivered (undeliveredForIssue Nothing stillOwed) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      revision.sessionInput `shouldBe` guidance
-      nothingLeft `shouldBe` []
-
-    -- A draft the user typed after the send is not overwritten by the
-    -- message coming across: the line the fresh session opens with is the
-    -- one they were last looking at, and the message waits behind it.
-    it "keeps the replaced session's own draft ahead of what it never sent" $ do
-      let stranded = applyFailedInterrupt cause (Just guidance) (settledSession "wait, ignore that")
-          (restarted, _) =
-            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 588 []) IssueRevision 0)
-      restarted.sessionInput `shouldBe` "wait, ignore that"
-      restarted.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
 
   -- The handshake's rule on its own, away from any process. Both halves have
   -- to be in and agree before a user's message may be written, and every way
