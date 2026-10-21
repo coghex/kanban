@@ -24,7 +24,7 @@ import Kanban.Drainer
 import Kanban.UI.Board (drawFooter)
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction)
 import Kanban.UI.Notice
-import Kanban.UI.PullRequest (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
+import Kanban.UI.Drainer (directMergeResultApplied, drainerToggleApplied, drainerTogglePress)
 import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Reconcile (boardRefreshOutcomeApplied, refreshSuccessNotice, usageRefreshApplied)
 import Kanban.UI.Refresh (historyPausedNotice)

@@ -693,7 +693,6 @@ Initial bindings:
 |---|---|
 | `j` / Down | Select next visible card or collapsed epic |
 | `k` / Up | Select previous visible card or collapsed epic |
-| `x` | Kill the selected working issue/PR process group and its child processes |
 | `h` / Left | Select previous column |
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
@@ -703,12 +702,8 @@ Initial bindings:
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `w` | Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL |
-| `f` | Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing |
-| `Esc` | Close an overlay or dismiss any notice early, ahead of its ten-second lifetime; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
-| `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
-| `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
-| `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
-| `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
+| `f` | Toggle the open overlay between its windowed box and fullscreen; with no overlay open the key does nothing |
+| `Esc` | Close an overlay or dismiss any notice early, ahead of its ten-second lifetime |
 | `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` or click | Update GitHub board data and both usage providers |
 | `a` or click | Start or stop the service-managed issue approval service |
@@ -716,46 +711,24 @@ Initial bindings:
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
 | `v` | Show or hide the body excerpt on every card, reflowing the columns and keeping the selection in view; titles, label chips, metadata, tracker context, diagnostics and pull-request status are unchanged, a card's details overlay still shows the whole body, and every launch starts at the configured `excerpt_lines` height |
-| `o` | Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
-| `Tab` | In an open solve, PR, or review overlay, show the next in-memory session of that kind |
-| `Ctrl-C` | Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r` |
-| `i` | In an open live-agent overlay, put the focused session into insert mode, where printable keys and Backspace edit its draft; a no-op on a session with nothing left to read what it types |
-| `j` / `k` | In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up one line |
-| `g` / `G` | In an open live-agent overlay's normal mode, jump the focused session's transcript to its beginning or back to its live tail |
-| `Ctrl-D` / `Ctrl-U` | In an open live-agent overlay's normal mode, scroll the focused session's transcript down or up sixteen lines |
-| `q` | In an open live-agent overlay's normal mode, hide the overlay without interrupting its work and without quitting the dashboard |
-| `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits |
+| `q` / `Ctrl-C` | Quit and restore the terminal from the board, a card's details overlay, or the help overlay |
 
 In the no-agent operating mode — a `models.toml` whose `agents` list loads no
-provider, and equally one that will not load at all — the four bindings that
-start agent work leave the screen: `r`, `S`, `A`, and `a` are absent from the
-footer hint line, from a card's details overlay footer, and from the help
-overlay. Every one of them is still dispatched. Pressing one produces a notice
-naming the mode and the `agents` list that selects it, and nothing else
-happens: no chooser opens, no session is inserted or reopened, no process is
-spawned, no overlay opens, and the approval service is neither started nor
-stopped. That refusal is given ahead of the settled-history and
-completed-history answers below, so the reason on screen is the one that is
-actually true of the board. `u` still updates GitHub board data in this mode
-and spawns no usage provider — not at startup, not on the key, and not from
-the sidebar's `↻` — and every other binding in the table above behaves exactly
-as it does in the other two modes. The rows themselves are unchanged: this
-paragraph is what the mode changes, not the table.
-
-Inspecting and terminating work that is already running stays available in
-this mode, so `p` and `x` are on all three surfaces and dispatch normally
-there. Worker discovery runs whatever the roster loads, so a board started
-with no provider still inherits the persistent solve and PR workers an earlier
-run left running, and Milestone 8's recovery contract promises those remain
-visible through the process inspector and terminable through `x`. Neither key
-spawns a provider: one opens the inspector, the other terminates recorded
-process groups. Both are offered unconditionally rather than only when there
-is manageable work, because the footer and help inventories are projections of
-the operating mode alone; an inspector with no rows is the ordinary empty
-case. `x` on a card the completed generation has settled answers the
-read-only-history notice in this mode exactly as it does in the other two.
+provider, and equally one that will not load at all — the binding that needs a
+provider leaves the screen: `a` is absent from the footer hint line, from a
+card's details overlay footer, and from the help overlay. It is still
+dispatched. Pressing it produces a notice naming the mode and the `agents` list
+that selects it, and nothing else happens: no overlay opens, no process is
+spawned, and the approval service is neither started nor stopped. That refusal
+is given ahead of the settled-history and completed-history answers below, so
+the reason on screen is the one that is actually true of the board. `u` still
+updates GitHub board data in this mode and spawns no usage provider — not at
+startup, not on the key, and not from the sidebar's `↻` — and every other
+binding in the table above behaves exactly as it does in the other two modes.
+The rows themselves are unchanged: this paragraph is what the mode changes,
+not the table.
 
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
@@ -778,38 +751,6 @@ nothing. Manual updates and required workflow refreshes bypass this cooldown.
 Remaining focused does not start periodic updates: eligibility is checked only
 when another gained-focus event arrives.
 
-The three live-agent overlays are modal, vim-style. Each solve, PR, and review
-session carries its own mode and opens in normal, so `Tab` shows the next
-session in whatever mode that session was left in, beside its own draft. In
-normal mode a plain letter is a command: `i` starts insert, `q` or `Esc` hides
-the overlay, `j`/`k`, `g`/`G`, and `Ctrl-D`/`Ctrl-U` scroll the transcript, and
-`1`-`9` pick a pending numbered choice — doing nothing when none is pending.
-In insert mode printable keys and Backspace edit the draft, `Esc` returns to
-normal, and `Enter` sends it and returns to normal on the keypress whether or
-not the send is accepted. The arrows scroll in both modes, and `Tab`,
-`Ctrl-C`, and the review overlay's `Ctrl-X` are outside the modes entirely.
-`Esc` stages rather than chains: insert to normal, normal to hidden, and never
-on to the dashboard's guarded quit.
-
-A session with nothing left to read what it types sits permanently in normal
-mode and treats `i` as a no-op, whatever mode it was last left in. `Tab`, `q`,
-`Esc`, and every scroll key keep working on it, and it still shows `[N]`. A
-review session reads typed text throughout its turn, so insert mode stays
-reachable while the agent is working and a steer drafted mid-turn queues rather
-than being lost; it stops reading once the stage settles, and a canonical stage
-— which runs the gate as a subprocess and holds no app-server thread — never
-reads it in any phase. The one exception is an interrupted app-server revision,
-which stays resumable and so keeps its input. A solve or PR session reads typed
-text only while it is waiting for input, which is also the only phase that
-draws its draft line; there is no queue behind those two to hold a mid-turn
-draft.
-
-A numbered-choice question or any approval request forces its own session — and
-only its own — back to normal so the digits answer it, leaving that session's
-draft and undelivered queue untouched; a free-text-only question leaves the
-mode alone. Each overlay shows the session's current mode as `[N]`, or `[I]` in
-green where color is enabled.
-
 Mouse interaction is intentionally complete but narrow:
 
 - Left-clicking an unselected issue or PR card selects it.
@@ -819,24 +760,18 @@ Mouse interaction is intentionally complete but narrow:
   it, leaving the keyboard wherever it already was.
 - Left-clicking outside an open details panel closes it, while that panel is
   windowed.
-- Right-clicking a board card opens its live issue-review, solve,
-  autosolve-bound PR review, or direct PR session. With no live session it only
-  selects the card and never opens details. It behaves the same way in the
-  no-agent operating mode, because this gesture is a second route to the very
-  overlays `p` and then Enter already open there, and that mode leaves the
-  inspector reachable.
+- Right-clicking a board card selects it and never opens details or any other
+  overlay.
 - Right-clicking anywhere while a details panel is open closes it.
 - A fullscreen overlay withdraws the outside click and nothing else. A plain
   press on the residual frame columns beside it, or anywhere on the footer
   below it, does nothing to it, and every other way out of it is the one that
-  overlay already had: `f` puts the box back to windowed, `Esc` closes it, a
-  live-agent overlay's normal-mode `q` hides it, and the right click above
-  still closes the overlays that answer a right click at all — a card's
-  details overlay and the three live-agent ones. `q` from a card's details
-  overlay or the help overlay still quits the dashboard exactly as the table
-  above states, and the settings, process, and incident overlays answer no `q`
-  and no right click in either extent. The windowed outside-click gesture
-  keeps the meaning stated above.
+  overlay already had: `f` puts the box back to windowed, `Esc` closes it, and
+  the right click above still closes a card's details overlay. `q` from a
+  card's details overlay or the help overlay still quits the dashboard exactly
+  as the table above states, and the incidents overlay answers no `q` and no
+  right click in either extent. The windowed outside-click gesture keeps the
+  meaning stated above.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
 - The PR drainer button remains directly clickable.
@@ -862,8 +797,8 @@ mouse event, and refresh outcome redraws the frame, so the alternative is a
 board whose every interaction gets slower as the repository grows.
 
 A column is laid out once per change to what it shows — a refresh, a criteria
-edit, a query edit, an epic expanding or collapsing, a resize, a badge
-appearing beside a card, or the earliest relative age on it changing wording —
+edit, a query edit, an epic expanding or collapsing, a resize, or the earliest
+relative age on it changing wording —
 and that layout is what every frame in between is cut from. Repeated frames,
 selection movement, and wheel scrolling reuse it rather than rebuilding it,
 which is what makes the cost a property of the viewport rather than of the
@@ -871,8 +806,7 @@ column. Moving the selection reads it too, so `j`, `k`, `g`, and `G` cost the
 same on a column of five cards and a column of five thousand. Whether a frame
 may reuse it is decided by comparing counters rather than the collections they
 stand for, so that check is the same size on a board of five items and a board
-of five thousand, and on a session that has run one agent and one that has run
-a thousand. The layout is presentation state like every other: never cached,
+of five thousand. The layout is presentation state like every other: never cached,
 never part of a board snapshot, and never restored on restart.
 
 The card filter panel's figures are prepared the same way and for the same
@@ -906,7 +840,7 @@ While the box is open the base board's key table is consulted only for what
 search declines:
 
 - A printable character typed without Ctrl, Meta, or Alt appends to the query,
-  so `r`, `S`, `u`, `d`, and every other letter is text rather than a shortcut.
+  so `u`, `d`, and every other letter is text rather than a shortcut.
   The three exceptions are `s`, which closes search, uppercase `F`, which moves
   the keyboard to the filter panel with the query intact, and `q`, which reaches
   the guarded dashboard quit — so neither `q` nor an uppercase `F` can be typed

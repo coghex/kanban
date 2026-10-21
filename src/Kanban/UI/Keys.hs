@@ -90,11 +90,9 @@ eventBindingKey :: Vty.Event -> Maybe BindingKey
 eventBindingKey (Vty.EvKey key modifiers) = Just (chord key modifiers)
 eventBindingKey _ = Nothing
 
--- | Where a binding is live. The dashboard's other overlays — settings, the
--- process inspector, the incidents panel, and the three live-agent overlays —
--- consume their own input before dispatch reaches this table, so they are
--- deliberately absent: an overlay that answers a key itself is not a scope
--- the base board can be dispatched in.
+-- | Where a binding is live. The incidents panel consumes its own input before
+-- dispatch reaches this table, so it is deliberately absent: an overlay that
+-- answers a key itself is not a scope the base board can be dispatched in.
 data BindingScope
   = -- | The board itself, with no overlay open.
     BoardScope
@@ -103,13 +101,10 @@ data BindingScope
     DetailsScope
   | -- | The help overlay.
     HelpScope
-  | -- | Any open overlay that honors the fullscreen toggle and answers this
-    -- table's keys through the one shared arm ahead of its own decoder --
-    -- settings, the process inspector, and the incidents panel as well as the
-    -- two scopes above. It exists for the single binding that is live in all
-    -- of them at once; the three live-agent overlays are deliberately not in
-    -- it, because a plain letter there is a command only in normal mode and
-    -- that decision belongs to their own modal decoder.
+  | -- | Any open overlay that answers this table's keys through the one
+    -- shared arm ahead of its own decoder -- the incidents panel as well as
+    -- the two scopes above. It exists for the single binding that is live in
+    -- all of them at once.
     OverlayScope
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
@@ -119,7 +114,6 @@ data BindingScope
 data BoardAction
   = NextCard
   | PreviousCard
-  | KillWorking
   | PreviousColumn
   | NextColumn
   | FirstItem
@@ -131,10 +125,6 @@ data BoardAction
   | OpenCardPage
   | ToggleFullscreen
   | DismissOrClose
-  | ReviewSelection
-  | SolveSelection
-  | AutoSolveSelection
-  | ShowProcesses
   | ShowIncidents
   | RefreshAll
   | ToggleApproval
@@ -142,7 +132,6 @@ data BoardAction
   | MergeDoneCard
   | ToggleSidebar
   | ToggleExcerpts
-  | ShowSettings
   | ShowHelp
   | RepaintTerminal
   | QuitDashboard
@@ -182,9 +171,6 @@ binding action = case action of
   PreviousCard ->
     KeyBinding action [key 'k', plain Vty.KUp] [BoardScope] Nothing "previous" "previous card"
       "Select previous visible card or collapsed epic"
-  KillWorking ->
-    KeyBinding action [key 'x'] [BoardScope, DetailsScope] Nothing "kill" "kill selected working process tree"
-      "Kill the selected working issue/PR process group and its child processes"
   PreviousColumn ->
     KeyBinding action [key 'h', plain Vty.KLeft] [BoardScope] Nothing "prev column" "previous column"
       "Select previous column"
@@ -222,35 +208,20 @@ binding action = case action of
       "Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL"
   -- Deliberately not a 'BoardScope' binding: with nothing open there is no box
   -- to grow, and the founding request was for a key that exists only inside an
-  -- overlay. 'OverlayScope' is what makes it live in the three overlays that
-  -- keep their own decoders; the live-agent overlays answer the same letter
-  -- from their normal mode ('Kanban.UI.SessionCore.sessionInputEvent'), where
-  -- insert mode still types it into the draft.
+  -- overlay. 'OverlayScope' is what makes it live in the incidents panel,
+  -- which keeps its own decoder.
   ToggleFullscreen ->
     KeyBinding action [key 'f'] [DetailsScope, HelpScope, OverlayScope] Nothing "fullscreen" "toggle the open overlay between windowed and fullscreen"
-      "Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing"
+      "Toggle the open overlay between its windowed box and fullscreen; with no overlay open the key does nothing"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
-      "Close an overlay or dismiss any notice early, ahead of its ten-second lifetime; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit"
-  ReviewSelection ->
-    KeyBinding action [key 'r'] [BoardScope, DetailsScope] Nothing "review/revise" "review/revise/repair selected issue or PR"
-      "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header"
-  SolveSelection ->
-    KeyBinding action [key 'S'] [BoardScope, DetailsScope] Nothing "solve" "solve selected issue (choose model brand)"
-      "Choose Codex or Claude and start/reopen an issue solve through PR creation"
-  AutoSolveSelection ->
-    KeyBinding action [key 'A'] [BoardScope, DetailsScope] Nothing "autosolve" "autosolve selected issue (choose model brand)"
-      "Choose Codex or Claude and start/reopen the full autosolve review loop"
-  ShowProcesses ->
-    KeyBinding action [key 'p'] [BoardScope] Nothing "processes" "processes and agent sessions"
-      "Open the process/session inspector; Enter opens a session and `x` kills its live process tree"
+      "Close an overlay or dismiss any notice early, ahead of its ten-second lifetime"
   ShowIncidents ->
     KeyBinding action [key 'i'] [BoardScope] Nothing "attention" "everything needing attention; Enter goes to its work"
       "Open the incidents panel listing everything needing attention; Enter goes to that work"
   RefreshAll ->
     KeyBinding action [key 'u'] [BoardScope] (Just "click") "update" "update board and both usage providers"
       "Update GitHub board data and both usage providers"
-  -- Lowercase, because uppercase `A` is autosolve and the two are unrelated.
   -- A live search still types this letter into its query: `searchInput`
   -- decodes a printable key ahead of this table, exactly as it does for the
   -- other lowercase bindings.
@@ -272,9 +243,6 @@ binding action = case action of
   ToggleExcerpts ->
     KeyBinding action [key 'v'] [BoardScope] Nothing "excerpts" "show / hide card body excerpts"
       "Show or hide the body excerpt on every card, reflowing the columns and keeping the selection in view; titles, label chips, metadata, tracker context, diagnostics and pull-request status are unchanged, a card's details overlay still shows the whole body, and every launch starts at the configured `excerpt_lines` height"
-  ShowSettings ->
-    KeyBinding action [key 'o'] [BoardScope] Nothing "options" "settings"
-      "Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes"
   ShowHelp ->
     KeyBinding action [key '?'] [BoardScope] Nothing "help" "this help overlay"
       "Open a help overlay listing all bindings"
@@ -283,7 +251,7 @@ binding action = case action of
       "Force a terminal repaint without a network request"
   QuitDashboard ->
     KeyBinding action [key 'q', chord (Vty.KChar 'c') [Vty.MCtrl]] [BoardScope, DetailsScope, HelpScope] Nothing "quit" "quit"
-      "Quit and restore the terminal from the board, a card's details overlay, or the help overlay; a live-agent overlay's normal-mode `q` hides that overlay instead and never quits"
+      "Quit and restore the terminal from the board, a card's details overlay, or the help overlay"
   where
     key character = chord (Vty.KChar character) []
     plain named = chord named []
@@ -296,35 +264,21 @@ boardBindings = map binding [minBound .. maxBound]
 scopeBindings :: BindingScope -> [KeyBinding]
 scopeBindings scope = filter (elem scope . (.bindingScopes)) boardBindings
 
--- | Whether the action drives an agent, and so needs the roster to load a
--- provider before it can do anything at all.
+-- | Whether the action needs the roster to load a provider before it can do
+-- anything at all.
 --
 -- Total in 'BoardAction' for the same reason
 -- 'Kanban.UI.Events.mutatesSelectedWork' is: a binding added to the table
 -- above cannot reach the board without a decision about whether a Kanban that
 -- spawns nothing may offer it.
 --
--- @a@ is here with the three that start agent work because
--- @approve_issues.py@ resolves @issue_gate@ models and can do nothing without
--- a provider, so its control is an agent surface exactly as the solve and
--- review keys are. @d@ is not: the PR drainer merges pull requests and spawns
--- no model, and @i@ is not either, because a fail-closed drainer incident is
--- the one thing a no-agent board still has to be able to show.
---
--- @x@ and @p@ are not here either (issue #546). Neither spawns a provider:
--- one inspects sessions and the other terminates recorded process groups.
--- Worker discovery is unconditional, so a board whose roster loads nothing
--- still inherits the persistent solve and PR workers a previous run left
--- running, and the design's Milestone 8 (§19) promises those stay inspectable
--- and terminable. Taking the two keys off that board would strand the work with
--- no route to it.
+-- Only @a@ is here: @approve_issues.py@ resolves @issue_gate@ models and can
+-- do nothing without a provider. @d@ is not: the PR drainer merges pull
+-- requests and spawns no model, and @i@ is not either, because a fail-closed
+-- drainer incident is the one thing a no-agent board still has to be able to
+-- show.
 requiresLoadedAgent :: BoardAction -> Bool
 requiresLoadedAgent = \case
-  ReviewSelection -> True
-  SolveSelection -> True
-  AutoSolveSelection -> True
-  KillWorking -> False
-  ShowProcesses -> False
   ToggleApproval -> True
   NextCard -> False
   PreviousCard -> False
@@ -345,7 +299,6 @@ requiresLoadedAgent = \case
   MergeDoneCard -> False
   ToggleSidebar -> False
   ToggleExcerpts -> False
-  ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
   QuitDashboard -> False

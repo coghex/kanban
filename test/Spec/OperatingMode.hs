@@ -1,26 +1,21 @@
--- | What a Kanban whose roster loads no provider does with the surfaces that
--- drive an agent (issue #521, narrowed by issue #546).
+-- | What a Kanban whose roster loads no provider does with the one surface
+-- that still needs one (issue #521, narrowed by issue #546 and by the removal
+-- of the agent screens).
 --
 -- Which bindings the mode hides is "Spec.UI.Keys", and what the board then
 -- looks like is "Spec.UI.Golden". What is here is everything the mode changes
 -- behind the drawing: the key press that still dispatches and is refused, the
 -- usage probes that are not spawned, and the two run-and-exit modes that
--- refuse before they run. Beside them is the other half of the mode's
--- contract — the work such a board inherits from worker discovery, which it
--- must still be able to inspect, open, and terminate, and which the board
--- card's right click is the second route to.
+-- refuse before they run.
 --
 -- Every one of those is a total function the corresponding @EventM@ arm only
--- projects — 'boardActionGate' and 'settleBoardAction' for a press,
--- 'runningProcessClickRefusal' and 'applyRunningProcessClick' for the mouse,
--- 'agentSessionEntries' and the two @workerFor@ lookups for the inspector and
--- the kill route, 'usageRefreshProviders' for the probes, and
--- 'launchModeRefusal' for the command line — so the whole matrix is settled
--- with no terminal, no subprocess, and no provider account.
+-- projects -- 'boardActionGate' and 'settleBoardAction' for a press,
+-- 'usageRefreshProviders' for the probes, and 'launchModeRefusal' for the
+-- command line -- so the whole matrix is settled with no terminal, no
+-- subprocess, and no provider account.
 module Spec.OperatingMode (spec) where
 
 import Data.List (isInfixOf)
-import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..))
@@ -35,58 +30,28 @@ import Kanban.Models
     ProviderName (..),
     RoleName (..),
     defaultRoster,
+    loadedOperatingMode,
     noAgentModeMessage,
     operatingModeFor,
   )
-import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, renderFailure)
-import Kanban.Solve (SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Events
   ( BoardActionGate (..),
-    applyRunningProcessClick,
     blockedByCompletedLoad,
     boardActionGate,
     mutatesSelectedWork,
-    readOnlyHistoryGate,
-    runningProcessClickRefusal,
     settleBoardAction,
-    settledSessionRefusal,
   )
 import Kanban.UI.Keys (BoardAction (..), KeyBinding (..), binding, bindingEvent, boardAction)
 import Kanban.UI.Refresh (usageRefreshProviders)
-import Kanban.UI.Session
-  ( agentSessionEntries,
-    issueActionLive,
-    pullRequestWorkerFor,
-    resolveProcessSelection,
-    solveWorkerFor,
-  )
 import Kanban.UI.Types
-  ( AgentSessionEntry (..),
-    AgentSessionRef (..),
-    AppState (..),
+  ( AppState (..),
     CompletedHistoryStatus (..),
     Overlay (..),
-    ProcessSelection (..),
-    ReviewPhase (..),
-    SolvePhase (..),
-    withModelRoster,
   )
 import Kanban.UI.Util (selectedRow, shownNotice)
-import Kanban.UI.Worker (recoveredPullRequestSession, recoveredSolveSession)
-import Kanban.Worker
-  ( PullRequestWorkerTask (..),
-    SolveWorkerTask (..),
-    WorkerDescriptor (..),
-    WorkerId (..),
-    WorkerSpec (..),
-    WorkerTask (..),
-    descriptorForSpec,
-  )
-import Kanban.Workflow (readOnlyHistoryNotice)
-import Spec.Support.App (testAppState, withPullRequestSession, withReviewSession, withSolveSession)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, fixtureBoard, testOptions)
-import Spec.Support.Process (workerFixtureSpec)
+import Spec.Support.App (testAppState)
+import Spec.Support.Fixtures (baseIssue, fixtureBoard, testOptions)
 import Spec.Support.Roster (claudeOnlyRoster, noAgentRoster)
 import System.Exit (ExitCode (..))
 import Test.Hspec
@@ -94,8 +59,6 @@ import Test.Hspec
 spec :: Spec
 spec = describe "no-agent operating mode" $ do
   dispatchSpec
-  recoverySpec
-  mouseSpec
   probeSpec
   commandLineSpec
 
@@ -104,7 +67,7 @@ spec = describe "no-agent operating mode" $ do
 -- ---------------------------------------------------------------------------
 
 dispatchSpec :: Spec
-dispatchSpec = describe "the four bindings it refuses" $ do
+dispatchSpec = describe "the binding it refuses" $ do
   -- Requirement 2's first half. The keys are hidden, not removed: the table
   -- in "Kanban.UI.Keys" is what dispatch resolves against and it carries no
   -- mode at all, so a press still arrives at its own action and meets the
@@ -138,71 +101,16 @@ dispatchSpec = describe "the four bindings it refuses" $ do
 
   it "leaves a board that loads a provider dispatching all of them" $ do
     dual <- quietState
-    single <- withModelRoster (Right claudeOnlyRoster) <$> quietState
+    single <- (\state -> state {appOperatingMode = loadedOperatingMode (Right claudeOnlyRoster)}) <$> quietState
     sequence_
       [ (name, action, boardActionGate state action) `shouldBe` (name, action, DispatchBoardAction)
         | (name, state) <- [("dual" :: String, dual), ("single-agent", single)],
           action <- [minBound .. maxBound]
       ]
 
-  -- The review's precedence amendment, on the settled-history gate. The same
-  -- press on the same card answers with the history notice on a board that
-  -- loads a provider, so this is about which of the two refusals wins rather
-  -- than about one of them being absent.
-  it "outranks the settled-history refusal on a card the history has closed" $ do
-    dual <- overlaidOnSettledCard <$> quietState
-    quiet <- overlaidOnSettledCard <$> noAgentState
-    sequence_
-      [ (action, boardActionGate dual action)
-          `shouldBe` (action, RefuseBoardAction (readOnlyHistoryNotice settledItem))
-        | action <- settledMutations
-      ]
-    sequence_
-      [ (action, boardActionGate quiet action) `shouldBe` (action, RefuseBoardAction noAgentModeMessage)
-        | action <- settledMutations
-      ]
-
-  -- And the other gate, which makes a press inert and says nothing at all.
-  -- Refusing it silently is exactly what requirement 2 forbids, so the mode
-  -- has to be asked first here too.
-  it "outranks the completed-history blocker, which would say nothing" $ do
-    dual <- blockedOnCompletedLoad <$> quietState
-    quiet <- blockedOnCompletedLoad <$> noAgentState
-    sequence_
-      [ (action, boardActionGate dual action) `shouldBe` (action, IgnoreBoardAction)
-        | action <- settledMutations
-      ]
-    sequence_
-      [ (action, boardActionGate quiet action) `shouldBe` (action, RefuseBoardAction noAgentModeMessage)
-        | action <- settledMutations
-      ]
-
-  -- Issue #546 requirement 5. `x` is the one binding that moved out of the
-  -- mode's reach and into these two gates', so the card's own answer is now
-  -- the only one it has -- word for word the answer a board that loads a
-  -- provider gives, which is what the dual side proves is not a coincidence.
-  it "answers x on a settled card with the history notice, as a loaded board does" $ do
-    dual <- overlaidOnSettledCard <$> quietState
-    quiet <- overlaidOnSettledCard <$> noAgentState
-    sequence_
-      [ (name, boardActionGate state KillWorking)
-          `shouldBe` (name, RefuseBoardAction (readOnlyHistoryNotice settledItem))
-        | (name, state) <- [("dual" :: String, dual), ("no-agent", quiet)]
-      ]
-
-  it "answers x behind a loading completed generation the same way in both" $ do
-    dual <- blockedOnCompletedLoad <$> quietState
-    quiet <- blockedOnCompletedLoad <$> noAgentState
-    sequence_
-      [ (name, boardActionGate state KillWorking) `shouldBe` (name, IgnoreBoardAction)
-        | (name, state) <- [("dual" :: String, dual), ("no-agent", quiet)]
-      ]
-
-  -- The review's other precedence amendment. `a` is refused with the same
-  -- words as the other three but is absent from 'settledMutations', and this
-  -- is why: neither card gate claims it, so on a board that loads a provider
-  -- the very states that refuse the other three leave this one dispatching.
-  -- Without that, its absence above would read as an oversight.
+  -- `a` is refused with the roster's own words whatever the card in front of
+  -- the user: neither card gate claims it, so on a board that loads a provider
+  -- the very states that settle a card leave it dispatching.
   it "refuses a with no competing card gate to outrank" $ do
     quiet <- noAgentState
     settledQuiet <- overlaidOnSettledCard <$> noAgentState
@@ -250,137 +158,6 @@ dispatchSpec = describe "the four bindings it refuses" $ do
 -- does to the state.
 refused :: AppState -> BoardAction -> AppState
 refused state action = settleBoardAction (boardActionGate state action) state
-
--- ---------------------------------------------------------------------------
--- The work it inherits
--- ---------------------------------------------------------------------------
-
-recoverySpec :: Spec
-recoverySpec = describe "the persistent work it inherits" $ do
-  -- Issue #546 requirement 4, first part. Worker discovery does not consult
-  -- the roster, so this dashboard has exactly the state a restart under an
-  -- empty @agents@ list leaves behind, and `p` must reach it.
-  it "lists both discovered workers in the inspector, live" $ do
-    (quiet, _, _) <- attachedWorkerState
-    let entries = agentSessionEntries quiet
-    map (.agentSessionRef) entries
-      `shouldMatchList` [SolveAgent recoveredIssueNumber, PullRequestAgent recoveredPullRequestNumber]
-    map (.agentSessionLive) entries `shouldBe` [True, True]
-    -- What `p` selects when the inspector opens: a row that exists, so
-    -- 'Kanban.UI.Events.openSelectedAgentSession' has an entry to act on
-    -- rather than the no-selection notice.
-    (resolveProcessSelection entries quiet.appProcessSelection).processSelectionRow `shouldSatisfy` (< length entries)
-
-  -- The review's fixture clarification, as the control that gives the
-  -- assertion above its teeth. Attachment reconstructs a session only when
-  -- the cached board still carries the worker's issue or PR; without that
-  -- metadata each worker is left as a 'WorkerAgent' row, which opens nothing
-  -- and reports a refresh notice instead. Both fixtures register the same two
-  -- descriptors, so the board metadata is the only difference between them.
-  it "leaves a worker whose card is off the board unattached instead" $ do
-    (stranded, _, _) <- discoveredWorkerState (fixtureBoard [])
-    map (.agentSessionRef) (agentSessionEntries stranded)
-      `shouldMatchList` [WorkerAgent solveWorkerId, WorkerAgent pullRequestWorkerId]
-    (quiet, _, _) <- attachedWorkerState
-    filter isUnattachedWorker (map (.agentSessionRef) (agentSessionEntries quiet)) `shouldBe` []
-
-  -- Requirement 4's overlays, through the pure route both ways in: the right
-  -- click on the card (requirement 3), which resolves the same overlay
-  -- 'Kanban.UI.Events.openSelectedAgentSession' opens for the matching row.
-  it "opens each recovered session's overlay from its card" $ do
-    (quiet, _, _) <- attachedWorkerState
-    (applyRunningProcessClick Active 0 quiet).appOverlay
-      `shouldBe` Just (SolveOverlay recoveredIssueNumber)
-    (applyRunningProcessClick Reviewing 0 quiet).appOverlay
-      `shouldBe` Just (PullRequestReviewOverlay recoveredPullRequestNumber)
-    runningProcessClickRefusal quiet `shouldBe` Nothing
-
-  -- Requirement 4's kill route, held to the boundary the review's second
-  -- clarification draws: what is asserted is that `x` arrives at the existing
-  -- worker termination with the right descriptor in hand. Authority,
-  -- TERM/KILL escalation, survivor verification, and lease retention are
-  -- unchanged by this issue and stay covered by
-  -- "Spec.Agent.ManagedProcess.Lifecycle".
-  it "routes x to the worker termination boundary for the selected card" $ do
-    (quiet, solveDescriptor, pullRequestDescriptor) <- attachedWorkerState
-    sequence_
-      [ (name, boardActionGate (selecting column 0 quiet) KillWorking)
-          `shouldBe` (name, DispatchBoardAction)
-        | (name, column) <- [("solve" :: String, Active), ("pr", Reviewing)]
-      ]
-    -- Neither card is history, so 'killItemWorkingProcess' passes its own
-    -- re-ask of that gate and reaches 'killLiveItemWorkingProcess'...
-    sequence_
-      [ (name, readOnlyHistoryGate (selecting column 0 quiet) KillWorking) `shouldBe` (name, Nothing)
-        | (name, column) <- [("solve" :: String, Active), ("pr", Reviewing)]
-      ]
-    -- ...which hands `terminateWorker` exactly these descriptors.
-    solveWorkerFor quiet recoveredIssueNumber `shouldBe` Just solveDescriptor
-    pullRequestWorkerFor quiet recoveredPullRequestNumber `shouldBe` Just pullRequestDescriptor
-
-  -- And the inspector's own `x`, which reaches the same termination through a
-  -- row rather than a card. 'Kanban.UI.Events.killSelectedAgentSession' asks
-  -- these two questions before it acts, and both have to answer for a
-  -- recovered worker or the row would report history or no live process.
-  it "routes the inspector's x to the same boundary" $ do
-    (quiet, _, _) <- attachedWorkerState
-    sequence_
-      [ (entry.agentSessionRef, settledSessionRefusal quiet entry.agentSessionRef, entry.agentSessionLive)
-          `shouldBe` (entry.agentSessionRef, Nothing, True)
-        | entry <- agentSessionEntries quiet
-      ]
-
-  -- The out-of-scope boundary restated as an assertion: nothing about this
-  -- board starts a provider. The usage probes stay empty and the four
-  -- creation surfaces stay refused with a live worker under the selection,
-  -- which is the state that would most plausibly have talked one of them
-  -- into launching.
-  it "still starts nothing on a board carrying both workers" $ do
-    (quiet, _, _) <- attachedWorkerState
-    usageRefreshProviders quiet.appOperatingMode `shouldBe` []
-    sequence_
-      [ (name, action, boardActionGate (selecting column 0 quiet) action)
-          `shouldBe` (name, action, RefuseBoardAction noAgentModeMessage)
-        | (name, column) <- [("solve" :: String, Active), ("pr", Reviewing)],
-          action <- agentBindings
-      ]
-
--- ---------------------------------------------------------------------------
--- The mouse
--- ---------------------------------------------------------------------------
-
-mouseSpec :: Spec
-mouseSpec = describe "the right click that is a second route" $ do
-  -- Requirement 3. The gesture opens exactly the overlays `p` and then Enter
-  -- open, so since issue #546 it is an inspection route rather than one that
-  -- starts work, and it borrows 'ShowProcesses' rather than 'ReviewSelection'
-  -- from the gate. It opened and was then refused while both bindings sat on
-  -- the same side of it; only the first half of that survives.
-  it "opens the live session on a board that loads a provider" $ do
-    dual <- liveSessionState
-    (applyRunningProcessClick Issues 0 dual).appOverlay `shouldBe` Just (ReviewOverlay liveIssueNumber)
-    runningProcessClickRefusal dual `shouldBe` Nothing
-
-  it "opens it on a board that loads none, and says nothing" $ do
-    quiet <- withModelRoster (Right noAgentRoster) <$> liveSessionState
-    let clicked = applyRunningProcessClick Issues 0 quiet
-    runningProcessClickRefusal quiet `shouldBe` Nothing
-    clicked.appOverlay `shouldBe` Just (ReviewOverlay liveIssueNumber)
-    shownNotice clicked `shouldBe` Nothing
-    -- Still a click: it selects the card it landed on, as it always did.
-    clicked.appSelectedColumn `shouldBe` Issues
-    selectedRow clicked Issues `shouldBe` 0
-    -- And it leaves the session it opened exactly where it was.
-    Map.keys clicked.appReviewSessions `shouldBe` [liveIssueNumber]
-
-  -- The press with nothing live under it was never opening an agent overlay,
-  -- so it keeps selecting as before in every mode.
-  it "leaves a card with no live session selecting, and says nothing" $ do
-    quiet <- withModelRoster (Right noAgentRoster) <$> liveSessionState
-    let clicked = applyRunningProcessClick Issues 1 quiet
-    clicked.appOverlay `shouldBe` Nothing
-    shownNotice clicked `shouldBe` Nothing
-    selectedRow clicked Issues `shouldBe` 1
 
 -- ---------------------------------------------------------------------------
 -- The usage probes
@@ -505,30 +282,12 @@ unusableRoster =
 -- Fixtures
 -- ---------------------------------------------------------------------------
 
--- | The four bindings the mode takes off a board, in table order. @x@ and
--- @p@ were among them until issue #546 and are covered by 'recoverySpec'
--- instead.
+-- | The binding the mode takes off a board: the issue approval service's,
+-- which resolves @issue_gate@ models and can do nothing without a provider.
+-- The solve and review keys were the other three until their screens were
+-- removed.
 agentBindings :: [BoardAction]
-agentBindings =
-  [ ReviewSelection,
-    SolveSelection,
-    AutoSolveSelection,
-    ToggleApproval
-  ]
-
--- | The three of them that both other gates also have an answer for, which is
--- what makes the two precedence cases about ordering rather than about a gate
--- that was never going to fire.
---
--- @a@ is the fourth refused binding and is deliberately absent:
--- 'Kanban.UI.Events.blockedByCompletedLoad' and
--- 'Kanban.UI.Events.mutatesSelectedWork' are both 'False' for it, so it has
--- no competing answer for the ordering to be about, and it is covered on its
--- own below instead. @x@ is absent for the opposite reason -- since issue
--- \#546 the mode has nothing to say about that key, so the two gates here
--- give the only answer there is, which is what 'settledKillNotice' asserts.
-settledMutations :: [BoardAction]
-settledMutations = [ReviewSelection, SolveSelection, AutoSolveSelection]
+agentBindings = [ToggleApproval]
 
 -- | An ordinary dashboard on the compiled roster: dual, nothing open, nothing
 -- in flight.
@@ -537,7 +296,7 @@ quietState = testAppState (fixtureBoard [])
 
 -- | The same dashboard with a roster that loads no provider.
 noAgentState :: IO AppState
-noAgentState = withModelRoster (Right noAgentRoster) <$> quietState
+noAgentState = (\state -> state {appOperatingMode = loadedOperatingMode (Right noAgentRoster)}) <$> quietState
 
 -- | The card a completed generation has settled, held open in a details
 -- overlay — which is where 'Kanban.UI.Events.readOnlyHistoryGate' finds its
@@ -560,16 +319,13 @@ blockedOnCompletedLoad state =
     }
 
 -- | A no-agent dashboard carrying one of everything a refused press must not
--- disturb: a session of each kind, a service on its way up, and a card
--- selected in a column other than the first.
+-- disturb: services on their way up, and a card selected in a column other
+-- than the first.
 populatedNoAgentState :: IO AppState
 populatedNoAgentState = do
   quiet <- noAgentState
   pure
-    . withSolveSession (baseIssue 902 []) SolveRunning
-    . withPullRequestSession (basePullRequest 823 [901] False []) SolveRunning
-    . withReviewSession (baseIssue 901 []) ReviewRunning
-    $ quiet
+    quiet
       { appApprovalStatus = ApprovalStatus ApprovalStarting "starting…" ApprovalServiceStopped Nothing Nothing,
         appApprovalBusy = True,
         appApprovalTransition = 3,
@@ -577,17 +333,11 @@ populatedNoAgentState = do
         appSelectedColumn = Active
       }
 
--- | Everything requirement 2 says a refused press leaves alone: session,
--- chooser, overlay, process, and approval state, plus the board selection the
--- press was taken from.
+-- | Everything requirement 2 says a refused press leaves alone: overlay,
+-- approval and drainer state, plus the board selection the press was taken
+-- from.
 data SurfaceFacts = SurfaceFacts
   { factsOverlay :: Maybe Overlay,
-    factsSolveSessions :: [Int],
-    factsReviewSessions :: [Int],
-    factsPullRequestSessions :: [Int],
-    factsSolveProcesses :: [Int],
-    factsIssueActions :: [Int],
-    factsPullRequestProcesses :: [Int],
     factsApprovalState :: ApprovalState,
     factsApprovalDetail :: Text,
     factsApprovalBusy :: Bool,
@@ -603,12 +353,6 @@ surfaceFacts :: AppState -> SurfaceFacts
 surfaceFacts state =
   SurfaceFacts
     { factsOverlay = state.appOverlay,
-      factsSolveSessions = Map.keys state.appSolveSessions,
-      factsReviewSessions = Map.keys state.appReviewSessions,
-      factsPullRequestSessions = Map.keys state.appPullRequestReviewSessions,
-      factsSolveProcesses = Map.keys state.appSolveProcesses,
-      factsIssueActions = [number | number <- Map.keys state.appReviewSessions, issueActionLive state number],
-      factsPullRequestProcesses = Map.keys state.appPullRequestProcesses,
       factsApprovalState = state.appApprovalStatus.approvalState,
       factsApprovalDetail = state.appApprovalStatus.approvalDetail,
       factsApprovalBusy = state.appApprovalBusy,
@@ -618,120 +362,3 @@ surfaceFacts state =
       factsSelectedColumn = state.appSelectedColumn,
       factsSelectedRow = selectedRow state state.appSelectedColumn
     }
-
--- | The issue and the PR a previous run left persistent workers on, which
--- this dashboard inherits with no provider loaded.
-recoveredIssueNumber, recoveredPullRequestNumber :: Int
-recoveredIssueNumber = 902
-recoveredPullRequestNumber = 823
-
-recoveredIssue :: Issue
-recoveredIssue = baseIssue recoveredIssueNumber []
-
-recoveredPullRequest :: PullRequest
-recoveredPullRequest = basePullRequest recoveredPullRequestNumber [recoveredIssueNumber] False []
-
-recoveredSolveTask :: SolveWorkerTask
-recoveredSolveTask = SolveWorkerTask recoveredIssueNumber SolveOnly ClaudeSolver
-
-recoveredPullRequestTask :: PullRequestWorkerTask
-recoveredPullRequestTask = PullRequestWorkerTask recoveredPullRequestNumber PullRequestClaude PullRequestReview
-
-solveWorkerId, pullRequestWorkerId :: WorkerId
-solveWorkerId = WorkerId "solve-902-recovered"
-pullRequestWorkerId = WorkerId "pr-823-recovered"
-
--- | The board a restart reads back out of the snapshot cache, carrying the
--- card each worker names. The review's fixture clarification is about exactly
--- this: without these two entries attachment reconstructs no session at all.
-recoveredWorkerBoard :: Board
-recoveredWorkerBoard =
-  fixtureBoard
-    [ (Active, [Standalone (IssueItem recoveredIssue)]),
-      (Reviewing, [Standalone (PullRequestItem recoveredPullRequest)])
-    ]
-
--- | A no-agent dashboard with both workers registered and nothing else done
--- with them — what 'Kanban.UI.Worker.attachDiscoveredWorker' leaves behind
--- before 'Kanban.UI.Worker.ensureWorkerSession' looks for their cards. The
--- board is a parameter because whether that lookup finds anything is the one
--- thing the two fixtures below differ on.
-discoveredWorkerState :: Board -> IO (AppState, WorkerDescriptor, WorkerDescriptor)
-discoveredWorkerState board = do
-  quiet <- withModelRoster (Right noAgentRoster) <$> testAppState board
-  solveDescriptor <- descriptorForSpec (workerSpecFor solveWorkerId (SolveWorkerTaskKind recoveredSolveTask) recoveredIssueNumber)
-  pullRequestDescriptor <- descriptorForSpec (workerSpecFor pullRequestWorkerId (PullRequestWorkerTaskKind recoveredPullRequestTask) recoveredPullRequestNumber)
-  pure
-    ( quiet
-        { appWorkers =
-            Map.fromList
-              [ (solveWorkerId, solveDescriptor),
-                (pullRequestWorkerId, pullRequestDescriptor)
-              ]
-        },
-      solveDescriptor,
-      pullRequestDescriptor
-    )
-  where
-    workerSpecFor identifier task number =
-      (workerFixtureSpec (Repository "/tmp/example-project" "example" "project") identifier number) {workerTask = task}
-
--- | The same dashboard once attachment has reconstructed a session for each
--- worker, which is the state requirement 4 is about.
---
--- The two sessions are built through the very constructors
--- 'Kanban.UI.Worker.ensureWorkerSession' inserts, on the descriptors
--- discovery produced, rather than written out by hand: that arm runs in
--- brick's 'EventM', which no test in this suite can drive, so this is the
--- same route "Spec.Agent.Roster" takes to the same state.
-attachedWorkerState :: IO (AppState, WorkerDescriptor, WorkerDescriptor)
-attachedWorkerState = do
-  (registered, solveDescriptor, pullRequestDescriptor) <- discoveredWorkerState recoveredWorkerBoard
-  pure
-    ( registered
-        { appSolveSessions =
-            Map.singleton
-              recoveredIssueNumber
-              ( recoveredSolveSession
-                  registered
-                  solveDescriptor.workerDescriptorSpec.workerAssignment
-                  solveDescriptor
-                  recoveredIssue
-                  recoveredSolveTask
-              ),
-          appPullRequestReviewSessions =
-            Map.singleton
-              recoveredPullRequestNumber
-              (recoveredPullRequestSession registered.appModelRoster 0 pullRequestDescriptor recoveredPullRequest recoveredPullRequestTask)
-        },
-      solveDescriptor,
-      pullRequestDescriptor
-    )
-
-isUnattachedWorker :: AgentSessionRef -> Bool
-isUnattachedWorker (WorkerAgent _) = True
-isUnattachedWorker _ = False
-
--- | The board selection a press is taken from, which is what
--- 'Kanban.UI.Events.readOnlyHistoryGate' resolves its subject out of when no
--- details overlay is open.
-selecting :: BoardColumn -> Int -> AppState -> AppState
-selecting column row state =
-  state
-    { appSelectedColumn = column,
-      appSelectedRows = Map.insert column row state.appSelectedRows
-    }
-
-liveIssueNumber :: Int
-liveIssueNumber = 901
-
--- | Two cards in Issues, the first of them carrying a live issue review — the
--- session a right click opens an overlay for — and the second carrying
--- nothing, which is the press that only selects.
-liveSessionState :: IO AppState
-liveSessionState = do
-  state <- testAppState (fixtureBoard [(Issues, [Standalone (IssueItem liveIssue), Standalone (IssueItem quietIssue)])])
-  pure (withReviewSession liveIssue ReviewRunning state)
-  where
-    liveIssue = baseIssue liveIssueNumber []
-    quietIssue = baseIssue 902 []

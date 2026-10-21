@@ -34,7 +34,6 @@ import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime, utc)
 import qualified Graphics.Vty.Attributes as Vty
-import qualified Graphics.Vty.Input.Events as VtyInput
 import Kanban.ApprovalService
   ( ApprovalActivity (..),
     ApprovalBackend (..),
@@ -45,7 +44,7 @@ import Kanban.ApprovalService
     approvalBarrierSummary,
     decodeApprovalStatus,
   )
-import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
+import Kanban.CLI (BorderPolicy (..), Options (..))
 import Data.IORef (IORef, newIORef)
 import Kanban.Card (displayWidth)
 import Kanban.Domain
@@ -59,18 +58,7 @@ import Kanban.Filter
   )
 import Kanban.Fixture (fixtureBoard, fixtureCompletedHistory, fixtureSnapshot, fixtureUsage)
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
-import Kanban.Models
-  ( ProviderName (..),
-    RecordedAssignment,
-    RoleName (..),
-    RosterDefect (..),
-    RosterFailure (..),
-    RosterLoadError (..),
-    defaultRoster,
-    loadedOperatingMode,
-  )
-import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..), solveAssignment)
-import Kanban.Settings (defaultSettings)
+import Kanban.Models (defaultRoster, loadedOperatingMode)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Approval (approvalStatusApplied, approvalTogglePress)
 import Kanban.UI.Board
@@ -89,18 +77,8 @@ import Kanban.UI.Board
 import Kanban.UI.Filter (focusFilterPanel, refreshVisibleBoard, toggleFilterBoxFromClick, toggleFilterPanel)
 import Kanban.UI.Keys (BoardAction (..), KeyBinding (..), actionKeyText, binding, footerHint)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
-import Kanban.UI.Settings
-  ( SettingsInput (..),
-    SettingsOutcome (..),
-    applyRosterWrite,
-    openSettings,
-    settingsOutcome,
-  )
-import Kanban.Review (ReviewStage (..))
 import Kanban.UI.Theme
   ( approvedAttr,
-    dimAttr,
-    insertModeAttr,
     neutralAttr,
     pendingAttr,
     problemAttr,
@@ -109,44 +87,22 @@ import Kanban.UI.Theme
     selectedTitleAttr,
     themeFor,
   )
-import Kanban.UI.SessionCore
-  ( SessionFocus (..),
-    SessionInputEvent (..),
-    insertSessionInput,
-    newAgentSession,
-    removeSessionInputCharacter,
-    sessionInputEvent,
-    sessionModeAfter,
-    setSessionMode,
-  )
-import Kanban.UI.Session (reviewSessionInputLive)
-import Kanban.UI.SessionEvents (SessionOps (..), reviewSessionOps)
-import Kanban.UI.Solve (freshSolveTranscript)
-import Kanban.UI.State (plainTranscript, toggleCardExcerpts)
+import Kanban.UI.State (toggleCardExcerpts)
 import Kanban.UI.Notice (NoticeLife (..), emptyNoticeState, showNotice)
 import Kanban.UI.Util (noticeSet)
 import Kanban.UI.Types
-  ( AgentSession (..),
-    AppEvent,
+  ( AppEvent,
     AppState (..),
     BoardRefreshOutcome,
     CompletedHistoryStatus (..),
     IncidentSelection (..),
     Overlay (..),
-    ProcessSelection (..),
-    ReviewDetail (..),
-    ReviewPhase (..),
-    ReviewSession,
-    SolveDetail (..),
-    SolvePhase (..),
-    SolveSession,
-    withModelRoster,
   )
 import Spec.Support.Board (inertRefreshCoordinator)
-import Spec.Support.Fixtures (fixtureReviewThread, itemNumber, testOptions, testResolvedConfig)
+import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)
 import Spec.Support.Render (FrameCell (..), frameRowText, renderFrameCells)
-import Spec.Support.Roster (cellOf, claudeOnlyRoster, distinctDisplays, noAgentRoster)
+import Spec.Support.Roster (noAgentRoster)
 import Test.Hspec
 
 spec :: Spec
@@ -554,7 +510,7 @@ spec = describe "golden frames" $ do
   -- frame rather than over the projections "Spec.UI.Keys" holds -- a chip
   -- hidden from the line but still reaching the screen some other way would
   -- pass there and fail here.
-  it "names none of the four agent bindings on a no-agent board or in its help overlay" $ do
+  it "names the approvals binding on neither a no-agent board nor its help overlay" $ do
     board <- renderCase (frameCaseNamed "board-wide-no-agent")
     help <- renderCase (frameCaseNamed "overlay-help-no-agent")
     loadedBoard <- renderCase wideCase
@@ -564,62 +520,17 @@ spec = describe "golden frames" $ do
       | (name, frame, texts) <- [("board" :: String, board, agentFooterChips), ("help", help, agentHelpDescriptions)],
         text <- texts
       ]
-    -- The negative controls. Every help row really is drawn on a board that
-    -- loads a provider, so the absences above are the mode's doing rather
-    -- than text no frame ever carried.
+    -- The negative controls. The help row is really drawn on a board that
+    -- loads a provider, and so is the footer chip, so the absences above are
+    -- the mode's doing rather than text no frame ever carried.
     sequence_
       [ (description, description `Data.Text.isInfixOf` frameLines loadedHelp) `shouldBe` (description, True)
       | description <- agentHelpDescriptions
       ]
-    -- The footer's is the same control with the line's existing clip
-    -- accounted for: `txt` cuts the row at the terminal width (§6), and on
-    -- the 200-cell wide board `a approvals` already sits past it, so the
-    -- three chips ahead of the cut are what a loaded board draws at all.
-    filter (`Data.Text.isInfixOf` frameLines loadedBoard) agentFooterChips
-      `shouldBe` map
-        (footerHint . binding)
-        [ReviewSelection, SolveSelection, AutoSolveSelection]
-
-    -- Requirement 1's other half, on the same two frames: the inspector and
-    -- the kill key are drawn on a no-agent board and listed in its help
-    -- overlay. Without this the assertion above would be satisfied by a
-    -- projection that hid every agent surface, which is what issue #546 is
-    -- correcting.
     sequence_
-      [ (name, text, text `Data.Text.isInfixOf` frameLines frame) `shouldBe` (name, text, True)
-      | (name, frame, texts) <- [("board" :: String, board, recoveryFooterChips), ("help", help, recoveryHelpDescriptions)],
-        text <- texts
+      [ (chip, chip `Data.Text.isInfixOf` frameLines loadedBoard) `shouldBe` (chip, True)
+      | chip <- agentFooterChips
       ]
-
-  -- issue #515 requirement 11's other half. The @.txt@ frames above carry the
-  -- badge's text; only this carries its colour, and the colour is the whole
-  -- difference between the two badges beyond one letter.
-  it "draws the insert badge green and the normal badge dim, and neither under --color never" $ do
-    let theme = themeFor testOptions
-        badgeAttributes name badge = do
-          frame <- renderCase (frameCaseNamed name)
-          pure (cellAttributes (badgeCells frame badge))
-    insert <- badgeAttributes "overlay-session-insert" "[I]"
-    normal <- badgeAttributes "overlay-session-normal" "[N]"
-    length insert `shouldBe` 3
-    length normal `shouldBe` 3
-    nub insert `shouldBe` [attrMapLookup insertModeAttr theme]
-    nub normal `shouldBe` [attrMapLookup dimAttr theme]
-    -- The two are genuinely different attributes, so a badge drawn in the
-    -- wrong one cannot pass by both resolving to the same value.
-    nub insert `shouldNotBe` nub normal
-
-  it "leaves the insert badge colourless under --color never, like every attribute" $ do
-    -- §10's colour policy, which 'themeFor' implements by mapping every name
-    -- to the default rather than by omitting them.
-    frame <-
-      renderCase
-        (frameCaseNamed "overlay-session-insert")
-          { frameCaseState =
-              withOptions (\options -> options {optionColor = ColorNever})
-                . (frameCaseNamed "overlay-session-insert").frameCaseState
-          }
-    nub (cellAttributes (badgeCells frame "[I]")) `shouldBe` [Vty.defAttr]
 
   -- Requirement 2, which no @.txt@ golden can carry: the frames record
   -- characters and these record the colour each 'ApprovalState' is drawn in.
@@ -830,9 +741,6 @@ frameCases =
   ]
     <> openDataCases
     <> filterCases
-    <> settingsCases
-    <> solveModelCases
-    <> sessionModeCases
     <> approvalCases
     <> operatingModeCases
 
@@ -853,281 +761,26 @@ operatingModeCases =
       { frameCaseName = "board-wide-no-agent",
         frameCaseWidth = 200,
         frameCaseHeight = 64,
-        frameCaseSummary = "the wide board with no provider loaded: no solve, review, autosolve or approvals chips, no provider blocks, no approvals control",
+        frameCaseSummary = "the wide board with no provider loaded: no approvals chip, no provider blocks, no approvals control",
         frameCaseState = noAgentBoard
       },
     FrameCase
       { frameCaseName = "overlay-help-no-agent",
         frameCaseWidth = 200,
         frameCaseHeight = 48,
-        frameCaseSummary = "the help overlay with no provider loaded: the four agent rows gone, the process and kill rows kept beside the session and mouse rows",
+        frameCaseSummary = "the help overlay with no provider loaded: the approvals row gone, the mouse rows kept",
         frameCaseState = \state -> (noAgentBoard state) {appOverlay = Just HelpOverlay}
       }
   ]
 
 noAgentBoard :: AppState -> AppState
-noAgentBoard = withModelRoster (Right noAgentRoster)
-
--- | The three surfaces that draw a model name (MODEL-3), which no frame
--- covered before this slice: the chooser's two rows, a solve session's header
--- and reviewer line, and what a surface shows when it cannot resolve its cell
--- at all.
---
--- Every one of them is drawn over a roster whose @display@ values were moved
--- explicitly. 'Spec.Support.Roster.rerosteredDefaults' cannot serve here --
--- it rotates model and effort and leaves @display@ alone, so a frame drawn
--- over it would be byte-identical to one drawn over the compiled defaults and
--- would prove nothing about where the text came from.
-solveModelCases :: [FrameCase]
-solveModelCases =
-  [ FrameCase
-      { frameCaseName = "overlay-solve-chooser",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "the solve chooser over a roster whose solve displays were moved off the defaults",
-        frameCaseState = withModelRoster (Right distinctDisplays) . chooserOpen
-      },
-    FrameCase
-      { frameCaseName = "overlay-solve-session",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "a solve session replaying a recorded assignment the live roster no longer carries",
-        frameCaseState = recordedSolveSession
-      },
-    FrameCase
-      { frameCaseName = "overlay-solve-chooser-unavailable",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "the chooser over a models.toml that will not load: no model named on either row",
-        frameCaseState = unusableRoster . chooserOpen
-      }
-  ]
-
--- | The mode indicator §7 puts on every session overlay, once per mode
--- (issue #515 requirement 15). Two cases rather than one because a
--- 'FrameCase' has a single state and a session is in a single mode, so one
--- frame could only ever show one of the two badges.
---
--- Drawn on a review revision because that is the kind whose input line is on
--- screen in every phase: the badge and the draft it governs are then in the
--- same frame, and the insert case can show text that only insert mode could
--- have produced.
-sessionModeCases :: [FrameCase]
-sessionModeCases =
-  [ FrameCase
-      { frameCaseName = "overlay-session-normal",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "a live session overlay in normal mode, where a plain letter is a command",
-        frameCaseState = revisionSession id
-      },
-    FrameCase
-      { frameCaseName = "overlay-session-insert",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "the same overlay after i and a typed draft, in insert mode",
-        frameCaseState = revisionSession (typedIntoSession "iCheck the retry path too")
-      },
-    -- Issue #543: the same normal-mode session after `f`. Its transcript
-    -- viewport grows with the box rather than staying nineteen rows inside a
-    -- taller border, which is what separates this frame from a windowed one
-    -- that merely gained a wider title.
-    FrameCase
-      { frameCaseName = "overlay-session-fullscreen",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "the normal-mode session overlay after f: a taller transcript, the residual side borders, and the hint row still visible",
-        frameCaseState = fullscreen . revisionSession id
-      }
-  ]
+noAgentBoard state = state {appOperatingMode = loadedOperatingMode (Right noAgentRoster)}
 
 -- | The state @f@ leaves behind, applied after whichever overlay the case
 -- opens: the flag is one field on the dashboard rather than anything the
 -- overlay carries.
 fullscreen :: AppState -> AppState
 fullscreen state = state {appOverlayFullscreen = True}
-
--- | An interactive issue-revision session, which is the review stage that
--- talks to the app-server and therefore the one that reads typed text.
-revisionSession :: (ReviewSession -> ReviewSession) -> AppState -> AppState
-revisionSession press state =
-  state
-    { appOverlay = Just (ReviewOverlay solveFrameIssue),
-      appReviewSessions = Map.singleton solveFrameIssue (press session)
-    }
-  where
-    session :: ReviewSession
-    session =
-      newAgentSession
-        0
-        ReviewRunning
-        "thinking"
-        Nothing
-        (plainTranscript "Reading the issue body and the code it names…\n")
-        ReviewDetail
-          { reviewSessionIssue = fixtureIssue solveFrameIssue,
-            reviewSessionStage = IssueRevision,
-            reviewSessionThreadId = Just (fixtureReviewThread "thread-515"),
-            reviewSessionTurnId = Nothing,
-            reviewSessionPending = Nothing,
-            reviewSessionUndelivered = [],
-            reviewSessionAwaiting = [],
-            reviewSessionRestored = Nothing
-          }
-
--- | Replay a run of key presses through the overlay's own decoder and the
--- pure half of its dispatch, so the insert frame draws a state real presses
--- reach rather than one written into the record. A press the decoder declines
--- leaves the session alone, exactly as the dashboard would.
-typedIntoSession :: String -> ReviewSession -> ReviewSession
-typedIntoSession pressed session = foldl' press session pressed
-  where
-    press :: ReviewSession -> Char -> ReviewSession
-    press current character =
-      let caps = reviewSessionOps.sessionOpsCaps
-          liveInput = reviewSessionInputLive current.sessionDetail.reviewSessionStage current.sessionPhase
-          pressFocus = SessionFocus caps current.sessionMode liveInput
-       in case sessionInputEvent pressFocus (VtyInput.EvKey (VtyInput.KChar character) []) of
-            Nothing -> current
-            Just inputEvent ->
-              let moved = setSessionMode (sessionModeAfter inputEvent current.sessionMode) current
-               in case inputEvent of
-                    SessionInputInsert typed -> insertSessionInput typed moved
-                    SessionInputBackspace -> removeSessionInputCharacter moved
-                    _ -> moved
-
--- | The chooser as the autosolve key opens it, before any refusal: the roster
--- is not consulted until a digit is pressed, which is why the frame above can
--- draw this overlay over a roster no solve could start on.
-chooserOpen :: AppState -> AppState
-chooserOpen state = state {appOverlay = Just (SolveChooser AutoSolve (fixtureIssue solveFrameIssue))}
-
--- | A solve session in exactly the state its first launch leaves it in: the
--- transcript the fresh start wrote, and the assignment that launch resolved
--- and recorded back onto it ('Kanban.UI.Solve.launchAssignedSolveInvocation').
---
--- The live roster is left at the compiled defaults while the recorded cell
--- comes from a roster that moved every display, so the header and the
--- reviewer line beneath it cannot have come from the same place: the header
--- is the record, and the reviewer line is the live @pr_review@ cell of the
--- opposite brand.
-recordedSolveSession :: AppState -> AppState
-recordedSolveSession state =
-  state
-    { appOverlay = Just (SolveOverlay solveFrameIssue),
-      appSolveSessions = Map.singleton solveFrameIssue session
-    }
-  where
-    brand = ClaudeSolver
-    recorded = cellOf (solveAssignment distinctDisplays brand) :: RecordedAssignment
-    session :: SolveSession
-    session =
-      newAgentSession
-        0
-        SolveRunning
-        "solving"
-        (Just goldenNow)
-        (plainTranscript (freshSolveTranscript state.appModelRoster AutoSolve brand))
-        SolveDetail
-          { solveSessionIssue = fixtureIssue solveFrameIssue,
-            solveSessionWorkflow = AutoSolve,
-            solveSessionBrand = brand,
-            solveSessionId = Nothing,
-            solveSessionAutoProgress = Nothing,
-            solveSessionResumeProvenance = ResumeAnswer,
-            solveSessionAssignment = Just recorded
-          }
-
--- | The fixture issue all three frames are drawn for.
-solveFrameIssue :: Int
-solveFrameIssue = 812
-
-fixtureIssue :: Int -> Issue
-fixtureIssue number = case fixtureItem number of
-  IssueItem issue -> issue
-  PullRequestItem _ -> error ("the fixture board's #" <> show number <> " is a pull request, not an issue")
-
--- | The settings overlay, once per roster state §7's @o@ row promises a
--- different screen for: the compiled roster with every cell at its default,
--- the same roster with one cell edited off it, a @models.toml@ that will not
--- load at all, and the two reduced provider sets.
---
--- The last three are also the mode coverage. Each of the three
--- 'Kanban.Models.OperatingMode' labels is drawn by at least one frame here —
--- dual by the first two, single-agent by the Claude-only roster, and no-agent
--- by both the empty provider set and the unusable file that derives the same
--- mode — so a line naming the wrong one cannot pass.
---
--- The edited frame is produced by the overlay's own transitions rather than
--- by writing an assignment into the record, so no frame can show a roster the
--- interaction could not reach — including the regenerated display, which is a
--- consequence of the edit rather than a label this suite chose.
-settingsCases :: [FrameCase]
-settingsCases =
-  [ FrameCase
-      { frameCaseName = "overlay-settings",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "the settings overlay over the wide board, every roster cell at its compiled default",
-        frameCaseState = openSettings
-      },
-    FrameCase
-      { frameCaseName = "overlay-settings-overridden",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "one roster cell cycled off its compiled default, marked override beside the rest",
-        frameCaseState = editedRosterCell
-      },
-    FrameCase
-      { frameCaseName = "overlay-settings-unusable",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "an unusable models.toml: its defect and what d would write, instead of roster rows",
-        frameCaseState = openSettings . unusableRoster
-      },
-    FrameCase
-      { frameCaseName = "overlay-settings-single-agent",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "a roster loading Claude alone: single-agent on the mode line, only that brand's rows, and one usage block in the sidebar",
-        frameCaseState = openSettings . withModelRoster (Right claudeOnlyRoster)
-      },
-    FrameCase
-      { frameCaseName = "overlay-settings-no-agent",
-        frameCaseWidth = 200,
-        frameCaseHeight = 48,
-        frameCaseSummary = "a roster loading no provider: no-agent on the mode line, and no rows to edit",
-        frameCaseState = openSettings . withModelRoster (Right noAgentRoster)
-      }
-  ]
-
--- | Open the overlay, move to the second roster row, and cycle its model
--- forward — the same three presses the keyboard makes.
---
--- The save the 'EventM' shell would perform is stood in for by
--- 'applyRosterWrite' over a successful result, which is the one thing a frame
--- cannot do for itself: the state it produces is exactly the state a real save
--- produces, and an outcome this fixture did not expect fails loudly rather
--- than quietly drawing the unedited roster.
-editedRosterCell :: AppState -> AppState
-editedRosterCell state = foldl press (openSettings state) [SettingsMoveRow 1, SettingsCycleModel 1]
-  where
-    press current input = case settingsOutcome input current.appModelRoster current.appSettingsFocus of
-      SettingsRefocused moved _ -> current {appSettingsFocus = moved}
-      SettingsRosterWrite write -> applyRosterWrite (Right ()) write current
-      other -> error ("the settings frame expected a focus move or a roster write, and got " <> show other)
-
--- | A present @models.toml@ the loader refused, which is the one roster state
--- no interaction can produce: it is what the startup load answered.
-unusableRoster :: AppState -> AppState
-unusableRoster =
-  withModelRoster
-    ( Left
-        ( RosterLoadError
-            "/fixture/home/.config/kanban/models.toml"
-            (RosterInvalid [UnknownModel PrReviewRole CodexProvider "gpt-5.9"])
-        )
-    )
 
 -- | §7's two blocking panels at every setting the populated board is captured
 -- at, because a panel that replaces the board has to survive the same
@@ -1536,16 +1189,10 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appSearch = Nothing,
       appSidebarVisible = True,
       appExcerptsVisible = defaultExcerptsVisible,
-      appSettings = defaultSettings,
       -- The pure compiled value, not a load: a golden frame must not read
       -- the developer's real XDG configuration. A frame drawn over another
-      -- roster moves it with 'Kanban.UI.Types.withModelRoster', so no frame
-      -- can name a mode its roster does not derive.
-      appModelRoster = Right defaultRoster,
+      -- mode sets the field from the roster that derives it.
       appOperatingMode = loadedOperatingMode (Right defaultRoster),
-      appSettingsFocus = Nothing,
-      appLogRoot = "/fixture/logs",
-      appProcessSelection = ProcessSelection Nothing 0,
       appIncidentSelection = IncidentSelection Nothing 0,
       appOverlay = Nothing,
       appOverlayFullscreen = False,
@@ -1585,14 +1232,6 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appBoardRefreshQueued = False,
       appRefreshCoordinator = refreshCoordinator,
       appQuitPending = False,
-      appReviewSessions = Map.empty,
-      appReviewUndelivered = Map.empty,
-      appSolveSessions = Map.empty,
-      appSolveProcesses = Map.empty,
-      appPullRequestReviewSessions = Map.empty,
-      appPullRequestProcesses = Map.empty,
-      appWorkers = Map.empty,
-      appWorkerMonitors = Set.empty,
       appEventChannel = channel,
       appNow = goldenNow,
       appTimeZone = utc,
@@ -1644,22 +1283,6 @@ cellCharacters = map frameCellCharacter
 
 cellAttributes :: [FrameCell] -> [Vty.Attr]
 cellAttributes = map frameCellAttribute
-
--- | The cells of the one session-mode badge a frame draws, located by the
--- text itself rather than by a written-down row and column, so the overlay's
--- layout can move without this pointing at whatever took its place.
-badgeCells :: [[FrameCell]] -> Text -> [FrameCell]
-badgeCells frame badge = case matches of
-  cells : _ -> cells
-  [] -> error ("no row of the frame draws " <> Data.Text.unpack badge)
-  where
-    width = Data.Text.length badge
-    matches =
-      [ take width (drop column row)
-      | row <- frame,
-        column <- [0 .. length row - width],
-        Data.Text.pack (cellCharacters (take width (drop column row))) == badge
-      ]
 
 frameRow :: [[FrameCell]] -> Int -> [FrameCell]
 frameRow frame rowIndex = case drop rowIndex frame of
@@ -1863,27 +1486,20 @@ sidebarText frame =
 providerSidebarText :: [Text]
 providerSidebarText = ["Codex", "Claude", "5 hour", "week", Data.Text.strip approvalControlLabel]
 
--- | Issue #521's bindings as issue #546 left them: the four that start agent
--- work, in table order.
+-- | Issue #521's bindings as the removal of the agent screens left them: the
+-- one that still needs a provider.
 agentBindings :: [BoardAction]
-agentBindings = [ReviewSelection, SolveSelection, AutoSolveSelection, ToggleApproval]
+agentBindings = [ToggleApproval]
 
--- | The two issue #546 took back out of that set, which reach work already
--- running rather than starting any, and so are drawn in every mode.
-recoveryBindings :: [BoardAction]
-recoveryBindings = [KillWorking, ShowProcesses]
-
--- | The chip each of them puts on the footer, composed by the projection the
--- footer itself uses rather than transcribed.
-agentFooterChips, recoveryFooterChips :: [Text]
+-- | The chip it puts on the footer, composed by the projection the footer
+-- itself uses rather than transcribed.
+agentFooterChips :: [Text]
 agentFooterChips = map (footerHint . binding) agentBindings
-recoveryFooterChips = map (footerHint . binding) recoveryBindings
 
--- | The description each of them puts on its help row, which is the other
--- text a frame can be searched for.
-agentHelpDescriptions, recoveryHelpDescriptions :: [Text]
+-- | The description it puts on its help row, which is the other text a frame
+-- can be searched for.
+agentHelpDescriptions :: [Text]
 agentHelpDescriptions = map ((.bindingDescription) . binding) agentBindings
-recoveryHelpDescriptions = map ((.bindingDescription) . binding) recoveryBindings
 
 controlAt :: [[FrameCell]] -> Text -> (Int, Int)
 controlAt frame label = (row, column - 2)

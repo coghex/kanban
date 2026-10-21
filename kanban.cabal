@@ -119,7 +119,6 @@ library kanban-internal
   visibility: private
   hs-source-dirs: src
   exposed-modules:
-    Kanban.Action
     Kanban.ApprovalService
     Kanban.Browser
     Kanban.CLI
@@ -157,42 +156,29 @@ library kanban-internal
     Kanban.Tracker
     Kanban.UI
     Kanban.UI.Approval
-    Kanban.UI.AutoSolve
     Kanban.UI.Board
     Kanban.UI.Details
+    Kanban.UI.Drainer
     Kanban.UI.Events
     Kanban.UI.Filter
+    Kanban.UI.Incidents
     Kanban.UI.Keys
     Kanban.UI.Overlay
-    Kanban.UI.PullRequest
     Kanban.UI.Reconcile
     Kanban.UI.Refresh
-    Kanban.UI.Review
     Kanban.UI.Search
     Kanban.UI.Selection
-    Kanban.UI.Session
-    Kanban.UI.SessionCore
-    Kanban.UI.SessionEvents
-    Kanban.UI.Settings
-    Kanban.UI.Solve
     Kanban.UI.Notice
     Kanban.UI.State
     Kanban.UI.Theme
-    Kanban.UI.Transcript
     Kanban.UI.Types
     Kanban.UI.Util
-    Kanban.UI.Worker
     Kanban.Usage
     Kanban.Usage.Render
     Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
   other-modules:
-    Kanban.Action.AutoSolve
-    Kanban.Action.Capability
-    Kanban.Action.Dispatch
-    Kanban.Action.Target
-    Kanban.Action.Types
     Kanban.GitHub.Coordinator
     Kanban.GitHub.Decode
     Kanban.GitHub.Fetch

@@ -8,8 +8,8 @@
 --
 -- Everything it composes lives in @Kanban.UI.*@ — 'Kanban.UI.Types' for the
 -- state, 'Kanban.UI.Board' and 'Kanban.UI.Overlay' for drawing,
--- 'Kanban.UI.Events' for dispatch, and the session, worker, refresh, and
--- autosolve modules underneath them.
+-- 'Kanban.UI.Events' for dispatch, and the refresh and reconcile modules
+-- underneath them.
 module Kanban.UI
   ( dashboardApplication,
     drawApplication,
@@ -63,20 +63,12 @@ import Kanban.Drainer
     queryDrainerStatus
     )
 import Kanban.GitHub (newHistoryTraversal)
-import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Repository (RepositoryRoster, rosterDegradationNotices)
 import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
 import Kanban.Models (loadModelRoster, loadedOperatingMode)
-import Kanban.Settings
-  ( loadSettings
-    )
-import Kanban.Transcript (transcriptRoot)
 import Kanban.Workflow (deriveBoard )
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
-import Kanban.Worker
-  ( discoverWorkers
-    )
 import Kanban.Filter (defaultFilterCriteria)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
@@ -88,7 +80,7 @@ import Kanban.UI.Theme
 import Kanban.UI.Board
 import Kanban.UI.Overlay
 import Kanban.UI.Refresh
-import Kanban.UI.PullRequest
+import Kanban.UI.Drainer (drainerErrorStatus)
 import Kanban.UI.Events
 import Kanban.UI.Approval (monitorApprovalService)
 
@@ -116,21 +108,15 @@ runHeldDashboard authority options config repository roster = do
   drainerController <- discoverDrainerController repository
   approvalController <- discoverApprovalController repository
   approvalEpoch <- newIORef 0
-  (initialSettings, settingsNotice) <- loadSettings
-  -- Loaded once beside the resolved configuration and retained as-is. The
-  -- agent-starting paths resolve their cell from the Right (MODEL-2) and
-  -- refuse on the Left, which is why an unusable file must stay an error
-  -- here rather than collapse into the compiled defaults (D-3). It stays a
-  -- startup-only load: a resume replays what its session already recorded
-  -- (MODEL-7) rather than rereading anything.
+  -- Loaded once beside the resolved configuration, and kept only as the
+  -- operating mode it derives: the dashboard no longer holds the roster.
   modelRoster <- loadModelRoster
-  logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
   historyTraversal <- newHistoryTraversal
   -- One coordinator per repository for the dashboard's lifetime, started
   -- before any refresh can be asked for. Every board-refresh entry point --
-  -- startup, `u`, focus updates, and the refreshes a finished review, solve, or
-  -- pull-request action requires -- converges on 'startBoardRefresh' or
+  -- startup, `u`, focus updates, and the refresh a landed merge requires --
+  -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
   refreshCoordinator <- newBoardRefreshCoordinator config repository historyTraversal eventChannel
@@ -140,7 +126,7 @@ runHeldDashboard authority options config repository roster = do
   -- shows them and the carry that keeps them until the first open outcome
   -- ('startupReportApplied') cannot disagree about what they are.
   let startupFragments =
-        catMaybes [usageNotice, historyNotice, settingsNotice]
+        catMaybes [usageNotice, historyNotice]
           -- What acquiring the repository had to say for itself. A refusal
           -- never reaches here — it exited — so anything carried this far is
           -- something the board opened in spite of, and the same notice line
@@ -207,17 +193,7 @@ runHeldDashboard authority options config repository roster = do
             -- above reads, so the first settle finds the budget already
             -- current and the layout epoch stays zero.
             appExcerptsVisible = defaultExcerptsVisible,
-            appSettings = initialSettings,
-            appModelRoster = modelRoster,
-            -- Derived here, from the same load, and afterwards moved only
-            -- with the roster itself ('Kanban.UI.Types.withModelRoster').
             appOperatingMode = loadedOperatingMode modelRoster,
-            -- Presentation state: the settings overlay seats this on its
-            -- first roster row when it opens, and no launch restores a
-            -- previous session's.
-            appSettingsFocus = Nothing,
-            appLogRoot = logRoot,
-            appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
             -- Nothing is open, so nothing is fullscreen. Never restored from
@@ -298,28 +274,14 @@ runHeldDashboard authority options config repository roster = do
             appBoardRefreshQueued = False,
             appRefreshCoordinator = refreshCoordinator,
             appQuitPending = False,
-            appReviewSessions = Map.empty,
-            appReviewUndelivered = Map.empty,
-            appSolveSessions = Map.empty,
-            appSolveProcesses = Map.empty,
-            appPullRequestReviewSessions = Map.empty,
-            appPullRequestProcesses = Map.empty,
-            appWorkers = Map.empty,
-            appWorkerMonitors = Set.empty,
             appEventChannel = eventChannel,
             appNow = now,
             appTimeZone = timeZone,
             appOptions = options,
             appConfig = config
           }
-  (finalState, finalVty) <-
+  (_, finalVty) <-
     customMainWithDefaultVty (Just eventChannel) dashboardApplication (refreshVisibleBoard initialState)
-  -- Nothing review-shaped is stopped here any more. The embedded review
-  -- client and every issue action's process belong to the repository review
-  -- host, which is a detached worker like any other and outlives this
-  -- dashboard on purpose (requirement 3).
-  mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appSolveProcesses))
-  mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appPullRequestProcesses))
   Vty.shutdown finalVty
 
 -- | The whole of what the dashboard reads from the durable caches before it
@@ -356,7 +318,7 @@ startupNotice = "Loading open GitHub data · press " <> actionKeyText RefreshAll
 -- | Re-show the composed startup line over the refresh announcements startup
 -- itself just made: a fresh instance of the same text, still riding the
 -- startup fetch. Without this the diagnostics composed after the loading
--- fragment — an invalid cache, a settings problem, a degraded roster entry —
+-- fragment — an invalid cache, a degraded roster entry —
 -- would be discarded by the very announcements the startup refreshes make,
 -- before anything had drawn them.
 restoreStartupNotice :: NoticeState -> AppState -> AppState
@@ -433,7 +395,6 @@ startApplication = do
   -- real event — rather than waiting unclassified for one to arrive.
   settleNoticeExpiry initialNotice
   state <- get
-  void . liftIO . forkIO $ discoverWorkers state.appRepository >>= writeBChan state.appEventChannel . WorkerDiscoveryFinished
   case state.appDrainerController of
     Left _ -> pure ()
     Right controller ->

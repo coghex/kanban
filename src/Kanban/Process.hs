@@ -25,7 +25,6 @@ module Kanban.Process
     managedProcess,
     managedProcessGroup,
     managedProcessPid,
-    managedProcessStopsWithDashboard,
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
@@ -183,10 +182,6 @@ managedProcessGroup = PersistentManagedProcess
 managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
 managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
-
-managedProcessStopsWithDashboard :: ManagedProcess -> Bool
-managedProcessStopsWithDashboard (LocalManagedProcess _ _) = True
-managedProcessStopsWithDashboard (PersistentManagedProcess _) = False
 
 -- | The census every liveness check in this module rests on. `ps` output is
 -- captured as bytes and decoded once, leniently, rather than through the

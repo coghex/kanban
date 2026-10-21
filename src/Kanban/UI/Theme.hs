@@ -2,7 +2,6 @@ module Kanban.UI.Theme
   ( approvalStatusAttr,
     approvedAttr,
     approvedInteriorAttr,
-    attentionAttr,
     cardBorderStyle,
     cardInteriorAttribute,
     cardTitleAttr,
@@ -14,7 +13,6 @@ module Kanban.UI.Theme
     footerAttr,
     headingAttr,
     innerBorderStyle,
-    insertModeAttr,
     itemHasAmberWarning,
     labelApprovalAttr,
     labelAttribute,
@@ -28,16 +26,10 @@ module Kanban.UI.Theme
     problemAttr,
     providerAttr,
     pullRequestCardAttribute,
-    pullRequestSessionAttribute,
     readyAttr,
-    reviewPhaseAttribute,
-    reviewingAttr,
-    revisedAttr,
     selectedAttr,
     selectedTitleAttr,
     shellBorderStyle,
-    solvePhaseAttribute,
-    solveSessionAttribute,
     statusTextAttr,
     themeFor,
     titleAttr,
@@ -47,7 +39,6 @@ module Kanban.UI.Theme
     usesOpenBorders,
   )
 where
-
 
 import Brick
 import Brick.Widgets.Border.Style (BorderStyle (..), ascii, unicode, unicodeBold)
@@ -64,9 +55,6 @@ import Kanban.Domain
 import Kanban.Drainer
   ( DrainerState (..),
     DrainerStatus (..)
-    )
-import Kanban.Solve
-  ( SolveWorkflow (..)
     )
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import Kanban.Workflow (CardStatus (..), isProblem, pullRequestStatus, rereviewLabel)
@@ -146,45 +134,6 @@ statusTextAttr config (PullRequestItem pullRequest) = case pullRequestStatus con
   StatusNeutral -> dimAttr
 statusTextAttr _ _ = dimAttr
 
--- | The one 'SolvePhase' colour table solve and PR sessions share. They
--- disagree about exactly two arms, which are therefore its parameters: what
--- a /finished/ workflow reads as, and what a running one does. Everything
--- else was duplicated between two tables that could only drift.
-solvePhaseAttribute :: AttrName -> AttrName -> SolvePhase -> AttrName
-solvePhaseAttribute finished running = \case
-  SolveAttention -> attentionAttr
-  SolveInterrupting -> pendingAttr
-  SolveFailedPhase -> problemAttr
-  SolveKilledPhase -> problemAttr
-  SolveOrphanedPhase -> problemAttr
-  SolveFinished -> finished
-  _ -> running
-
--- | A finished solve is neutral -- there is nothing more to do in it -- and
--- an active autosolve keeps its blue accent.
-solveSessionAttribute :: SolveSession -> AttrName
-solveSessionAttribute session = solvePhaseAttribute neutralAttr running session.sessionPhase
-  where
-    running
-      | session.sessionDetail.solveSessionWorkflow == AutoSolve = activeAttr
-      | otherwise = neutralAttr
-
--- | A finished PR review is ready, and a running one wears the reviewing
--- colour rather than the neutral one.
-pullRequestSessionAttribute :: PullRequestReviewSession -> AttrName
-pullRequestSessionAttribute session = solvePhaseAttribute readyAttr reviewingAttr session.sessionPhase
-
-reviewPhaseAttribute :: ReviewPhase -> AttrName
-reviewPhaseAttribute phase = case phase of
-  ReviewStarting -> trackerAttr
-  ReviewRunning -> trackerAttr
-  ReviewWaiting -> pendingAttr
-  ReviewFinished -> readyAttr
-  ReviewNeedsChanges -> pendingAttr
-  ReviewFailed -> problemAttr
-  ReviewRevised -> revisedAttr
-  ReviewInterrupted -> dimAttr
-
 drainerSourceAttr :: DrainerSourceState -> AttrName
 drainerSourceAttr source = case source of
   DrainerSourceReported [] -> dimAttr
@@ -250,11 +199,9 @@ themeFor options
           (approvedAttr, foreground Vty.brightGreen `Vty.withStyle` Vty.bold),
           (approvedInteriorAttr, onColor Vty.black Vty.green),
           (pendingAttr, foreground Vty.yellow),
-          (attentionAttr, foreground (Vty.rgbColor (255 :: Int) 165 0) `Vty.withStyle` Vty.bold),
           (readyAttr, foreground Vty.brightGreen),
           (problemAttr, foreground Vty.brightRed `Vty.withStyle` Vty.bold),
           (trackerAttr, foreground (Vty.rgbColor (128 :: Int) 90 213) `Vty.withStyle` Vty.bold),
-          (revisedAttr, foreground (Vty.rgbColor (130 :: Int) 80 223) `Vty.withStyle` Vty.bold),
           (cardTitleAttr, Vty.defAttr `Vty.withStyle` Vty.bold),
           (selectedTitleAttr, foreground Vty.brightCyan `Vty.withStyle` Vty.bold),
           (linkAttr, foreground Vty.brightBlue),
@@ -265,8 +212,7 @@ themeFor options
           (issuesAttr, foreground Vty.brightWhite),
           (activeAttr, foreground Vty.brightBlue),
           (reviewingAttr, foreground Vty.yellow),
-          (doneAttr, foreground Vty.brightGreen),
-          (insertModeAttr, foreground Vty.brightGreen `Vty.withStyle` Vty.bold)
+          (doneAttr, foreground Vty.brightGreen)
         ]
   where
     foreground = Vty.withForeColor Vty.defAttr
@@ -302,10 +248,8 @@ labelAttribute config name
     foldedCaseless = Set.map Text.toCaseFold
 
 titleAttr, headingAttr, providerAttr, footerAttr, noticeAttr, dimAttr :: AttrName
-neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, attentionAttr, readyAttr, problemAttr :: AttrName
+neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, readyAttr, problemAttr :: AttrName
 trackerAttr :: AttrName
-revisedAttr :: AttrName
-insertModeAttr :: AttrName
 cardTitleAttr, selectedTitleAttr, linkAttr, labelDefaultAttr, labelApprovalAttr, labelProblemAttr, labelUiAttr :: AttrName
 issuesAttr, activeAttr, reviewingAttr, doneAttr :: AttrName
 titleAttr = attrName "title"
@@ -319,16 +263,9 @@ selectedAttr = attrName "status.selected"
 approvedAttr = attrName "status.approved"
 approvedInteriorAttr = attrName "interior.approved"
 pendingAttr = attrName "status.pending"
-attentionAttr = attrName "status.attention"
 readyAttr = attrName "status.ready"
 problemAttr = attrName "status.problem"
 trackerAttr = attrName "tracker"
-revisedAttr = attrName "status.revised"
--- | The @[I]@ badge a session overlay draws while its focused session is in
--- insert mode, and nothing else. Its own name rather than a borrowed status
--- colour, so 'themeFor' can drop it to the default under @--color never@
--- alongside every other attribute (issue #515).
-insertModeAttr = attrName "session.insert"
 cardTitleAttr = attrName "card.title"
 selectedTitleAttr = attrName "card.title.selected"
 linkAttr = attrName "link"
@@ -354,12 +291,9 @@ allAttributeNames =
     approvedAttr,
     approvedInteriorAttr,
     pendingAttr,
-    attentionAttr,
     readyAttr,
     problemAttr,
     trackerAttr,
-    revisedAttr,
-    insertModeAttr,
     cardTitleAttr,
     selectedTitleAttr,
     linkAttr,

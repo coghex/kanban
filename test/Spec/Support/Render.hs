@@ -132,8 +132,7 @@ renderCard options selected entry width =
         { cardOptions = options,
           cardConfig = testResolvedConfig,
           cardExcerptsVisible = defaultExcerptsVisible,
-          cardNow = epoch,
-          cardSolveSessions = Map.empty
+          cardNow = epoch
         }
 
 -- | One cell of a rendered frame: the character drawn there and the Vty

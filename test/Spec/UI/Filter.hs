@@ -32,27 +32,16 @@ import Kanban.Filter
     itemWorkflowFacet,
     visibleBoardFor,
   )
-import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
-import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.Tracker (trackerFromIssue)
-import Kanban.UI.AutoSolve (boardPullRequestNumbers)
 import Kanban.UI.Board (trackerHeaderText)
-import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate, settledSessionRefusal)
-import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
+import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate)
+import Kanban.UI.Filter (readOnlyHistoryRefusal, refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Search (entriesFor, selectableRows)
 import Kanban.UI.Selection (selectedEntry)
-import Kanban.UI.Session (agentSessionSubject, locateBoardWork)
+import Kanban.UI.Incidents (locateBoardWork)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, itemMetadata)
-import Kanban.Worker
-  ( PullRequestWorkerTask (..),
-    SolveWorkerTask (..),
-    WorkerDescriptor (..),
-    WorkerId (..),
-    WorkerSpec (..),
-    WorkerTask (..),
-  )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures
@@ -529,7 +518,7 @@ refusalSpec :: Spec
 refusalSpec = describe "read-only history refusals" $ do
   it "names exactly the mutating bindings" $
     filter mutatesSelectedWork [minBound .. maxBound]
-      `shouldBe` [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard]
+      `shouldBe` [MergeDoneCard]
 
   it "declines every mutating binding on a completed issue and a completed pull request" $ do
     settled <- settledState
@@ -568,71 +557,6 @@ refusalSpec = describe "read-only history refusals" $ do
     plain <- testAppState openBoard
     readOnlyHistoryRefusal plain (IssueItem (baseIssue 940 [])) `shouldBe` Nothing
 
-  -- The processes overlay reaches every kill route without going through a
-  -- card, so it has to ask the same question keyed by session identity — and
-  -- a persistent worker names its target only through the task it was
-  -- created for.
-  it "refuses every processes-overlay row whose work has settled" $ do
-    settled <- settledState
-    sequence_
-      [ (label, settledSessionRefusal settled reference) `shouldBe` (label, Just notice)
-        | (label, reference, notice) <-
-            [ ("solve" :: String, SolveAgent 940, expectedNotice (IssueItem (closedIssue 940))),
-              ("review", ReviewAgent 941, expectedNotice (IssueItem (closedIssue 941))),
-              ("pull request", PullRequestAgent 951, expectedNotice (PullRequestItem (mergedPullRequest 951)))
-            ]
-      ]
-    sequence_
-      [ settledSessionRefusal settled reference `shouldBe` Nothing
-        | reference <- [SolveAgent 800, ReviewAgent 801, PullRequestAgent 820, PullRequestAgent 830]
-      ]
-
-  it "resolves a persistent worker's row through the task it was created for" $ do
-    settled <- settledState
-    let solveWorker = withWorker (solveWorkerOn 940) settled
-        pullRequestWorker = withWorker (pullRequestWorkerOn 951) settled
-        liveWorker = withWorker (solveWorkerOn 800) settled
-    agentSessionSubject solveWorker (WorkerAgent testWorkerId) `shouldBe` Just (IssueId 940)
-    agentSessionSubject pullRequestWorker (WorkerAgent testWorkerId) `shouldBe` Just (PullRequestId 951)
-    settledSessionRefusal solveWorker (WorkerAgent testWorkerId)
-      `shouldBe` Just (expectedNotice (IssueItem (closedIssue 940)))
-    settledSessionRefusal pullRequestWorker (WorkerAgent testWorkerId)
-      `shouldBe` Just (expectedNotice (PullRequestItem (mergedPullRequest 951)))
-    settledSessionRefusal liveWorker (WorkerAgent testWorkerId) `shouldBe` Nothing
-    -- A worker no longer registered names no work, so there is nothing left
-    -- to refuse rather than a refusal invented for it.
-    agentSessionSubject settled (WorkerAgent testWorkerId) `shouldBe` Nothing
-    settledSessionRefusal settled (WorkerAgent testWorkerId) `shouldBe` Nothing
-
-  -- A session overlay left open across a refresh is the other stale case: it
-  -- goes on accepting input for work that has since settled, and its answer
-  -- would resume a worker against history. The guard is on the shared session
-  -- table, so no overlay kind can skip it — and it covers Ctrl-C as well as
-  -- Enter, because §8 refuses every termination boundary and not only the
-  -- board's kill binding.
-  it "refuses to resume any session overlay whose work has settled" $ do
-    settled <- settledState
-    sequence_
-      [ (label, readOnlyHistoryRefusalFor settled subject) `shouldBe` (label, Just notice)
-        | (label, subject, notice) <-
-            [ ("solve" :: String, IssueId 940, expectedNotice (IssueItem (closedIssue 940))),
-              ("review", IssueId 941, expectedNotice (IssueItem (closedIssue 941))),
-              ("pull request", PullRequestId 951, expectedNotice (PullRequestItem (mergedPullRequest 951)))
-            ]
-      ]
-    -- Live work still resumes.
-    sequence_
-      [ readOnlyHistoryRefusalFor settled subject `shouldBe` Nothing
-        | subject <- [IssueId 800, IssueId 801, PullRequestId 820, PullRequestId 830]
-      ]
-
-  -- The deferred revision launch boundary is gone with the dashboard's own
-  -- review backend (SAG-10): a review is dispatched to the repository host
-  -- immediately, there is no queue of sessions waiting for a client to come
-  -- up, and the read-only-history refusal is the registry's own
-  -- 'Kanban.Action.Types.ActionTargetHistorical' — worded by the very
-  -- 'readOnlyHistoryNotice' asserted above.
-
   -- The merge chain, refused at the launch decision itself rather than only
   -- at the key press: it outranks the wrong-kind, in-flight and
   -- drainer-state answers this same function would otherwise give.
@@ -654,13 +578,13 @@ refusalSpec = describe "read-only history refusals" $ do
 -- on changes nothing about any of it.
 openAuthoritySpec :: Spec
 openAuthoritySpec = describe "the open-only authority" $ do
-  it "leaves the autosolve baseline identical with Closed admitted" $ do
+  it "leaves the open board's pull-request numbers identical with Closed admitted" $ do
     hidden <- settledState
     let admitted = admitClosed hidden
     boardPullRequestNumbers admitted.appBoard `shouldBe` boardPullRequestNumbers hidden.appBoard
     boardPullRequestNumbers admitted.appBoard `shouldBe` Set.fromList [820, 830]
 
-  it "leaves worker and session item resolution identical with Closed admitted" $ do
+  it "leaves item resolution identical with Closed admitted" $ do
     hidden <- settledState
     let admitted = admitClosed hidden
     admitted.appBoard `shouldBe` hidden.appBoard
@@ -997,59 +921,6 @@ settledState = do
 admitClosed :: AppState -> AppState
 admitClosed state = refreshVisibleBoard state {appFilterCriteria = everyLifecycle}
 
--- | The dashboard with one persistent worker registered, which is the only
--- processes-overlay row that names its work through a task rather than
--- through the number it is keyed by.
-withWorker :: WorkerTask -> AppState -> AppState
-withWorker task state =
-  state {appWorkers = Map.singleton testWorkerId (testWorkerDescriptor task)}
-
-testWorkerId :: WorkerId
-testWorkerId = WorkerId "worker-1"
-
-solveWorkerOn :: Int -> WorkerTask
-solveWorkerOn issueNumber = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly ClaudeSolver)
-
-pullRequestWorkerOn :: Int -> WorkerTask
-pullRequestWorkerOn number =
-  PullRequestWorkerTaskKind (PullRequestWorkerTask number PullRequestClaude PullRequestReview)
-
-testWorkerDescriptor :: WorkerTask -> WorkerDescriptor
-testWorkerDescriptor task =
-  WorkerDescriptor
-    { workerDescriptorSpec =
-        WorkerSpec
-          { workerId = testWorkerId,
-            workerRepository = Repository "/tmp/example-project" "example" "project",
-            workerTask = task,
-            workerExistingSession = Nothing,
-            workerExistingLogPath = Nothing,
-            workerResumeProvenance = ResumeAnswer,
-            workerUserMessage = "",
-            workerParent = Nothing,
-            workerCreatedAt = epoch,
-            workerMaxRuntimeSeconds = 60,
-            workerConfigPath = Nothing,
-            workerWorkflowConfig = defaultWorkflowConfig,
-            workerAssignment = Nothing,
-            workerExpectedTarget = Nothing,
-            workerInvocation = Nothing
-          },
-      workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
-      workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",
-      workerDescriptorEventPath = "/tmp/worker-1.events.jsonl",
-      workerDescriptorStatePath = "/tmp/worker-1.state.json",
-      workerDescriptorAckPath = "/tmp/worker-1.ack",
-      workerDescriptorLeasePath = "/tmp/worker-1.lease",
-      workerDescriptorLeaseOwnerPath = "/tmp/worker-1.lease.owner",
-      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating",
-      workerDescriptorHandoffPath = "/tmp/worker-1.handing-off",
-      workerDescriptorCommandPath = "/tmp/worker-1.commands.jsonl",
-      workerDescriptorCommandAckPath = "/tmp/worker-1.command-acks.jsonl",
-      workerDescriptorAdoptionPath = "/tmp/worker-1.adoption",
-      workerDescriptorCensusGapPath = "/tmp/worker-1.census-gap"
-    }
-
 -- | The dashboard with @item@ selected, at whichever column and row it drew.
 -- Located by identity, because the card the board holds is the one the
 -- generation delivered rather than the literal a case names.
@@ -1130,3 +1001,14 @@ trackerNumbers = map primaryTracker
 
 showNumber :: Int -> Text
 showNumber = Text.pack . show
+
+-- | The numbers of the pull requests a board draws, whichever column holds
+-- them.
+boardPullRequestNumbers :: Board -> Set.Set Int
+boardPullRequestNumbers board =
+  Set.fromList
+    [ pullRequest.pullRequestNumber
+      | column <- allBoardColumns,
+        entry <- entriesForBoard board column,
+        PullRequestItem pullRequest <- [entryItem entry]
+    ]

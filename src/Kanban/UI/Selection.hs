@@ -12,6 +12,7 @@ module Kanban.UI.Selection
     preserveSelection,
     refreshOverlay,
     selectBoundary,
+    selectedBoardItem,
     selectedEntry,
     selectedItem,
     toggleSelectedTracker,
@@ -73,18 +74,9 @@ normalizeSelectedRowsAfterToggle expandedTrackers board = Map.mapWithKey (normal
 refreshOverlay :: Board -> Maybe Overlay -> (Maybe Overlay, Maybe Text)
 refreshOverlay _ Nothing = (Nothing, Nothing)
 refreshOverlay _ (Just HelpOverlay) = (Just HelpOverlay, Nothing)
-refreshOverlay _ (Just SettingsOverlay) = (Just SettingsOverlay, Nothing)
-refreshOverlay _ (Just ProcessesOverlay) = (Just ProcessesOverlay, Nothing)
 -- The panel is rebuilt from live state on every draw, so a refresh that
 -- changes what needs attention is picked up without closing it.
 refreshOverlay _ (Just IncidentsOverlay) = (Just IncidentsOverlay, Nothing)
-refreshOverlay _ (Just overlay@(ReviewOverlay _)) = (Just overlay, Nothing)
-refreshOverlay _ (Just overlay@(SolveOverlay _)) = (Just overlay, Nothing)
-refreshOverlay _ (Just overlay@(PullRequestReviewOverlay _)) = (Just overlay, Nothing)
-refreshOverlay board (Just (SolveChooser workflow oldIssue)) =
-  case findItem board (IssueId oldIssue.issueNumber) of
-    Just (_, _, IssueItem refreshedIssue) -> (Just (SolveChooser workflow refreshedIssue), Nothing)
-    _ -> (Nothing, Just "Solve choice closed because that issue is no longer open")
 refreshOverlay board (Just (DetailsOverlay oldItem)) =
   case findItem board (itemId oldItem) of
     Just (_, _, refreshedItem) -> (Just (DetailsOverlay refreshedItem), Nothing)
@@ -201,6 +193,19 @@ openSearchResult state
   where
     anchor = selectedAnchorIn state state.appSelectedColumn
     opened = openSelectedDetailsIn state
+
+-- | The item the board selection acts on: 'selectedItem', promoted to the
+-- epic's own issue when the selection is a collapsed group or a tracker
+-- header, which is the row the user sees for it.
+selectedBoardItem :: AppState -> Maybe BoardItem
+selectedBoardItem state = case selectedEntry state of
+  Just (Tracked context item)
+    | primaryTrackerNumber context `Set.notMember` state.appExpandedTrackers ->
+        Just (IssueItem context.trackingPrimary.membershipTracker.trackerIssue)
+    | otherwise -> Just item
+  Just (Standalone item) -> Just item
+  Just (TrackerHeader tracker) -> Just (IssueItem tracker.trackerIssue)
+  Nothing -> Nothing
 
 selectedItem :: AppState -> Maybe BoardItem
 selectedItem state = entryItem <$> selectedEntry state

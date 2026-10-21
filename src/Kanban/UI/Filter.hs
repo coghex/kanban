@@ -19,10 +19,7 @@ module Kanban.UI.Filter
     applyCriteriaChange,
 
     -- * Read-only history
-    dashboardActionEnvironment,
-    dashboardCatalog,
     readOnlyHistoryRefusal,
-    readOnlyHistoryRefusalFor,
 
     -- * The panel
     FilterInput (..),
@@ -54,31 +51,20 @@ module Kanban.UI.Filter
   )
 where
 
-import Data.List (elemIndex)
+import Data.List (elemIndex, find)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import qualified Graphics.Vty as Vty
-import Kanban.Action
-  ( ActionEnvironment (..),
-    CatalogHistory (..),
-    TargetCatalog (..),
-    TargetStructure (..),
-    actionRefusalMessage,
-    historicalRefusal,
-    resolveHeldItem,
-    settledTargetRefusal,
-  )
-import Kanban.CLI (Options (..))
-import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
+import Kanban.Config (ResolvedConfig (..))
 import Kanban.Domain
 import Kanban.Filter
 import Kanban.UI.Search (SearchAnchor, openSearch, seatColumnOn, selectedAnchorIn)
 import Kanban.UI.Types
 import Kanban.UI.Util (allColumns, noticeCleared, showText)
-import Kanban.Worker (WorkerDeadline (..))
+import Kanban.Workflow (itemCompleted, readOnlyHistoryNotice)
 
 -- | Recompute what the criteria admit from the datasets currently held.
 --
@@ -127,63 +113,26 @@ applyCriteriaChange change state = reseat (refreshVisibleBoard edited)
         seated
         (filter ((/= state.appSelectedColumn) . fst) anchors <> filter ((== state.appSelectedColumn) . fst) anchors)
 
--- | The dashboard's own read, as the workflow action registry reads one.
---
--- The open half is @appOpenSnapshot@ — the generation the last refresh
--- published, which is the same evidence the board is drawn from — and the
--- completed half is @appCompletedHistory@, absent until the history traversal
--- has completed one. Carrying that absence rather than flattening it is what
--- lets the registry tell "this target is not historical" from "this read
--- cannot say".
-dashboardCatalog :: AppState -> TargetCatalog
-dashboardCatalog state =
-  TargetCatalog
-    { catalogRepository = state.appRepository,
-      catalogIssues = maybe [] (.snapshotIssues) state.appOpenSnapshot,
-      catalogPullRequests = maybe [] (.snapshotPullRequests) state.appOpenSnapshot,
-      catalogHistory = maybe CatalogHistoryAbsent CatalogHistoryLoaded state.appCompletedHistory
-    }
-
--- | Everything the workflow action registry answers this dashboard's
--- questions against, gathered in one place so no launch boundary assembles a
--- half of it.
-dashboardActionEnvironment :: AppState -> ActionEnvironment
-dashboardActionEnvironment state =
-  ActionEnvironment
-    { actionRepository = state.appRepository,
-      actionWorkflowConfig = state.appConfig.resolvedWorkflow,
-      actionConfigPath = state.appOptions.optionConfig,
-      actionRoster = state.appModelRoster,
-      actionCatalog = dashboardCatalog state,
-      actionNow = state.appNow,
-      actionWorkerDeadline = WorkerDeadline state.appConfig.resolvedTimeouts.timeoutsWorkerDeadlineSeconds
-    }
-
 -- | Why a mutating action must decline this item, or 'Nothing' when it may
 -- proceed.
 --
--- The item a caller holds is not trusted on its own. A details overlay, a
--- solve chooser, and a reusable session can each have been opened while the
--- work was live and still be on screen after a refresh settled it, so the
--- newest completed generation is asked too. That is what makes this safe to
--- call at a launch boundary as well as at the key press that reached it.
---
--- The rule itself is the registry's, over an explicit resolved record, so the
--- same question answers for a target the dashboard is not showing at all.
+-- The item a caller holds is not trusted on its own. A details overlay can
+-- have been opened while the work was live and still be on screen after a
+-- refresh settled it, so the newest completed generation is asked too: it
+-- outranks the held record, and the refusal is worded from that generation's
+-- own copy of the item. That is what makes this safe to call at a launch
+-- boundary as well as at the key press that reached it.
 readOnlyHistoryRefusal :: AppState -> BoardItem -> Maybe Text
-readOnlyHistoryRefusal state item =
-  actionRefusalMessage <$> historicalRefusal (resolveHeldItem (dashboardCatalog state) TargetPlain item)
-
--- | The same refusal for work named only by its number.
---
--- A session, a worker, and an overlay's resumable turn are all keyed by the
--- issue or pull-request number rather than by a card, so a launch boundary
--- reached from one of them has nothing but the number to ask with. The answer
--- comes from the newest completed generation either way, which is what makes
--- this the same question 'readOnlyHistoryRefusal' asks.
-readOnlyHistoryRefusalFor :: AppState -> ItemId -> Maybe Text
-readOnlyHistoryRefusalFor state target =
-  actionRefusalMessage <$> settledTargetRefusal (dashboardCatalog state) target
+readOnlyHistoryRefusal state item
+  | Just newer <- settledInHistory = Just (readOnlyHistoryNotice newer)
+  | itemCompleted item = Just (readOnlyHistoryNotice item)
+  | otherwise = Nothing
+  where
+    settledInHistory = state.appCompletedHistory >>= settledItem
+    settledItem history = case item of
+      IssueItem issue -> IssueItem <$> find ((== issue.issueNumber) . (.issueNumber)) history.historyIssues
+      PullRequestItem pullRequest ->
+        PullRequestItem <$> find ((== pullRequest.pullRequestNumber) . (.pullRequestNumber)) history.historyPullRequests
 
 -- ---------------------------------------------------------------------------
 -- Focus

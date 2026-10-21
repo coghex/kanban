@@ -446,7 +446,6 @@ boardFacts =
     show . (.appCompletedGeneration),
     show . (.appFilterCriteria),
     show . (.appSearch),
-    show . (.appSettings),
     show . (.appConfig),
     show . (.appOptions),
     show . (.appSidebarVisible),

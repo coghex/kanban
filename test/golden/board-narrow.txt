@@ -33,7 +33,7 @@
 ║┃  ▸ #701  Input routing         ┃║
 ║┃  hardening  0/1 complete       ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
-║ j/↓ next  k/↑ previous  x kill   ║
+║ j/↓ next  k/↑ previous  h/← prev ║
 ║ board: updated 3h ago · history: ║
 ║ Cached GitHub snapshot loaded ·  ║
 ║ press u to update                ║

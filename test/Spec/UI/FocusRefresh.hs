@@ -16,7 +16,8 @@ import Kanban.Domain (Freshness (..))
 import Kanban.GitHub (shutdownRefreshCoordinator)
 import Kanban.UI (enableFocusIfSupported)
 import Kanban.UI.Refresh (focusRefreshDue)
-import Kanban.UI.Types (AppEvent (..), AppState (..), Overlay (..), withModelRoster)
+import Kanban.Models (loadedOperatingMode)
+import Kanban.UI.Types (AppEvent (..), AppState (..), Overlay (..))
 import Spec.Support.App (testAppState)
 import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
 import Spec.Support.Fixtures (epoch, fixtureBoard)
@@ -101,17 +102,17 @@ spec = around_ isolatedCache $ describe "terminal focus refresh" $ do
     result.runState.appUsageFreshness `shouldBe` state.appUsageFreshness
     result.runState.appBoardFreshness `shouldBe` state.appBoardFreshness
 
-  it "handles focus before settings consumes events and keeps the overlay open" $ do
+  it "handles focus before the overlay consumes events and keeps the overlay open" $ do
     state <- boardState
     let steps = [Press Vty.EvGainedFocus, Press (Vty.EvKey Vty.KEsc []), quitStep]
-    -- The first frame after focus must still draw settings; the state after
+    -- The first frame after focus must still draw the overlay; the state after
     -- its explicit dismissal confirms no focus event closed it implicitly.
-    result <- run state {appOverlay = Just SettingsOverlay} steps
+    result <- run state {appOverlay = Just HelpOverlay} steps
     result.runState.appLastBoardRefreshStarted `shouldSatisfy` (/= Nothing)
     result.runState.appOverlay `shouldBe` Nothing
-    map (any (Text.isInfixOf " SETTINGS " . frameRowText)) (take 2 result.runFrames)
+    map (any (Text.isInfixOf " HELP " . frameRowText)) (take 2 result.runFrames)
       `shouldBe` [True, True]
-    focusRefreshDue 0 state {appOverlay = Just SettingsOverlay} False `shouldBe` True
+    focusRefreshDue 0 state {appOverlay = Just HelpOverlay} False `shouldBe` True
 
   it "lets manual refresh bypass the focus cooldown" $ do
     state <- boardState
@@ -130,7 +131,7 @@ second :: Word64
 second = 1000 * 1000 * 1000
 
 boardState :: IO AppState
-boardState = withModelRoster (Right noAgentRoster) <$> testAppState (fixtureBoard [])
+boardState = (\state -> state {appOperatingMode = loadedOperatingMode (Right noAgentRoster)}) <$> testAppState (fixtureBoard [])
 
 run :: AppState -> [ScriptStep] -> IO DashboardRun
 run state steps =
