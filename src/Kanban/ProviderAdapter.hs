@@ -2,7 +2,7 @@
 -- processes.
 --
 -- Before MODEL-12 the four flow modules each constructed their own:
--- "Kanban.Solve" and "Kanban.PullRequestFlow" mapped a 'SolverBrand' to an
+-- the solve and pull-request flows mapped a 'SolverBrand' to an
 -- executable name inline, "Kanban.Review" applied 'proc' to a literal
 -- @codex@, and "Kanban.Review.Tools" resolved a literal @claude@. Four
 -- spellings of the same mapping is how a fifth spawn site comes to disagree
@@ -13,8 +13,7 @@
 -- below the flow modules that consume it: 'Kanban.Models' stays a pure
 -- schema and data module with no process vocabulary of its own, and no
 -- existing dependency direction inverts. It is an internal seam under
--- @other-modules@; the helpers it took over from "Kanban.Solve" are still
--- exported from that facade.
+-- @other-modules@.
 --
 -- What varies per provider is the record's fields, not the code around
 -- them. That is deliberate: the external provider plugin system this arc
@@ -22,10 +21,10 @@
 -- compiling it in, and a record whose values were reached through a @case@
 -- on 'ProviderName' could not be populated that way at all.
 --
--- Three launchers stay outside this interface by decision (D-13) and are
--- unchanged: "Kanban.Ping" is modelless, and "Kanban.Codex" and
--- "Kanban.Claude" are usage probes that read account status. None of the
--- three is an agent session and none consumes a roster value.
+-- Two launchers stay outside this interface by decision (D-13) and are
+-- unchanged: "Kanban.Codex" and "Kanban.Claude" are usage probes that read
+-- account status. Neither is an agent session and neither consumes a roster
+-- value.
 module Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProcessRequest (..),
@@ -65,9 +64,8 @@ import System.Process
 -- the directory the process runs in.
 --
 -- Argv stays the caller's because it is the /invocation's/ vocabulary rather
--- than the provider's — 'Kanban.Solve.solveArguments' and
--- 'Kanban.PullRequestFlow.pullRequestArguments' already dispatch on brand
--- and are pinned by tests that must not move. What the adapter owns is the
+-- than the provider's — the callers' argument builders dispatch on brand
+-- themselves. What the adapter owns is the
 -- executable that argv is handed to and the stream, working-directory, and
 -- process-group shape it is handed under.
 data ProcessRequest = ProcessRequest

@@ -37,11 +37,6 @@ data Options = Options
     optionUsage :: Bool,
     optionFresh :: Bool,
     optionJson :: Bool,
-    -- | Every @--ping@ occurrence, in order, still unvalidated.  Collected as
-    -- a list rather than a 'Maybe' so that supplying the flag twice — with
-    -- two brands or the same one — reaches 'Kanban.Ping.resolvePingBrand' as
-    -- the error it is, instead of one occurrence silently winning.
-    optionPing :: [String],
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
@@ -59,9 +54,8 @@ data Options = Options
 -- only in @app\/Main.hs@ is unreachable from every example.
 --
 -- The order is @main@'s, and it is not arbitrary: the re-entered review tool
--- server is not a dashboard at all, the observational modes answer without
--- needing configuration or a repository, and a ping — the only one that spends
--- quota — yields to every one of them (§5). 'DashboardMode' is what is left,
+-- server is not a dashboard at all, and the observational modes answer without
+-- needing configuration or a repository (§5). 'DashboardMode' is what is left,
 -- which is why it is last.
 data LaunchMode
   = -- | @--review-tools@, carrying the endpoint directory it proxies over:
@@ -75,10 +69,6 @@ data LaunchMode
     GlyphTestMode
   | -- | @--usage@.
     UsageQueryMode
-  | -- | @--ping@, still unvalidated: 'Kanban.Ping.resolvePingBrand' decides
-    -- whether the occurrences name one brand, and a malformed one refuses
-    -- ahead of every mode here.
-    PingQueryMode
   | -- | The dashboard.
     DashboardMode
   deriving stock (Eq, Show)
@@ -89,7 +79,6 @@ launchMode options = case options.optionReviewTools of
   Nothing
     | options.optionGlyphTest -> GlyphTestMode
     | options.optionUsage -> UsageQueryMode
-    | not (null options.optionPing) -> PingQueryMode
     | otherwise -> DashboardMode
 
 -- | Whether this mode reaches a model provider, and so has nothing to do when
@@ -98,22 +87,18 @@ launchMode options = case options.optionReviewTools of
 -- Total in 'LaunchMode', so a mode added above cannot run without a decision
 -- about whether a Kanban that spawns nothing may take it.
 --
--- Only the two provider modes do. @--usage@ reads the loaded providers'
--- account status and @--ping@ spends quota on one, so both answer about
--- something a no-agent install does not have. Which providers those are is
--- the mode's own question and is asked past this gate:
--- 'Kanban.Usage.usageProviders' narrows the report and
--- 'Kanban.Ping.pingBrandRefusal' refuses a brand a single-agent install does
--- not load, both of which need a provider set this refusal has already
--- established is non-empty. Nothing else is: the review tool server proxies
--- to a parent that resolved everything before launching it and likewise
--- consults no roster, @--glyph-test@ asks the terminal rather than a
--- provider, and the dashboard is a board-only Kanban in this mode rather than
--- a refused one.
+-- Only @--usage@ does: it reads the loaded providers' account status, so it
+-- answers about something a no-agent install does not have. Which providers
+-- those are is the mode's own question and is asked past this gate:
+-- 'Kanban.Usage.usageProviders' narrows the report to a provider set this
+-- refusal has already established is non-empty. Nothing else is: the review
+-- tool server proxies to a parent that resolved everything before launching
+-- it and likewise consults no roster, @--glyph-test@ asks the terminal rather
+-- than a provider, and the dashboard is a board-only Kanban in this mode
+-- rather than a refused one.
 launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
-  PingQueryMode -> True
   ReviewToolServerMode _ -> False
   GlyphTestMode -> False
   DashboardMode -> False
@@ -125,11 +110,6 @@ launchModeNeedsProvider mode = case mode of
 -- is where a @models.toml@ that will not load at all becomes no-agent: a
 -- @Left@ has no @agents@ list to count, and refusing it here is what keeps an
 -- unusable file from being answered as though it had loaded two providers.
---
--- A malformed @--ping@ never reaches this. @app\/Main.hs@ resolves the brand
--- ahead of mode selection precisely so an unknown or repeated one is reported
--- as itself (§5), and this decision is asked only after that refusal has had
--- its chance.
 launchModeRefusal :: LaunchMode -> Either RosterLoadError ModelRoster -> Maybe Text
 launchModeRefusal mode loaded
   | launchModeNeedsProvider mode,
@@ -142,7 +122,7 @@ launchModeRefusal mode loaded
 -- Only the dashboard does. Every other mode either never resolves a repository
 -- (the review tool server is handed its endpoint; @--glyph-test@ answers from
 -- the terminal) or resolves one without becoming a board
--- (@--usage@ is global, and @--ping@ starts a quota window and exits). None of
+-- (@--usage@ is global). None of
 -- them writes the durable @gh@ record, so none of them has anything to
 -- serialise against — and a mode that took the lease would refuse to run
 -- beside an open board for no reason at all.
@@ -206,13 +186,6 @@ optionsParser =
     <*> switch
       ( long "json"
           <> help "With --usage, write a machine-readable document instead of the human rendering"
-      )
-    <*> many
-      ( strOption
-          ( long "ping"
-              <> metavar "codex|claude"
-              <> help "Start the named provider's usage window with one deliberate model request, then exit"
-          )
       )
     <*> switch (long "ascii" <> help "Use ASCII borders")
     <*> switch (long "no-cache" <> help "Do not read or write snapshots")

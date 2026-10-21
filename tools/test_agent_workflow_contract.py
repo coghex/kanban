@@ -56,7 +56,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 
-# The solve, PR-flow, and canonical issue-review invocation surface, the
+# The canonical issue-review invocation surface, the
 # shared provider/process helpers they call into, and the issue-approval
 # dashboard of docs/agent-workflow-contract.md §2.8. The review surface is
 # spread over three modules since issue #164 split Kanban.Review: the
@@ -75,32 +75,14 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # hung off a getHomeDirectory result (HOME_PATH_EXPR_RE). Nothing else under
 # src/ writes one of those shapes.
 #
-# Five modules under src/ do call one of those functions and are deliberately
-# out, each for a concrete reason rather than by oversight:
-#
-#   src/Kanban/ServiceProcess.hs and src/Kanban/UsageCommand.hs are spawn
-#   helpers that hand `proc` an executable *value* their caller computed, so
-#   there is no literal for any extractor to recover;
-#
-#   src/Kanban/Ping.hs resolves `findExecutable (pingExecutableName brand)`,
-#   whose argument is a two-equation top-level function rather than the
-#   case/if binding indirect_executable_names reads, and builds its scratch
-#   directory with getXdgDirectory rather than getHomeDirectory, so both
-#   extractors recover nothing from it -- which
-#   test_unscanned_src_modules_would_contribute_nothing pins; and
-#
-#   src/Kanban/Solve.hs and src/Kanban/PullRequestFlow.hs joined that list in
-#   issue #522. Both still resolve an executable with findExecutable, but the
-#   name they resolve is now `adapter.adapterExecutable` rather than a literal
-#   they spell, so neither recovers anything either. Which module the literal
-#   moved to is ProviderAdapter.hs below, and that the two go on recovering
-#   nothing is what holds the provider-adapter boundary's other half.
-#
-# Listing any of the five would add a member the extractors recover nothing
-# from: a surface entry that scans nothing reads as coverage while asserting
-# less than an empty loop does. The `codex` and `claude` that Ping.hs
-# ultimately runs carry `executable` rows grounded in Codex.hs and Claude.hs,
-# which are scanned.
+# Two modules under src/ do call one of those functions and are deliberately
+# out: src/Kanban/ServiceProcess.hs and src/Kanban/UsageCommand.hs are spawn
+# helpers that hand `proc` an executable *value* their caller computed, so
+# there is no literal for any extractor to recover. Listing either would add a
+# member the extractors recover nothing from: a surface entry that scans
+# nothing reads as coverage while asserting less than an empty loop does. That
+# both go on recovering nothing is what
+# test_unscanned_src_modules_would_contribute_nothing pins.
 #
 # Issue #522 added Kanban.ProviderAdapter, the one module that builds a
 # provider's agent-session processes. It is listed because both provider
@@ -167,9 +149,6 @@ APPROVAL_SERVICE_DASHBOARD_RECORD_ROW = "issue-approval-discovery-record"
 UNSCANNED_SRC_MODULES = (
     "src/Kanban/ServiceProcess.hs",
     "src/Kanban/UsageCommand.hs",
-    "src/Kanban/Ping.hs",
-    "src/Kanban/Solve.hs",
-    "src/Kanban/PullRequestFlow.hs",
 )
 
 # The six locations Kanban.ManagedPaths spells, and the manifest rows they
@@ -194,22 +173,15 @@ PROVIDER_ADAPTER_FILE = "src/Kanban/ProviderAdapter.hs"
 PROVIDER_EXECUTABLE_NAMES = ("codex", "claude")
 
 # What each flow module still needs from System.Process now that it builds no
-# provider process. Solve.hs and PullRequestFlow.hs spawn what the adapter
-# hands them and touch no field of it; Review.hs and Review/Tools.hs keep the
-# wider list because each still builds one *non-provider* process the adapter
-# is not asked for -- Review.hs's `git --version` shutdown placeholder and
-# Review/Tools.hs's `gh` runner.
+# provider process. Review.hs and Review/Tools.hs keep a wider list because
+# each still builds one *non-provider* process the adapter is not asked for --
+# Review.hs's `git --version` shutdown placeholder and Review/Tools.hs's `gh`
+# runner.
 #
 # Held as an exact set rather than a subset: a module that regained
 # `proc` would be able to name an executable again, and a subset assertion
 # would not notice.
 FLOW_MODULE_PROCESS_IMPORTS = {
-    "src/Kanban/Solve.hs": {"ProcessHandle", "createProcess", "waitForProcess"},
-    "src/Kanban/PullRequestFlow.hs": {
-        "ProcessHandle",
-        "createProcess",
-        "waitForProcess",
-    },
     # Review.hs reaps through `Kanban.Process.reapManagedHandle` rather than
     # waiting on a handle itself (issue #692), so it no longer names
     # `waitForProcess` at all -- one spelling of the reap, in the module that
@@ -236,7 +208,6 @@ FLOW_MODULE_PROCESS_IMPORTS = {
 # These are the exclusions issue #522 requirement 6 names, taken by decision
 # D-13: none is an agent session and none consumes a roster value.
 PROVIDER_SPAWN_EXCLUSIONS = {
-    "src/Kanban/Ping.hs": "the modelless provider ping (D-2)",
     "src/Kanban/Codex.hs": "the Codex usage probe, which reads account status",
     "src/Kanban/Claude.hs": "the Claude usage probe, which reads account status",
 }

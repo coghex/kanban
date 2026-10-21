@@ -15,7 +15,6 @@ module Kanban.Usage
     acquireUsageReport,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
-    fetchProviderUsage,
     formatUsageDuration,
     renderUsageReport,
     runUsageMode,
@@ -127,9 +126,8 @@ claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSecond
 -- | The one place a provider's timeout, its configured command, and its
 -- built-in integration are put together.
 --
--- @kanban --ping@'s post-ping refresh comes through here too, so a configured
--- command replaces the built-in probe there exactly as it does for the board
--- and @--usage@ — and replaces only that refresh, never the ping itself.
+-- A configured command replaces the built-in probe for the board and
+-- @--usage@ alike.
 fetchProviderUsage :: ResolvedConfig -> UsageProvider -> IO (Either ProviderError UsageSnapshot)
 fetchProviderUsage config Codex =
   runUsageProvider (codexRefreshTimeoutMicros config) config.resolvedUsage.usageCodexCommand fetchCodexUsage

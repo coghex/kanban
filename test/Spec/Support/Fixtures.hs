@@ -328,7 +328,6 @@ testOptions =
       optionUsage = False,
       optionFresh = False,
       optionJson = False,
-      optionPing = [],
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,

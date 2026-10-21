@@ -74,9 +74,9 @@ TEST_PARSED_PATHS = {
     # (issue #537); tools/test_release_runbook.py reads the release template's
     # authorization item (issue #539).
     ".github/ISSUE_TEMPLATE/",
-    # tools/test_pull_request_template.py and test/Spec/Agent/PullRequestFlow.hs
-    # both read the tracked pull-request template and run the three parsers
-    # that route on its absent pr-origin marker over it (issue #494).
+    # tools/test_pull_request_template.py reads the tracked pull-request
+    # template and runs the parsers that route on its absent pr-origin marker
+    # over it (issue #494).
     ".github/pull_request_template.md",
     # tools/test_release_runbook.py reads the report-what-you-have-installed
     # bullet, which may credit `kanban --doctor` with AI-action readiness alone

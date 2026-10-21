@@ -4,11 +4,11 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Guards the packaging promise of issue #76: a clean Codex installation can
 add codex-plugin/ as a project-scoped marketplace and discover exactly the
-five workflows Kanban invokes by name ($solve, $pr-review, $pr-rereview,
+five workflows Kanban's dashboard used to invoke by name ($solve, $pr-review, $pr-rereview,
 $pr-revise, $repair), none of which may set its own model/effort/sandbox/approval/
 working-directory configuration, depend on an untracked personal path, or
-drift from the invocation strings src/Kanban/Solve.hs and
-src/Kanban/PullRequestFlow.hs actually spawn.
+drift from the invocation strings Kanban's own dashboard used to spawn them
+with, which the packaged skills still carry.
 
 Issue #118 added three more packaged skills — the drafting and canonical
 issue-review workflows $issue, $autoissue, and $issue-review — so discovery
@@ -27,8 +27,9 @@ housekeeping audit, and — issue #576, the eighth and last of that arc — the
 $autosolve autonomous solve-and-review loop. $project-review and
 $auto-project-review were removed again when the guide replaced them.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-three); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
-own Haskell code spawns by name (the five above). Every later set is user- or
+(all twenty-three); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set
+Kanban's own dashboard used to spawn by name (the five above; it spawns none
+now, and the set stays as the packaged partition). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
 by design, and no document workflow is Codex-only any more.
@@ -49,9 +50,8 @@ rather than trusting it to fire.
 
 Issue #125 packaged $repair ahead of the key that spawns it, so it briefly
 formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
-Done-column repair branch, so $repair is now spawned by name from
-src/Kanban/PullRequestFlow.hs and belongs in HASKELL_PARITY_SKILL_NAMES with
-the rest; that third category is gone and discovery-minus-parity is the
+Done-column repair branch, so $repair belongs in HASKELL_PARITY_SKILL_NAMES
+with the rest; that third category is gone and discovery-minus-parity is the
 user-invoked set again. See tools/test_repair_workflow_contract.py for
 $repair's own behavioral contract.
 """
@@ -102,8 +102,6 @@ SKILL_SIGIL = "$"
 # listing parity.
 NON_WORKFLOW_KEYWORDS = {"kanban"}
 
-SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
-PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, and Review/Canonical.hs asks it rather than
@@ -111,16 +109,14 @@ REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # two files below rather than one.
 MANAGED_PATHS_HS = REPO_ROOT / "src" / "Kanban" / "ManagedPaths.hs"
 
-# The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
-# pins this set — and only this set — against src/Kanban/Solve.hs and
-# src/Kanban/PullRequestFlow.hs, so it must never grow to include a workflow
-# Kanban does not spawn.
+# The workflows Kanban's own dashboard used to spawn by name, kept as the
+# partition between them and the user- or daemon-invoked rest of the bundle.
 HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
 
 # The drafting and canonical issue-review workflows vendored by issue #118,
 # plus the issue-rereview repair loop vendored by issue #240. User- or
 # daemon-invoked, never spawned by Kanban's CLI, so they are packaged
-# and policy-checked but excluded from Haskell name parity above. draft-issues
+# and policy-checked but excluded from the parity set above. draft-issues
 # is deliberately absent: it is a Claude-only breadth workflow
 # (docs/drafting-workflow-contract.md §3.2).
 DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review", "issue-rereview"}
@@ -220,9 +216,8 @@ JANITOR_SKILL_NAMES = {"janitor"}
 # and the eighth and last of the arc's commands: with it every personal copy of
 # a Kanban workflow is retired. Rendered from
 # tools/command_sources/autosolve.md the way the nine sets above are, and like
-# them user-invoked and excluded from Haskell name parity -- Kanban's own
-# Haskell code spawns $solve and $pr-review directly and never this loop over
-# them. It is its own category rather than another solve or review name for the
+# them user-invoked and excluded from the parity set -- Kanban's own dashboard
+# spawned $solve and $pr-review directly and never this loop over them. It is its own category rather than another solve or review name for the
 # reason it is excluded from parity at all: it performs neither job itself. It
 # delegates the implementation to $solve and the verdict to $pr-review and
 # $pr-rereview, and what it contributes is the loop and the prohibitions --
@@ -596,10 +591,10 @@ class SkillDiscoveryTests(unittest.TestCase):
 
     def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
         # The two concepts must stay distinct: discovery covers every packaged
-        # workflow, while WorkflowNameParityTests pins only the ones Kanban's
-        # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting,
-        # document, and roadmap skills.
+        # workflow, while HASKELL_PARITY_SKILL_NAMES is only the ones
+        # Kanban's dashboard used to spawn. Collapsing them back into one
+        # constant would silently stop discovering the drafting, document, and
+        # roadmap skills.
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
         self.assertEqual(
             EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
@@ -719,46 +714,6 @@ class SkillDiscoveryTests(unittest.TestCase):
             field = FRONTMATTER_FIELD_RE.search(match.group(1))
             self.assertIsNotNone(field, f"{skill_md} frontmatter must declare name:")
             self.assertEqual(field.group(1), name)
-
-
-class WorkflowNameParityTests(unittest.TestCase):
-    """Pins the Kanban-spawned skill names to the exact tokens Kanban's Haskell
-    invocation code spawns, so a rename on either side fails this test
-    instead of failing silently at runtime. Scoped to
-    HASKELL_PARITY_SKILL_NAMES, not the full discovery set: the drafting
-    skills issue #118 packaged are user- or daemon-invoked, so Kanban's
-    Haskell code must NOT spawn them."""
-
-    def test_codex_workflow_tokens_match_packaged_skill_names(self):
-        solve_source = SOLVE_HS.read_text(encoding="utf-8")
-        solve_tokens = set(re.findall(r'workflowName \w+ CodexSolver = "\$([\w-]+)"', solve_source))
-        self.assertEqual(solve_tokens, {"solve"}, "src/Kanban/Solve.hs workflowName Codex tokens changed")
-
-        pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
-        pr_flow_tokens = set(re.findall(r'commandName "([\w-]+)"', pr_flow_source))
-        self.assertEqual(
-            pr_flow_tokens,
-            {"pr-review", "pr-rereview", "pr-revise", "repair"},
-            "src/Kanban/PullRequestFlow.hs commandName tokens changed",
-        )
-
-        all_tokens = solve_tokens | pr_flow_tokens
-        self.assertEqual(all_tokens, HASKELL_PARITY_SKILL_NAMES)
-
-    def test_no_drafting_skill_is_spawned_by_kanbans_haskell_code(self):
-        # The other half of the discovery/parity split: a workflow outside the
-        # parity set appearing in Kanban's own invocation surface would mean
-        # this module's parity set is wrong, not that the non-parity set
-        # should grow.
-        haskell_sources = "\n".join(
-            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS)
-        )
-        spawned = set(re.findall(r'(?:workflowName \w+ \w+ = "|commandName ")[/$]?([\w-]+)"', haskell_sources))
-        # Non-vacuous: the same scan must still recover every name Kanban does
-        # spawn, so an extraction that silently matched nothing fails here.
-        self.assertEqual(spawned & EXPECTED_SKILL_NAMES, HASKELL_PARITY_SKILL_NAMES)
-        self.assertEqual(spawned & DRAFTING_SKILL_NAMES, set())
-        self.assertEqual(spawned & DOCUMENT_SKILL_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):
@@ -1122,16 +1077,12 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
 
 
 class SolveGateEscalationTests(unittest.TestCase):
-    """solve must escalate with the exact terminal line Kanban's own
-    invocation prompt uses (src/Kanban/Solve.hs), not a paraphrase, so
-    Kanban's KANBAN_NEEDS_INPUT handling recognizes it."""
+    """solve must escalate with the exact terminal line the dashboard's
+    KANBAN_NEEDS_INPUT handling recognized, not a paraphrase."""
 
     ESCALATION_TEXT = "KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."
 
-    def test_escalation_text_matches_solve_hs_verbatim(self):
-        solve_hs_source = SOLVE_HS.read_text(encoding="utf-8")
-        self.assertIn(self.ESCALATION_TEXT, solve_hs_source)
-
+    def test_solve_skill_states_the_escalation_text_verbatim(self):
         solve_skill_source = (SKILLS_ROOT / "solve" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn(self.ESCALATION_TEXT, solve_skill_source)
 

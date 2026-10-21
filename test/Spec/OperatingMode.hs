@@ -191,8 +191,8 @@ commandLineSpec :: Spec
 commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
-  it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, True, True, False]
+  it "names exactly the one mode that reaches a provider" $
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, True, False]
 
   -- The mission modes are gone, not merely unselected: the parser turns each
   -- spelling away as an option it does not know, so no invocation can reach a
@@ -241,10 +241,38 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
       Failure failure -> fst (renderFailure failure "kanban") `shouldNotSatisfy` isInfixOf "--worker-spec"
       _ -> expectationFailure "--help did not render help"
 
+  -- The deliberate ping was removed with the code behind it, refused the same
+  -- way in either argument order and named in the diagnostic: a flag the
+  -- parser no longer knows cannot be rescued by sitting before or after a mode
+  -- that still exists, nor by repetition.
+  it "refuses --ping as an unknown option, naming it" $
+    sequence_
+      [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
+        | arguments <-
+            [ ["--ping"],
+              ["--ping", "codex"],
+              ["--ping", "codex", "--ping", "claude"],
+              ["--ping", "codex", "--usage"],
+              ["--usage", "--ping", "claude"]
+            ],
+          let refusal = case execParserPure defaultPrefs optionsParserInfo arguments of
+                Failure failure ->
+                  let (message, code) = renderFailure failure "kanban"
+                   in Just (code, "Invalid option `--ping'" `isInfixOf` message)
+                _ -> Nothing
+      ]
+
+  it "renders --help without listing --ping" $
+    case execParserPure defaultPrefs optionsParserInfo ["--help"] of
+      Failure failure -> do
+        let (message, code) = renderFailure failure "kanban"
+        code `shouldBe` ExitSuccess
+        message `shouldSatisfy` isInfixOf "--usage"
+        message `shouldNotSatisfy` isInfixOf "--ping"
+      _ -> expectationFailure "--help did not render help"
+
   -- The readiness mode removed with the probe behind it, refused the same way
-  -- in either argument order and named in the diagnostic: a flag the parser
-  -- no longer knows cannot be rescued by sitting before or after a mode that
-  -- still exists.
+  -- in either argument order and named in the diagnostic.
   it "refuses --doctor as an unknown option, naming it" $
     sequence_
       [ (arguments, refusal) `shouldBe` (arguments, Just (ExitFailure 1, True))
@@ -269,10 +297,10 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
         message `shouldNotSatisfy` isInfixOf "--doctor"
       _ -> expectationFailure "--help did not render help"
 
-  it "refuses --usage and --ping with the roster's own words" $
+  it "refuses --usage with the roster's own words" $
     sequence_
       [ (mode, launchModeRefusal mode (Right noAgentRoster)) `shouldBe` (mode, Just noAgentModeMessage)
-        | mode <- [UsageQueryMode, PingQueryMode]
+        | mode <- [UsageQueryMode]
       ]
 
   -- The review's amendment: an unusable @models.toml@ is no-agent through
@@ -281,14 +309,14 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   it "refuses a models.toml that will not load at all" $
     sequence_
       [ (mode, launchModeRefusal mode (Left unusableRoster)) `shouldBe` (mode, Just noAgentModeMessage)
-        | mode <- [UsageQueryMode, PingQueryMode]
+        | mode <- [UsageQueryMode]
       ]
 
-  it "leaves both of them running on a roster that loads a provider" $
+  it "leaves it running on a roster that loads a provider" $
     sequence_
       [ (name, mode, launchModeRefusal mode (Right roster)) `shouldBe` (name, mode, Nothing)
         | (name, roster) <- [("dual" :: String, defaultRoster), ("single-agent", claudeOnlyRoster)],
-          mode <- [UsageQueryMode, PingQueryMode]
+          mode <- [UsageQueryMode]
       ]
 
   -- Everything else answers about the terminal, the environment, or the
@@ -297,7 +325,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
     sequence_
       [ (mode, launchModeRefusal mode loaded) `shouldBe` (mode, Nothing)
         | mode <- everyMode,
-          mode `notElem` [UsageQueryMode, PingQueryMode],
+          mode /= UsageQueryMode,
           loaded <- [Right noAgentRoster, Left unusableRoster, Right defaultRoster]
       ]
 
@@ -311,7 +339,6 @@ everyMode =
     [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
       testOptions {optionGlyphTest = True},
       testOptions {optionUsage = True},
-      testOptions {optionPing = ["codex"]},
       testOptions
     ]
 

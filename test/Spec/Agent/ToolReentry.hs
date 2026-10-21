@@ -47,7 +47,7 @@ import Kanban.ReviewToolServer
     teardownReviewToolEndpoint,
     writeEndpointReply,
   )
-import Kanban.Solve (ProviderAdapter (..), adapterFor)
+import Kanban.ProviderAdapter (ProviderAdapter (..), adapterFor)
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
 import Spec.Support.Process

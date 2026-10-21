@@ -133,7 +133,7 @@ usageSolveRoundsLeft estimate percentLeft = do
   percentPerRound <- estimate
   if percentPerRound <= 0 then Nothing else Just (max 0 percentLeft `div` percentPerRound)
 
--- | The estimate as @kanban --usage@ and @kanban --ping@ state it, where there
+-- | The estimate as @kanban --usage@ states it, where there
 -- is no width to budget and the count can be spelled out.
 usageSolveRoundsText :: Int -> Text
 usageSolveRoundsText rounds = "≈" <> Text.pack (show rounds) <> " solve rounds left this window"

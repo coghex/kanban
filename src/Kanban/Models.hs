@@ -307,8 +307,8 @@ loadedOperatingMode = either (const NoAgentMode) operatingModeFor
 -- The one spelling of that question, because more than one surface keys on
 -- it and they must agree: the usage probes and the sidebar's provider blocks
 -- ("Kanban.UI.Refresh", "Kanban.UI.Board"), the agent bindings' visibility
--- and refusal ('Kanban.UI.Keys.availableIn'), and the @--usage@ and @--ping@
--- run-and-exit modes ('Kanban.CLI.launchModeRefusal') all ask it here.
+-- and refusal ('Kanban.UI.Keys.availableIn'), and the @--usage@
+-- run-and-exit mode ('Kanban.CLI.launchModeRefusal') all ask it here.
 --
 -- Total in 'OperatingMode' on purpose: a mode added to that type cannot reach
 -- any of those surfaces without a decision about whether it has a provider.
@@ -322,9 +322,8 @@ agentsLoaded mode = case mode of
 --
 -- The one spelling of /which/ provider a single-agent install runs on, as
 -- 'agentsLoaded' above is the one spelling of whether any is loaded. Every
--- surface the mode collapses asks here — pull-request routing, the embedded
--- issue review's backend, the solve chooser, the usage probes and the
--- sidebar's provider blocks, preflight, and @--ping@'s brand refusal — and
+-- surface the mode collapses asks here — the embedded issue review's
+-- backend, the usage probes and the sidebar's provider blocks — and
 -- none of them re-derives it from 'rosterAgents', which is what would let two
 -- surfaces disagree about the brand one run is on.
 --
@@ -539,7 +538,7 @@ assignmentUnavailableMessage unavailable = case unavailable of
 --
 -- One phrase rather than one per surface, for the same reason
 -- 'assignmentUnavailableMessage' is one: the board's four agent bindings and
--- the @--usage@ and @--ping@ refusals all say this, and an operator who meets
+-- the @--usage@ refusal says this, and an operator who meets
 -- it twice must not be told two things.
 noAgentModeMessage :: Text
 noAgentModeMessage =

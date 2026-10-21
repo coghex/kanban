@@ -3,14 +3,10 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 The template must carry no `pr-origin` marker anywhere, its own explanatory
-ORIGIN COMMENT included. That is not a style preference: three parsers route on
+ORIGIN COMMENT included. That is not a style preference: the parsers route on
 that marker, and each of them counts occurrences across the whole body with no
 awareness of HTML comments.
 
-* `src/Kanban/PullRequestFlow.hs`'s `originFromBody` counts each exact marker
-  over the complete body: both brands present is
-  `PR body contains both pr-origin markers`, and either brand twice is
-  `PR body contains a duplicate pr-origin marker`.
 * Both packaged coordinators' `origin_from_body`
   (`claude-plugin/plugins/kanban/scripts/review_pr.py` and
   `codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`) reject on
@@ -20,14 +16,14 @@ awareness of HTML comments.
 So an editor who pastes a marker into the ORIGIN COMMENT to show a contributor
 what one looks like -- the exact mistake that comment warns against -- turns
 every agent-authored pull request opened from the template into a
-duplicate-marker body. The Haskell reader refuses it; the two coordinators
-silently route the review to both brands, reaching the self-review hazard by
-another door. Required CI stays green throughout.
+duplicate-marker body. The two coordinators silently route the review to
+both brands, reaching the self-review hazard by another door. Required CI
+stays green throughout.
 
 Issue #435 made this a requirement and checkable, but discharged it by hand in
-PR #456's body. This module is the committed equivalent, and the Python half of
-it: the Haskell parser is exercised the same way by
-`test/Spec/Agent/PullRequestFlow.hs`, which reads this same tracked file.
+PR #456's body. This module is the committed equivalent. It was the Python
+half of a pair until the Haskell parser (`originFromBody`) was removed with the
+pull-request flow; the two coordinators are the parsers that remain.
 
 Both assertions per coordinator are load bearing, and neither subsumes the
 other:

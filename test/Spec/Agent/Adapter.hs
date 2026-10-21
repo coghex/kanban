@@ -19,9 +19,8 @@
 -- and Codex's answer must not drift while it is the only backend shipped.
 --
 -- What a spawn site does with the record — resolving the executable,
--- masking the spawn, registering the managed process — is covered where it
--- always was, in "Spec.Agent.Solve", "Spec.Agent.PullRequestFlow", and
--- "Spec.Agent.Roster". Nothing moved here.
+-- masking the spawn, registering the managed process — was covered beside
+-- the flow modules that did it, and went with them.
 module Spec.Agent.Adapter (spec) where
 
 import Data.Aeson (Value (..), encode, object, (.=))
@@ -45,13 +44,13 @@ import Kanban.Review
     missingEmbeddedReviewMessage,
   )
 import Kanban.ReviewToolServer (reviewToolServerConfig)
-import Kanban.Solve
+import Kanban.ProviderAdapter
   ( ProcessRequest (..),
     ProviderAdapter (..),
-    SolverBrand (..),
     adapterFor,
     adapterForBrand,
   )
+import Kanban.Solve.Event (SolverBrand (..))
 import System.Process (CmdSpec (..), CreateProcess (..), StdStream (..))
 import Test.Hspec
 

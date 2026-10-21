@@ -306,15 +306,14 @@ spec = do
         `shouldBe` [ ReviewToolServerMode "/tmp/endpoint",
                      GlyphTestMode,
                      UsageQueryMode,
-                     PingQueryMode,
                      DashboardMode
                    ]
-      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, True]
+      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, True]
 
     -- The order is §5's, and the reason it is asserted is that an invocation
     -- naming two modes must resolve to the one that does not take the lease.
     it "leaves the lease unclaimed when a dashboard flag is combined with an earlier mode" $ do
-      acquiresRepositoryLease testOptions {optionReviewTools = Just "/tmp/endpoint", optionPing = ["codex"]} `shouldBe` False
+      acquiresRepositoryLease testOptions {optionReviewTools = Just "/tmp/endpoint", optionUsage = True} `shouldBe` False
       acquiresRepositoryLease testOptions {optionGlyphTest = True, optionUsage = True} `shouldBe` False
       -- Options a dashboard does carry do not change the answer.
       acquiresRepositoryLease testOptions {optionRepo = Just "coghex/kanban", optionFresh = True} `shouldBe` True
@@ -402,7 +401,6 @@ everyMode =
   [ testOptions {optionReviewTools = Just "/tmp/endpoint"},
     testOptions {optionGlyphTest = True},
     testOptions {optionUsage = True},
-    testOptions {optionPing = ["codex"]},
     testOptions {optionColor = ColorNever, optionBorder = BorderOpen}
   ]
 

@@ -9,15 +9,6 @@ module Spec.Support.Process
     withNonLeaderShell,
     processIdentity,
     identityForProcess,
-    chattyProviderLines,
-    chattyProvider,
-    rawTelemetryLines,
-    singleNotice,
-    aggregatedNotices,
-    isSolveSessionIdentifiedEvent,
-    isSolveOutputEvent,
-    isPullRequestSessionIdentifiedEvent,
-    isPullRequestFlowOutputEvent,
     withRecordingReviewClient,
     withRecordingReviewClientUsing,
     readTwoConnectionLog,
@@ -100,7 +91,6 @@ import Kanban.Process
     readProcessSnapshot
   )
 import Kanban.Models (ModelRoster, ProviderName (..), defaultRoster)
-import Kanban.PullRequestFlow (PullRequestFlowEvent (..))
 import Kanban.Review
   ( CommandBounds (..),
     ConnectionId,
@@ -130,17 +120,7 @@ import Kanban.Review
     stopReviewClient,
     withReservedToolSlot
   )
-import Kanban.Solve
-  ( AgentEvent (..),
-    ProviderAdapter (..),
-    SolveEvent (..),
-    StreamEvent (..),
-    adapterFor,
-    emitStreamEvent,
-    sealUnknownAggregates,
-    newUnknownAggregator,
-    parseSolveOutputLine
-  )
+import Kanban.ProviderAdapter (ProviderAdapter (..), adapterFor)
 import Kanban.Transcript (SessionLog, closeSessionLog, openSessionLog, sessionLogPath)
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
@@ -329,88 +309,6 @@ identityForProcess process = do
     Right identities -> case identityForPid pid identities of
       Just identity -> pure identity
       Nothing -> fail "spawned process was not present in a process snapshot"
-
--- | How many occurrences of the unrecognized @telemetry@ type
--- 'chattyProvider' streams. Comfortably past 'unknownNoticeSamples', so a
--- run proves collapsing rather than merely staying under the sample budget.
-chattyProviderLines :: Int
-chattyProviderLines = 40
-
--- | A fake provider that streams 'chattyProviderLines' occurrences of one
--- unrecognized event type, each with a payload far larger than a bounded
--- notice, then a recognized agent message. @tailCommands@ can keep it alive
--- afterwards so a test can interrupt it deterministically once that
--- recognized sentinel proves every telemetry line has been read.
-chattyProvider :: ByteString.ByteString -> ByteString.ByteString -> [ByteString.ByteString] -> ByteString.ByteString
-chattyProvider sessionId sentinel tailCommands =
-  ByteString.unlines
-    ( [ "#!/bin/sh",
-        "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"" <> sessionId <> "\"}'",
-        "i=0",
-        "while [ $i -lt " <> ByteString.pack (show chattyProviderLines) <> " ]; do",
-        "  printf '{\"type\":\"telemetry\",\"tick\":%s,\"blob\":\"" <> ByteString.pack (replicate 400 'x') <> "\"}\\n' \"$i\"",
-        "  i=$((i + 1))",
-        "done",
-        "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"" <> sentinel <> "\"}}'"
-      ]
-        <> tailCommands
-    )
-
--- | How many raw stdout records a 'chattyProvider' run left in its session
--- log, given the log paths the invocation reported opening. The §16 contract
--- is that this stays at full fidelity no matter how aggressively the parsed
--- notices are bounded and collapsed.
-rawTelemetryLines :: [FilePath] -> IO Int
-rawTelemetryLines [path] = do
-  contents <- ByteString.readFile path
-  pure (length (filter (ByteString.isInfixOf "\\\"telemetry\\\"") (ByteString.lines contents)))
-rawTelemetryLines paths = throwIO (userError ("expected exactly one opened session log, got " <> show paths))
-
--- | The single agent event one provider line parses into. Anything else is
--- a broken fixture rather than an assertion worth reporting, so it aborts
--- the example with the shape actually produced.
-singleNotice :: ByteString.ByteString -> IO AgentEvent
-singleNotice line = case parseSolveOutputLine line of
-  Right (_, [streamEvent]) -> pure streamEvent.streamEventAgent
-  result -> throwIO (userError ("expected exactly one parsed event from " <> show line <> ", got " <> show result))
-
--- | Runs provider lines through one invocation's unknown-payload aggregator
--- and returns the notice summaries that invocation would journal: the events
--- it admitted, in order, followed by the aggregate summaries it flushes
--- before its terminal event. This is the pure-side stand-in for a full
--- provider run, so aggregation boundaries can be asserted without spawning
--- hundreds of lines through a real process.
-aggregatedNotices :: [String] -> IO [Text]
-aggregatedNotices providerLines = do
-  aggregator <- newUnknownAggregator
-  admitted <- concat <$> traverse (admitLine aggregator) providerLines
-  summaries <- newIORef []
-  sealUnknownAggregates aggregator (\agentEvent -> modifyIORef summaries (agentEvent :))
-  flushed <- reverse <$> readIORef summaries
-  pure (map (.agentEventSummary) (admitted <> flushed))
-  where
-    admitLine aggregator line = case parseSolveOutputLine (ByteString.pack line) of
-      Left message -> throwIO (userError ("unparsable fixture line " <> line <> ": " <> Data.Text.unpack message))
-      Right (_, events) -> do
-        admitted <- newIORef []
-        mapM_ (emitStreamEvent aggregator (\agentEvent -> modifyIORef admitted (agentEvent :))) events
-        reverse <$> readIORef admitted
-
-isSolveSessionIdentifiedEvent :: SolveEvent -> Bool
-isSolveSessionIdentifiedEvent (SolveSessionIdentified _ _) = True
-isSolveSessionIdentifiedEvent _ = False
-
-isSolveOutputEvent :: SolveEvent -> Bool
-isSolveOutputEvent (SolveOutput _ _) = True
-isSolveOutputEvent _ = False
-
-isPullRequestSessionIdentifiedEvent :: PullRequestFlowEvent -> Bool
-isPullRequestSessionIdentifiedEvent (PullRequestSessionIdentified _ _) = True
-isPullRequestSessionIdentifiedEvent _ = False
-
-isPullRequestFlowOutputEvent :: PullRequestFlowEvent -> Bool
-isPullRequestFlowOutputEvent (PullRequestFlowOutput _ _) = True
-isPullRequestFlowOutputEvent _ = False
 
 -- | A review client whose app-server stdin is a pipe this test reads, plus
 -- the events its sink recorded in order, so a response driven in through

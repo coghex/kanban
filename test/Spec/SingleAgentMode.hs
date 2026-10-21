@@ -1,11 +1,10 @@
--- | What a Kanban whose roster loads exactly one provider routes to it
--- (issue #589).
+-- | What a Kanban whose roster loads exactly one provider reads (issue #589):
+-- the embedded review's backend and the prose it runs under, and the usage
+-- probes and sidebar blocks they feed.
 --
 -- The mirror of "Spec.OperatingMode", which covers the mode that loads none.
 -- Where that module asks what a board refuses, this one asks what a board
--- /selects/: every pull-request action, the embedded review's backend and the
--- prose it runs under, a fresh solve, the usage probes and the sidebar blocks
--- they feed, and @--ping@'s brand.
+-- /selects/.
 --
 -- Two variants throughout, never one standing in for the other. A Codex-only
 -- install and a Claude-only install are the same mode and opposite answers,
@@ -13,15 +12,11 @@
 -- named a brand rather than reading the roster.
 --
 -- Dual mode is the negative control in every section, because requirement 9
--- is that it does not move: the same routing, the same cells, the same
--- probes.
+-- is that it does not move: the same cells, the same probes.
 --
 -- Everything here is a pure function the corresponding @EventM@ arm or @IO@
--- entry point only projects -- 'agentForAction' and 'pullRequestAssignment'
--- for routing, 'recordedPullRequestBrand' for a worker that already exists,
--- 'embeddedReviewProvider' for the review backend, 'usageProviders' for the
--- probes, and 'pingBrandRefusal' for the
--- command line -- so the whole matrix is
+-- entry point only projects -- 'embeddedReviewProvider' for the review
+-- backend and 'usageProviders' for the probes -- so the whole matrix is
 -- settled with no terminal, no subprocess, and no provider account.
 module Spec.SingleAgentMode (spec) where
 
@@ -34,32 +29,17 @@ import qualified Data.Text
 import Kanban.Domain (UsageProvider (..), defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
-    AssignmentUnavailable,
     ModelRoster (..),
     OperatingMode (..),
     ProviderName (..),
-    RecordedAssignment (..),
     RoleName (..),
     assignmentFor,
     defaultRoster,
     loadedOperatingMode,
     operatingModeFor,
-    providerKey,
-    recordAssignment,
-  )
-import Kanban.Ping (PingBrand (..), pingBrandName, pingBrandRefusal)
-import Kanban.PullRequestFlow
-  ( PullRequestAction (..),
-    PullRequestOrigin (..),
-    agentForAction,
-    externalOwnBrandUnsupported,
-    expectedPullRequestOrigin,
-    pullRequestAssignment,
-    recordedPullRequestBrand,
-    solveReviewerAssignment,
   )
 import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReviewCell, embeddedReviewProvider, githubToolName, questionToolName, reviewDeveloperInstructions)
-import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor)
+import Kanban.ProviderAdapter (ProviderAdapter (..), adapterFor)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
 import Kanban.UI.Theme (themeFor)
@@ -73,11 +53,8 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "single-agent operating mode" $ do
-  routingSpec
-  workerSpec
   reviewSpec
   usageSpec
-  pingSpec
 
 -- ---------------------------------------------------------------------------
 -- The two installs
@@ -92,14 +69,13 @@ spec = describe "single-agent operating mode" $ do
 data Variant = Variant
   { variantName :: String,
     variantRoster :: ModelRoster,
-    variantProvider :: ProviderName,
-    variantBrand :: SolverBrand
+    variantProvider :: ProviderName
   }
 
 variants :: [Variant]
 variants =
-  [ Variant "codex-only" codexOnlyRoster CodexProvider CodexSolver,
-    Variant "claude-only" claudeOnlyRoster ClaudeProvider ClaudeSolver
+  [ Variant "codex-only" codexOnlyRoster CodexProvider,
+    Variant "claude-only" claudeOnlyRoster ClaudeProvider
   ]
 
 -- | The mode a variant's own roster derives, taken through 'operatingModeFor'
@@ -108,182 +84,6 @@ variants =
 -- not have.
 variantMode :: Variant -> OperatingMode
 variantMode = operatingModeFor . variantRoster
-
--- | Every pull-request route, as origin and action.
-everyRoute :: [(PullRequestOrigin, PullRequestAction)]
-everyRoute =
-  [ (origin, action)
-  | origin <- [PullRequestCodex, PullRequestClaude],
-    action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
-  ]
-    <> [ (origin, action)
-       | origin <- [PullRequestGrok, PullRequestKimi, PullRequestGoogle],
-         action <- [PullRequestReview, PullRequestRereview]
-       ]
-
--- | Which roster role an action reads, written out rather than reached
--- through 'Kanban.PullRequestFlow.pullRequestRole', so this is a control over
--- that split rather than a restatement of it.
-roleOfAction :: PullRequestAction -> RoleName
-roleOfAction PullRequestRevision = PrReviseRole
-roleOfAction PullRequestRepair = PrReviseRole
-roleOfAction PullRequestReview = PrReviewRole
-roleOfAction PullRequestRereview = PrReviewRole
-
--- ---------------------------------------------------------------------------
--- Pull-request routing
--- ---------------------------------------------------------------------------
-
-routingSpec :: Spec
-routingSpec = describe "the pull-request actions it collapses" $ do
-  -- Requirement 2, and the review's first spec addition: both internal origins
-  -- crossed with all four actions, plus every supported external-origin action,
-  -- for both singleton rosters. The origin marker is still written in this mode
-  -- (requirement 5, D-12); what changes is that routing stops reading it.
-  it "runs every supported action of every origin on the one loaded provider" $
-    sequence_
-      [ (variant.variantName, origin, action, agentForAction (variantMode variant) origin action)
-          `shouldBe` (variant.variantName, origin, action, variant.variantBrand)
-      | variant <- variants,
-        (origin, action) <- everyRoute
-      ]
-
-  it "does not invent a provider for kimi-origin revision or repair" $
-    sequence_
-      [ (variant.variantName, action, externalOwnBrandUnsupported PullRequestKimi action)
-          `shouldBe` (variant.variantName, action, True)
-      | variant <- variants,
-        action <- [PullRequestRevision, PullRequestRepair]
-      ]
-
-  it "does not invent a provider for google-origin revision or repair" $
-    sequence_
-      [ (variant.variantName, action, externalOwnBrandUnsupported PullRequestGoogle action)
-          `shouldBe` (variant.variantName, action, True)
-      | variant <- variants,
-        action <- [PullRequestRevision, PullRequestRepair]
-      ]
-
-  -- The cell as well as the brand. A launch records the provider it resolved
-  -- through, so routing that moved without the lookup moving with it would
-  -- spawn one provider on the other's model -- and the role still splits
-  -- authored work from the canonical gate, which the mode does not collapse.
-  it "resolves each action's cell on that provider, in the role the action takes" $
-    sequence_
-      [ (variant.variantName, origin, action, pullRequestAssignment variant.variantRoster origin action)
-          `shouldBe` (variant.variantName, origin, action, cellFor variant (roleOfAction action))
-      | variant <- variants,
-        (origin, action) <- everyRoute
-      ]
-
-  -- The negative control. Requirement 9: dual routing is untouched, so the
-  -- same matrix still crosses brands exactly as it did.
-  it "leaves dual mode crossing brands on the same matrix" $
-    sequence_
-      [ (origin, action, agentForAction DualMode origin action) `shouldBe` (origin, action, expected)
-      | (origin, action) <- everyRoute,
-        let expected = case (origin, action) of
-              (PullRequestCodex, PullRequestReview) -> ClaudeSolver
-              (PullRequestCodex, PullRequestRereview) -> ClaudeSolver
-              (PullRequestCodex, _) -> CodexSolver
-              (PullRequestClaude, PullRequestReview) -> CodexSolver
-              (PullRequestClaude, PullRequestRereview) -> CodexSolver
-              (PullRequestClaude, _) -> ClaudeSolver
-              (PullRequestGrok, _) -> CodexSolver
-              (PullRequestKimi, _) -> CodexSolver
-              (PullRequestGoogle, _) -> CodexSolver
-      ]
-
-  -- Requirement 5 and D-12: the marker a solve stamps is unchanged, and it is
-  -- the routing above that stops reading it. Asserted together with that
-  -- routing, because the pair is the requirement: a mode that stopped writing
-  -- markers would leave every pull request it opened unroutable by any install
-  -- that later loads both providers.
-  it "still expects the solving brand's own origin marker, and then ignores it" $
-    sequence_
-      [ (variant.variantName, expectedPullRequestOrigin variant.variantBrand, routed)
-          `shouldBe` (variant.variantName, stamped variant, variant.variantBrand)
-      | variant <- variants,
-        let routed = agentForAction (variantMode variant) (opposite (stamped variant)) PullRequestReview
-      ]
-
-  -- Requirement 7 on the one reviewer identity a solve session shows before
-  -- any review has started: an autosolve run in this mode hands its pull
-  -- request to the provider it loads, whichever brand it solved on, so the
-  -- name it carries is that provider's pr_review cell.
-  it "names the loaded provider as the reviewer an autosolve run will use" $
-    sequence_
-      [ (variant.variantName, brand, solveReviewerAssignment variant.variantRoster brand)
-          `shouldBe` (variant.variantName, brand, cellFor variant PrReviewRole)
-      | variant <- variants,
-        brand <- [CodexSolver, ClaudeSolver]
-      ]
-
--- | The marker a solve on this install's provider stamps, written out rather
--- than reached through 'expectedPullRequestOrigin', so the assertion above is
--- a control over that function rather than a restatement of it.
-stamped :: Variant -> PullRequestOrigin
-stamped variant = case variant.variantProvider of
-  CodexProvider -> PullRequestCodex
-  ClaudeProvider -> PullRequestClaude
-
--- | The marker this install would /not/ stamp, which is what a routing that
--- still read markers would send to the unloaded brand.
-opposite :: PullRequestOrigin -> PullRequestOrigin
-opposite PullRequestCodex = PullRequestClaude
-opposite PullRequestClaude = PullRequestCodex
-opposite PullRequestGrok = PullRequestGrok
-opposite PullRequestKimi = PullRequestKimi
-opposite PullRequestGoogle = PullRequestGoogle
-
--- | The recorded cell an install's own provider takes for one role, resolved
--- from the roster under test rather than written as a model name.
-cellFor :: Variant -> RoleName -> Either AssignmentUnavailable RecordedAssignment
-cellFor variant role =
-  recordAssignment variant.variantProvider
-    <$> assignmentFor variant.variantRoster role variant.variantProvider
-
--- ---------------------------------------------------------------------------
--- Workers that already exist
--- ---------------------------------------------------------------------------
-
-workerSpec :: Spec
-workerSpec = describe "the workers it does not relabel" $ do
-  -- The review's third spec addition, and D-7. A worker's provider is
-  -- whatever its own specification recorded: the process rows, the recovered
-  -- session, and every protocol event read the record, so a models.toml
-  -- edited between the launch and the event -- including one that moved the
-  -- install between modes -- cannot rename the process that is still running.
-  it "replays a running worker's recorded provider, whatever the live mode says" $
-    sequence_
-      [ (mode', origin, action, provider, recordedPullRequestBrand mode' (Just recorded) origin action)
-          `shouldBe` (mode', origin, action, provider, brandOf provider)
-      | mode' <- DualMode : NoAgentMode : map variantMode variants,
-        (origin, action) <- everyRoute,
-        provider <- [CodexProvider, ClaudeProvider],
-        let recorded = recordAssignment provider (cellOf (assignmentFor defaultRoster (roleOfAction action) provider))
-      ]
-
-  -- The fallback, and only the fallback: a specification written before the
-  -- record existed has nothing to replay, so it takes the live routing its
-  -- mode gives -- which in single-agent is the loaded provider.
-  it "falls back to live routing only for a record that names no assignment" $
-    sequence_
-      [ (variant.variantName, origin, action, recordedPullRequestBrand (variantMode variant) Nothing origin action)
-          `shouldBe` (variant.variantName, origin, action, variant.variantBrand)
-      | variant <- variants,
-        (origin, action) <- everyRoute
-      ]
-
-  it "falls back to dual routing in dual mode, unchanged" $
-    sequence_
-      [ (origin, action, recordedPullRequestBrand DualMode Nothing origin action)
-          `shouldBe` (origin, action, agentForAction DualMode origin action)
-      | (origin, action) <- everyRoute
-      ]
-  where
-    brandOf CodexProvider = CodexSolver
-    brandOf ClaudeProvider = ClaudeSolver
 
 -- ---------------------------------------------------------------------------
 -- The embedded issue review
@@ -493,43 +293,3 @@ usageSpec = describe "the usage accounts it reads" $ do
     sidebarText state =
       Data.Text.unlines
         (map (Data.Text.take usageSidebarWidth) (renderWidgetLines (themeFor testOptions) 200 (drawBase state)))
-
--- ---------------------------------------------------------------------------
--- The command line
--- ---------------------------------------------------------------------------
-
-pingSpec :: Spec
-pingSpec = describe "the ping it refuses" $ do
-  -- The review's third correction and fifth spec addition. A ping is the one
-  -- action that deliberately spends quota (§14), and its brand is required
-  -- and intentionally selected (§5), so an install asked for the provider it
-  -- does not load refuses rather than redirecting the window.
-  it "runs the loaded brand and refuses the other, naming both" $
-    sequence_
-      [ (variant.variantName, brand, named <$> refusal) `shouldBe` (variant.variantName, brand, expected)
-      | variant <- variants,
-        brand <- [PingCodex, PingClaude],
-        let refusal = pingBrandRefusal (variantMode variant) brand
-            -- Both halves of the message: the brand that was asked for, so
-            -- the operator knows which invocation was refused, and the
-            -- provider this install does load, so they know what to ask for
-            -- instead. A refusal naming only one of them cannot be acted on.
-            named message =
-              ( pingBrandName brand `Data.Text.isInfixOf` message,
-                providerKey variant.variantProvider `Data.Text.isInfixOf` message
-              )
-            expected = if brandOfPing brand == variant.variantBrand then Nothing else Just (True, True)
-      ]
-
-  -- Dual loads whichever brand was named; no-agent is refused before this by
-  -- 'Kanban.CLI.launchModeRefusal' with the message that names the mode, so
-  -- this says nothing about it rather than restating that refusal.
-  it "refuses neither brand in dual or no-agent mode" $
-    sequence_
-      [ (mode', brand, pingBrandRefusal mode' brand) `shouldBe` (mode', brand, Nothing)
-      | mode' <- [DualMode, NoAgentMode],
-        brand <- [PingCodex, PingClaude]
-      ]
-  where
-    brandOfPing PingCodex = CodexSolver
-    brandOfPing PingClaude = ClaudeSolver
