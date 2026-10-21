@@ -15,6 +15,23 @@ created above it.
 
 ### Unreleased
 
+- Removed the drainer, approval and incident controls from the board, and made
+  the application ignore the configuration keys the scripts own (epic #794,
+  child 5, #799). Keys `d`, `a`, `m` and `i` are unbound: the sidebar no longer
+  draws the `drain_prs.py` and `approve_issues.py` controls or answers a click
+  on them, the incidents panel and the direct merge are gone, and the footer,
+  help and details overlay name none of them. The usage sidebar keeps its
+  windows, countdowns, estimates and the `u` update control; a live search
+  still types these letters and the filter panel's `d` still restores its
+  defaults. `Kanban.Drainer`, `Kanban.ApprovalService`, `Kanban.ServiceProcess`
+  and `Kanban.ManagedPaths` are deleted with the UI modules and tests that fed
+  them, and the dashboard no longer polls either service. `config.toml` keys the
+  scripts read -- `[missions]` (also under a repository table),
+  `ping_codex_seconds`, `ping_claude_seconds`, `worker_deadline_seconds`,
+  `coordination_paths` and `direct_publication_paths` -- are accepted with no
+  warning and dropped whatever their value; a misspelled one still warns. The
+  scripts, installers and `models.toml` are untouched, and the owner runs the
+  services from `tools/`.
 - Removed the model roster and the operating mode (epic #794, child 4, #798;
   part 3 of its split). The application no longer reads `models.toml`: a
   missing, malformed, empty or single-provider file neither narrows nor refuses
