@@ -57,6 +57,16 @@ systemctl --user daemon-reload
 
 The installer does not require `sudo`.
 
+Installing also makes sure the repository the job drains has the `merge:hold` label described in
+[Holding a pull request](#holding-a-pull-request): it is created when missing, left alone when
+present, and a creation that lost a race to someone else's counts as done once the labels are
+read again. That is the one GitHub write `install` performs, and it targets the repository the job
+drains, never the tree the scripts came from. If the label still cannot be confirmed the install
+fails naming it, after the job itself is installed and after every refusal the install owns, so
+re-running the installer is the repair. `start`
+refreshes the job's definition without this step, so starting the drainer never waits on GitHub
+for a label. `--dry-run` writes nothing, the label included.
+
 ### Which service manager runs it
 
 The drainer is run by whichever service manager the host has, chosen by probing
@@ -737,7 +747,7 @@ vocabulary:
 | `behind_base` | The branch was behind the default branch. The update was requested; merging waits for a later run. |
 | `mergeability_computing` | GitHub has not finished computing mergeability. |
 | `approved_head_changed` | The stored approval belongs to an older head and no accepted current-head approval marker exists, recovery is deferred while an interrupted merge awaits settlement, or the head moved after approval was established. The pull request is left unmerged. |
-| `not_eligible` | The pull request is closed, still a draft, or targets another branch. |
+| `not_eligible` | The pull request is closed, still a draft, targets another branch, or carries `merge:hold`. The message says which; a hold's names the label. A closed pull request, `changes_requested` and `not_approved` keep their own reasons when `merge:hold` is also attached, so the hold is reported only for a pull request that would otherwise have gone on to readying or merge work, as [below](#holding-a-pull-request). |
 | `run_locked` | Another drainer run holds the repository. The message names it. |
 | `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the unfinished-operation refusal and the default-branch requirement above. |
 | `post_merge_audit_failed` | The merge landed but the post-merge audit found a gate violation. `merged` is `true`. |
@@ -794,7 +804,52 @@ worst a concurrent old run can do is make its report a moment stale.
 
 ## Approval and checks
 
-A pull request must have the `reviewed:approve` label and must not have `reviewed:changes`.
+A pull request must have the `reviewed:approve` label and must not have `reviewed:changes` or
+`merge:hold`. The approval label selects a candidate; it does not by itself merge one, because the
+head, review-marker, check, mergeability and base gates below all still apply.
+
+### Holding a pull request
+
+Approval is the only signal the drainer reads, so on a repository whose drainer runs continuously
+there is otherwise no way to approve a pull request without merging it. Attach the `merge:hold`
+label to keep one out: it means "approved or not, do not merge". The name is fixed and is not a
+configuration key. `install` creates it, as [Install](#install) says.
+
+A pull request carrying it is never merged, readied from draft, or updated from the default branch
+by the drainer, and never has a failed check rerun for it, in a polling pass or with `--pr`. It is left exactly as
+the repository has it, and it opens no incident for the hold itself or for anything the hold kept
+the drainer from acting on:
+
+- **Polling.** It is not a candidate, so it never takes the active lane (a lane it held is released
+  as for any pull request that leaves the queue), and it is not readied from draft. A held pull
+  request whose head moved since approval is not rereviewed, restored or carried forward either,
+  and does not spend the cycle's one recovery turn. Its queue-state entry is kept, so nothing needs
+  resetting when the hold is lifted.
+- **`--pr N`.** It reports `not_eligible` with a message naming `merge:hold` and exits 2, having
+  changed nothing: no merge, no readying, no branch update, no CI rerun, no label change and no
+  incident. A dry run reports the same and does not say it would ready a held draft. Review
+  verdicts are read first, so a held pull request that is closed, has changes requested or lacks
+  approval reports `not_eligible` (closed), `changes_requested` or `not_approved` exactly as it
+  would without the hold.
+- **Read live.** The label is read on every gate and cached nowhere, so adding it after a candidate
+  was selected still stops the merge: it is checked again immediately before the ordinary merge
+  and immediately before the default-branch swap of a merge past a coordination-only base advance,
+  and either reports `not_eligible`. It is also in the post-merge audit, so a hold that arrived in
+  the one gap the re-check cannot close is reported as a `post_merge_audit_failed` gate violation
+  rather than merged silently, the same residual-race contract as every other gate.
+- **No cooldown.** A hold is a skip, never a failure, so it records no consecutive failure and no
+  cooldown that would outlast the label.
+
+The hold does not affect review. The canonical reviews apply and remove `reviewed:*` labels exactly
+as before, and never touch `merge:hold`; the canonical publisher still readies an approved draft as
+part of its own approval, which the hold does not prevent, because the hold is the drainer's and
+not the publisher's. When the drainer is running, apply the hold *before* the review that would
+approve the pull request.
+
+Removing the label makes the pull request eligible again on the next pass, with no restart and no
+other step. Eligible is not merged: the gates above still decide. In particular
+`review-gate.yml` re-runs `review-approved` when a label is added or removed, so the first pass
+after the removal may report `checks_pending` until that run finishes.
 
 The default required checks are:
 
@@ -1200,8 +1255,8 @@ Completing is not deciding. The workflow runs on every synchronize and answers
 "this push changed files this pull request owns" by removing the label, so a
 successful run says only that the policy finished — it is not a review of the
 new head, and the drainer never turns one into a verdict. In particular the
-drainer **adds no label**: it has no path that applies `reviewed:approve` to
-any pull request, so a repository whose workflow publishes no positive
+drainer **adds no label to a pull request**: it has no path that applies
+`reviewed:approve` or `merge:hold` to any pull request, so a repository whose workflow publishes no positive
 content-safe signal simply never carries approval forward.
 
 It fails closed on everything else, and records no approved head in any of
@@ -1232,7 +1287,7 @@ request that becomes eligible while it waits cannot preempt it however much
 lower its number.
 
 The lane is released when the pull request merges or closes, loses its
-approval, gains `reviewed:changes`, develops a merge conflict, exhausts its
+approval, gains `reviewed:changes` or `merge:hold`, develops a merge conflict, exhausts its
 automatic CI reruns, has a required check still missing past its grace period,
 leaves the eligible queue for any other reason, or reaches any of the skips
 above. Selection then restarts at the lowest number — within the same pass, and
@@ -1256,7 +1311,7 @@ an all-blocked queue does not have to advance some unrelated pull request first.
 Recording a merge-conflict or missing-check incident is not an advance, so one
 pass can record more than one — it skips each such candidate in turn. Marking an
 approved draft ready for review is likewise not an advance and still applies to
-every approved draft in the queue. Canonical review publication now normally
+every approved draft in the queue that does not carry `merge:hold`. Canonical review publication now normally
 performs that transition immediately; the drainer keeps this step as a fallback
 for approvals published by older or external tooling.
 
