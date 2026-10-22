@@ -567,6 +567,27 @@ class RefusalAndFailureTests(ApprovedFixture):
         self.assertEqual(error.detail["preserved_blob"], blob_of(raced))
         self.assertIsNotNone(self.fx.pending())
 
+    def test_a_resume_refuses_an_index_entry_staged_since_the_refusal(self):
+        self.mode("refuse")
+        self.approve(EDITED)
+        record = self.fx.pending()
+        staged = EDITED.replace("- line 6\n", "- line 6, staged elsewhere\n")
+        self.fx.write(self.fx.work, staged)
+        run(["git", "add", DOC], self.fx.work)
+        self.fx.write(self.fx.work, EDITED)
+        index = run(["git", "ls-files", "--stage", DOC], self.fx.work)
+        tip = self.fx.origin_tip()
+        self.mode("land")
+        error = self.failure(self.resume)
+        self.assertEqual(error.status, "document-staged")
+        # Refused before the tool ran: the one call is the earlier refusal.
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.fx.origin_tip(), tip)
+        self.assertEqual(self.fx.pending(), record)
+        self.assertEqual(self.fx.applied(), blob_of(EDITED))
+        self.assertEqual(run(["git", "ls-files", "--stage", DOC], self.fx.work), index)
+        self.assertEqual(self.fx.read(self.fx.work), EDITED)
+
     def test_misleading_success_output_never_decides_a_landing(self):
         self.mode("claims-success")
         tip = self.fx.origin_tip()
@@ -1381,6 +1402,85 @@ class LegacyRecordTests(RecordSeedingMixin, ApprovedFixture):
         self.assertEqual(caught.exception.status, "local-resolution-refused")
         self.assertIn("has been changed since", caught.exception.message)
         self.assertIsNotNone(self.fx.pending())
+
+
+class ReviewRegressionTests(RecordSeedingMixin, ApprovedFixture):
+    """Gaps a review reproduced in temporary repositories (PR #836, round 1)."""
+
+    def commit_in_applied_ref(self):
+        commit = run(["git", "rev-parse", "HEAD"], self.fx.work)
+        run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), commit], self.fx.work)
+        return commit
+
+    def test_a_malformed_applied_record_is_reported_by_the_preflight(self):
+        commit = self.commit_in_applied_ref()
+        report = self.preflight()
+        self.assertEqual(report["status"], "pending")
+        self.assertIn("publication", report["pending_kinds"])
+        self.assertEqual(report["record_fault"]["status"], "applied-malformed")
+        self.assertEqual(self.fx.applied(), commit)
+
+    def test_a_malformed_applied_record_is_never_replaced_or_deleted(self):
+        commit = self.commit_in_applied_ref()
+        error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "applied-malformed")
+        self.assertEqual(self.fx.applied(), commit)
+        self.assertEqual(self.fx.read(self.fx.work), NOTES)
+        self.assertIsNone(self.fx.pending())
+        self.assertEqual(self.calls(), [])
+
+    def test_a_valid_legacy_applied_record_is_still_a_predecessor(self):
+        approved.record_applied(self.fx.work, REPOSITORY, DOC, blob_of(NOTES))
+        self.assertEqual(self.preflight()["status"], "clear")
+        self.assertEqual(self.approve(EDITED)["status"], "published")
+        self.assertIsNone(self.fx.applied())
+
+    def test_a_publisher_record_with_a_stale_tip_stops_before_anything_changes(self):
+        orphan = run(["git", "commit-tree", "HEAD^{tree}", "-m", "orphan"], self.fx.work)
+        stored = approved._preserve(self.fx.work, EDITED.encode())
+        commit = publisher.build_commit(self.fx.work, orphan, DOC, stored, "legacy")
+        run(["git", "update-ref", publisher.pending_ref(REPOSITORY, DOC), commit], self.fx.work)
+        report = self.preflight()
+        self.assertEqual(report["record_fault"]["status"], "pending-stale")
+        error = self.failure(self.approve, EDITED, baseline=blob_of(NOTES))
+        self.assertEqual(error.status, "pending-stale")
+        self.assertEqual(self.fx.read(self.fx.work), NOTES)
+        self.assertEqual(self.fx.pending(), commit)
+        self.assertIsNone(self.fx.applied())
+        self.assertEqual(self.calls(), [])
+
+    def test_a_non_ascii_or_quoted_path_publishes_and_verifies_its_receipt(self):
+        for name in ("docs/caf\u00e9.md", 'docs/say "hi".md', "docs/with space.md"):
+            with self.subTest(document=name):
+                self.setUp()
+                self.fx.write(self.fx.work, "# Draft\n\n- one\n", name)
+                baseline = self.preflight(document=name)["working_copy_blob"]
+                text = "# Draft\n\n- one\n- two\n"
+                outcome = self.approve(text, document=name, baseline=baseline)
+                self.assertEqual(outcome["status"], "published", outcome)
+                self.assertEqual(outcome["landed_via"], "receipt")
+                self.assertEqual(self.fx.origin_blob(name), blob_of(text))
+                self.assertIsNone(self.fx.pending(name))
+
+    def test_a_non_ascii_path_resumes_after_an_interruption_before_cleanup(self):
+        name = "docs/caf\u00e9.md"
+        self.fx.write(self.fx.work, "# Draft\n", name)
+        baseline = self.preflight(document=name)["working_copy_blob"]
+        real = approved.settle_landed
+        calls = []
+
+        def dying(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise SimulatedCrash("settle_landed")
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch.object(approved, "settle_landed", dying):
+            with self.assertRaises(SimulatedCrash):
+                self.approve("# Draft\n\n- two\n", document=name, baseline=baseline)
+            outcome = self.resume(document=name)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "receipt")
 
 
 class LocalCheckpointTests(ApprovedFixture):

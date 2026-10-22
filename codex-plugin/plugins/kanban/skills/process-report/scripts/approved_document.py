@@ -972,14 +972,15 @@ def find_receipt(root: Path, remote: str, pending: dict) -> str | None:
     if not matches:
         return None
     receipt = matches[-1]
-    touched = [
-        line
-        for line in git_out(
-            ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", receipt],
-            cwd=root,
-        ).splitlines()
-        if line
-    ]
+    # NUL-delimited, never Git's display form: under the default
+    # core.quotePath a path with a non-ASCII byte or a quote comes back quoted
+    # and escaped, and comparing that to the document's own spelling rejects a
+    # valid receipt.
+    listing = git(
+        ["diff-tree", "-z", "--no-commit-id", "--name-only", "-r", "--root", receipt],
+        cwd=root,
+    ).stdout.decode("utf-8", errors="surrogateescape")
+    touched = [entry for entry in listing.split("\0") if entry]
     if touched != [document]:
         raise DocumentError(
             "receipt-unverifiable",
@@ -1030,7 +1031,7 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
             "landed": True, "via": "already-present", "published_blob": approved,
             "receipt_commit": None,
         }
-    if pending["form"] == FORM_HELPER and not tip_reachable:
+    if not tip_reachable:
         raise DocumentError(
             "pending-stale",
             f"the tip this publication of {document} was recorded against "
@@ -1276,6 +1277,10 @@ def publish_recorded(
             root, owner, branch, document, pending, info, cleared,
             resumed=resumed or "already-landed", tool=None,
         )
+    # Every attempt, not only the one that writes: a resume finds the document
+    # already holding the approved bytes, and an index entry staged since then
+    # is work the tool's settling and the cleanup below would carry or lose.
+    require_unstaged(root, document)
     base = pending["message"] or default_message(document)
     tool = run_publication_tool(
         root, document, pending["approved_blob"], f"{base}\n\n{receipt_line(pending)}"
@@ -1297,6 +1302,30 @@ def publish_recorded(
         root, owner, branch, document, pending, info, cleared,
         resumed=resumed, tool=tool,
     )
+
+
+def validate_applied(root: Path, owner: str, document: str) -> str | None:
+    """The applied record, when there is one and it is usable.
+
+    A record names a blob of applied content. One naming anything else is
+    reported and left exactly where it is: replacing it would destroy the only
+    evidence of what wrote it, and clearing it later would do so silently.
+    """
+    ref = applied_ref(owner, document)
+    recorded = read_ref(root, ref)
+    if not recorded:
+        return None
+    kind = git(["cat-file", "-t", recorded], cwd=root, check=False)
+    if kind.stdout.decode().strip() != "blob":
+        raise DocumentError(
+            "applied-malformed",
+            f"the applied record {ref} names {recorded}, which is not a blob of "
+            "applied content; it cannot be interpreted and is left as it is "
+            "until it is resolved by hand",
+            applied_ref=ref,
+            applied_object=recorded,
+        )
+    return recorded
 
 
 def record_applied_content(root: Path, owner: str, document: str, blob: str) -> str:
@@ -1498,6 +1527,7 @@ def locked_sequence(
     expected_tip: str | None,
 ) -> dict:
     pending = read_pending(root, owner, document)
+    validate_applied(root, owner, document)
     if content is None:
         if pending is None:
             raise DocumentError(
@@ -1672,6 +1702,7 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     record, record_fault = None, None
     try:
         record = read_pending(resolved, owner, document)
+        validate_applied(resolved, owner, document)
     except DocumentError as error:
         record_fault = error
     kinds = []
