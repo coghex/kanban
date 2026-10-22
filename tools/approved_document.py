@@ -917,13 +917,41 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
             pending_commit=commit,
         )
     message_text = fields.get("message")
+    evidence = fields.get("landing")
+    if evidence is not None:
+        fault = landing_evidence_fault(evidence)
+        if fault is not None:
+            raise _malformed(ref, commit, f"carries unusable landing evidence ({fault})")
     return {
         "form": FORM_HELPER, "ref": ref, "commit": commit,
         "repository": owner, "document": document,
         "approved_blob": fields["approved_blob"], "baseline": baseline,
         "rendered_tip": fields["rendered_tip"], "attempt": fields["attempt"],
         "message": message_text if isinstance(message_text, str) else None,
+        "landing_evidence": evidence,
     }
+
+
+def landing_evidence_fault(evidence) -> str | None:
+    """What makes recorded landing evidence unusable, or None.
+
+    The evidence is the one thing that outlives the branch's later edits, so it
+    is held to its shape here and to the repository's history in
+    `verified_evidence`: a record that cannot say where the approved content
+    was seen stops rather than being trusted or ignored.
+    """
+    if not isinstance(evidence, dict):
+        return "it is not an object"
+    if evidence.get("via") not in ("receipt", "already-present"):
+        return f"its via {evidence.get('via')!r} is not a known landing"
+    for name in ("published_blob", "evidence_commit"):
+        value = evidence.get(name)
+        if not isinstance(value, str) or not OID_RE.match(value):
+            return f"its {name} is not an object name"
+    receipt = evidence.get("receipt_commit")
+    if receipt is not None and (not isinstance(receipt, str) or not OID_RE.match(receipt)):
+        return "its receipt_commit is not an object name"
+    return None
 
 
 def new_pending_fields(
@@ -1007,6 +1035,11 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
     remote = remote_ref(branch)
     document = pending["document"]
     approved = pending["approved_blob"]
+    if pending.get("landing_evidence") is not None:
+        # Verified once, durably recorded, and trusted over the branch's
+        # present shape: a later edit that moves the document away from the
+        # landed bytes does not un-land them.
+        return verified_evidence(root, remote, pending)
     tip_reachable = is_ancestor(root, pending["rendered_tip"], remote)
     if pending["form"] == FORM_PUBLISHER:
         if is_ancestor(root, pending["commit"], remote):
@@ -1026,7 +1059,7 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
                 )
             return {
                 "landed": True, "via": "receipt", "published_blob": published,
-                "receipt_commit": receipt,
+                "receipt_commit": receipt, "evidence_commit": receipt,
             }
     # "Nothing to land": the branch carries the approved blob at this path now,
     # or carried it at the tip the record was made against. The second half is
@@ -1040,6 +1073,9 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
                 return {
                     "landed": True, "via": "already-present", "published_blob": approved,
                     "receipt_commit": None,
+                    "evidence_commit": git_out(
+                        ["rev-parse", f"{revision}^{{commit}}"], cwd=root
+                    ),
                 }
     if not tip_reachable:
         raise DocumentError(
@@ -1051,6 +1087,98 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
             rendered_tip=pending["rendered_tip"],
         )
     return {"landed": False, "via": None, "published_blob": None, "receipt_commit": None}
+
+
+def verified_evidence(root: Path, remote: str, pending: dict) -> dict:
+    """The recorded landing, re-verified against the repository, never against
+    the branch's present content.
+
+    The commit where the approved content was seen must still exist and still
+    be in the history of `remote`, and must still carry the published blob at
+    the document's path. Anything less is unverifiable and stops: evidence that
+    cannot be checked is not evidence, and ignoring it would republish.
+    """
+    evidence = pending["landing_evidence"]
+    document = pending["document"]
+    commit = evidence["evidence_commit"]
+    if (
+        git(["cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, check=False).returncode
+        != 0
+        or not is_ancestor(root, commit, remote)
+        or blob_at(root, commit, document) != evidence["published_blob"]
+    ):
+        raise DocumentError(
+            "landing-evidence-unverifiable",
+            f"the landing recorded for {document} names {commit[:12]}, which is "
+            f"not a revision in the history of {remote} that carries the "
+            "published content, so it cannot be trusted; the record is kept",
+            pending_ref=pending["ref"],
+            evidence_commit=commit,
+        )
+    return {
+        "landed": True, "via": evidence["via"],
+        "published_blob": evidence["published_blob"],
+        "receipt_commit": evidence.get("receipt_commit"),
+        "evidence_commit": commit, "recorded": True,
+    }
+
+
+def record_landing(root: Path, pending: dict, info: dict) -> dict:
+    """Write a verified landing into the pending record before any cleanup.
+
+    The record is rewritten under compare-and-swap against the value just read,
+    keeping its tree (and so the approved bytes) and every field, so an
+    interruption after this point resumes from the evidence and never asks the
+    tool again.
+    """
+    fields = {
+        "version": PENDING_VERSION,
+        "repository": pending["repository"],
+        "document": pending["document"],
+        "approved_blob": pending["approved_blob"],
+        "baseline": pending["baseline"],
+        "rendered_tip": pending["rendered_tip"],
+        "attempt": pending["attempt"],
+        "message": pending["message"],
+        "landing": {
+            "via": info["via"],
+            "published_blob": info["published_blob"],
+            "receipt_commit": info["receipt_commit"],
+            "evidence_commit": info["evidence_commit"],
+        },
+    }
+    commit = build_pending_commit(root, pending["document"], fields)
+    proc = git(["update-ref", pending["ref"], commit, pending["commit"]], cwd=root, check=False)
+    if proc.returncode != 0:
+        raise DocumentError(
+            "pending-changed",
+            f"the pending publication for {pending['document']} changed while its "
+            "landing was being recorded; it was left as it is",
+            pending_ref=pending["ref"],
+        )
+    reread = read_pending(root, pending["repository"], pending["document"])
+    if reread is None or reread["commit"] != commit:
+        raise DocumentError(
+            "pending-changed",
+            f"the pending publication for {pending['document']} could not be "
+            "re-read after its landing was recorded",
+            pending_ref=pending["ref"],
+        )
+    return reread
+
+
+def confirm_landing(root: Path, branch: str, pending: dict) -> tuple[dict, dict]:
+    """`landing`, and when it finds a landing nothing durable yet records, record
+    it. Returns the (possibly rewritten) pending record and the landing."""
+    info = landing(root, branch, pending)
+    if (
+        info["landed"]
+        and pending["form"] == FORM_HELPER
+        and pending.get("landing_evidence") is None
+        and info["via"] in ("receipt", "already-present")
+    ):
+        pending = record_landing(root, pending, info)
+    return pending, info
 
 
 # --------------------------------------------------------------------- tool --
@@ -1280,7 +1408,7 @@ def publish_recorded(
 ) -> dict:
     """The record exists and the document holds the approved blob: land it, or
     recognize that it already landed."""
-    info = landing(root, branch, pending)
+    pending, info = confirm_landing(root, branch, pending)
     if info["landed"]:
         cleared = settle_landed(root, owner, branch, document, pending, info)
         return published_outcome(
@@ -1297,7 +1425,7 @@ def publish_recorded(
     )
     try:
         git(["fetch", "origin", branch], cwd=root)
-        info = landing(root, branch, pending)
+        pending, info = confirm_landing(root, branch, pending)
     except DocumentError as error:
         # The push may have succeeded. The record is what a later run verifies
         # against, so it stays and the outcome says the answer is unknown.
@@ -1383,7 +1511,7 @@ def resume_pending(
 ) -> dict:
     """An earlier run recorded a mutation of this document. Finish it, or stop
     with a report: never write something else over it."""
-    info = landing(root, branch, pending)
+    pending, info = confirm_landing(root, branch, pending)
     if pending["approved_blob"] != approved_blob:
         # The caller is approving a different disposition from the one the
         # record names. Publishing the record instead would report success

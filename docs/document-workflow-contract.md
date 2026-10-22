@@ -989,7 +989,20 @@ at this path (the tool's "nothing to land"). A trailer for another attempt or
 another document, or the same bytes at another path, is not a landing. The
 published blob is the receipt commit's own blob for the document, not a later
 tip's, so a same-document advance after the push changes neither the verdict nor
-the blob. Misleading output in either direction decides nothing. Clearing the
+the blob. Misleading output in either direction decides nothing.
+
+**A verified landing is retained, and the record is trusted over history.** The
+first time a landing is verified (a receipt, or the approved bytes already on the
+default branch, whether at the fresh tip or at the tip the record was made
+against), the helper writes that evidence into the pending record — how it was
+established and the commit where the content was seen — under compare-and-swap
+and before any cleanup. Resume, the preflight and the tracker's local-resolution
+check then trust the record, re-verifying only that the named commit is still in
+the history of `origin/<default>` and still carries the published blob. A later
+edit that moves the document away from the landed bytes, however it arrives,
+cannot make a resume run `docs-push` again for a mutation already known to have
+landed. Evidence that is malformed, or names a revision that is gone or no longer
+carries the content, stops with a specific report and keeps the record. Clearing the
 pending record requires the write root to still hold the published blob; when it
 does not, the record stays and the outcome is `landed-but-divergent`.
 

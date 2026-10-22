@@ -918,6 +918,90 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(self.fx.origin_tip(), tip)
         self.assertIsNone(self.fx.pending())
 
+    def revert_document(self):
+        self.fx.upstream_edit(NOTES.replace("- line 8\n", "- line 8, edited later\n"))
+
+    def test_a_noop_landing_after_the_recorded_tip_survives_a_later_revert(self):
+        # PR #836 round 5. Somebody else publishes the approved bytes while the
+        # run is handing them to the tool, which reports "nothing to land"; the
+        # run dies before cleanup; the document then moves away from those
+        # bytes. The landing was verified and recorded, so resume trusts the
+        # record and never asks the tool again.
+        real = approved.run_publication_tool
+
+        def concurrent(*args, **kwargs):
+            self.fx.upstream_edit(EDITED, message="a concurrent publication")
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch.object(approved, "run_publication_tool", concurrent):
+            self.die("settle_landed")
+        self.assertEqual(len(self.calls()), 1)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(record["landing_evidence"]["via"], "already-present")
+        self.assertEqual(record["landing_evidence"]["published_blob"], blob_of(EDITED))
+        self.revert_document()
+        tip = self.fx.origin_tip()
+        report = self.preflight()
+        self.assertTrue(report["already_landed"])
+        outcome = self.approve(EDITED)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "already-present")
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.fx.origin_tip(), tip)
+        self.assertIsNone(self.fx.pending())
+
+    def test_an_older_preflight_tip_cannot_make_resume_republish_a_noop_landing(self):
+        old_tip = self.fx.origin_tip()
+        self.fx.upstream_edit(EDITED)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        self.die("settle_landed", expected_tip=old_tip)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(record["rendered_tip"], old_tip)
+        self.assertEqual(record["landing_evidence"]["via"], "already-present")
+        self.revert_document()
+        outcome = self.approve(EDITED)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(self.calls(), [])
+        self.assertIsNone(self.fx.pending())
+
+    def test_a_receipt_landing_is_recorded_before_cleanup(self):
+        self.die("settle_landed")
+        evidence = approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"]
+        self.assertEqual(evidence["via"], "receipt")
+        self.assertEqual(evidence["evidence_commit"], evidence["receipt_commit"])
+
+    def test_recorded_evidence_that_is_malformed_or_unverifiable_still_stops(self):
+        self.die("settle_landed")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        good = record["landing_evidence"]
+        for name, evidence, status in (
+            ("not an object", "landed", "pending-malformed"),
+            ("unknown via", dict(good, via="because I said so"), "pending-malformed"),
+            ("bad commit", dict(good, evidence_commit="xyz"), "pending-malformed"),
+            ("missing commit", dict(good, evidence_commit="a" * 40), "landing-evidence-unverifiable"),
+            ("wrong content", dict(good, published_blob=blob_of("other\n")),
+             "landing-evidence-unverifiable"),
+        ):
+            with self.subTest(case=name):
+                fields = {
+                    "version": 1, "repository": REPOSITORY, "document": DOC,
+                    "approved_blob": record["approved_blob"], "baseline": record["baseline"],
+                    "rendered_tip": record["rendered_tip"], "attempt": record["attempt"],
+                    "message": record["message"], "landing": evidence,
+                }
+                commit = approved.build_pending_commit(self.fx.work, DOC, fields)
+                run(["git", "update-ref", record["ref"], commit], self.fx.work)
+                calls = len(self.calls())
+                report = self.preflight()
+                self.assertEqual(report["status"], "pending")
+                self.assertIn(
+                    report["record_fault"]["status"], (status, "pending-malformed")
+                )
+                error = self.failure(self.resume)
+                self.assertEqual(error.status, status)
+                self.assertEqual(self.fx.pending(), commit)
+                self.assertEqual(len(self.calls()), calls)
+
     def test_a_same_document_advance_after_the_push_is_still_published(self):
         self.die("settle_landed")
         receipt_blob = self.fx.origin_blob()
