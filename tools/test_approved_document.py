@@ -1567,6 +1567,33 @@ class LocalCheckpointTests(ApprovedFixture):
         self.assertEqual(resolved["status"], "resolved")
         self.assertNotIn("publication_obligation", resolved)
 
+    def test_a_landing_hidden_by_a_later_advance_still_resolves_on_the_branch_only(self):
+        # PR #836 round 2. The helper publishes and dies before cleanup; a later
+        # upstream edit removes the terminal entry the transaction needs. The
+        # applied content is no longer the branch tip, but it did land: local
+        # resolution would clear the transaction and the preflight with it.
+        ref = self.confirmed_transaction()
+
+        def dying(*args, **kwargs):
+            raise SimulatedCrash("settle_landed")
+
+        with unittest.mock.patch.object(approved, "settle_landed", dying):
+            with self.assertRaises(SimulatedCrash):
+                self.approve(self.STATUS)
+        self.fx.upstream_edit(NOTES + "\nthe entry is gone\n")
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("already carried the applied content", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.action_resolve(
+                self.fx.work, ref, *tracker.read_record(self.fx.work, ref),
+                "branch", "master",
+            )
+        self.assertEqual(caught.exception.status, "resolution-unverified")
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
     def test_a_malformed_applied_record_licenses_nothing(self):
         ref = self.confirmed_transaction()
         self.fx.write(self.fx.work, self.STATUS)

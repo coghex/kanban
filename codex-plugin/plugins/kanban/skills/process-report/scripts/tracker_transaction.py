@@ -1377,8 +1377,9 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
       here, and the absence of a reference is what says nobody applied it;
     - a document changed since the helper wrote it is somebody else's later
       edit, whatever it started as; and
-    - a document the branch already carries is landed, not locally applied, so
-      it resolves against the branch.
+    - a document whose applied content ever reached the branch is landed, not
+      locally applied, so it resolves against the branch, even if a later edit
+      has since replaced it there.
 
     Whether the document has a direct-publication lane is deliberately not a
     question this module asks. That is the publication tool's decision, taken
@@ -1421,15 +1422,31 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
             f"{document} is not the content the approved-document helper applied "
             f"({present} rather than {recorded}), so it has been changed since"
         )
-    landed = git(
-        ["rev-parse", "--verify", "--quiet", f"origin/{branch}:{document}"],
+    # "Not landed" is a statement about the branch's history, not about its tip:
+    # a later edit can replace the landed content (and the entry the tracker
+    # transaction needs) while the landing itself stays a fact. So the content's
+    # blob is looked for in every revision of the document that reached the
+    # branch, and a history that cannot be read refuses rather than guesses.
+    history = git(
+        [
+            "log", "--no-renames", "--raw", "--no-abbrev", "--format=",
+            f"origin/{branch}", "--", f":(literal){document}",
+        ],
         cwd=root, check=False,
-    ).stdout.decode().strip()
-    if landed == recorded:
+    )
+    if history.returncode != 0:
         return False, (
-            f"origin/{branch} already carries the applied content of {document}, "
-            "so it is landed rather than locally applied and is verified there"
+            f"the history of {document} on origin/{branch} could not be read, so "
+            "whether the applied content already landed cannot be decided"
         )
+    for line in history.stdout.decode(errors="replace").splitlines():
+        fields = line.split("\t", 1)[0].split()
+        if len(fields) >= 5 and fields[3] == recorded:
+            return False, (
+                f"origin/{branch} already carried the applied content of "
+                f"{document} at some revision, so it is landed rather than "
+                "locally applied and is verified on the branch"
+            )
     return True, f"{document} was applied locally and has not landed on {branch}"
 
 
