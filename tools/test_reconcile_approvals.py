@@ -41,6 +41,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import approve_issues  # noqa: E402
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND = REPO_ROOT / "tools" / "approve_issues.py"
 TRIAGE_SOURCE = REPO_ROOT / "tools" / "command_sources" / "triage.md"
@@ -389,6 +394,9 @@ class CurrentApprovalTests(ReconcileHarness):
 
         second = ReconcileHarness("run")
         second.setUp()
+        # Built by hand, so nothing runs its registered cleanups -- including
+        # the one that removes its temporary directory -- unless this does.
+        self.addCleanup(second.doCleanups)
         second.state(7, make_issue(7, labels=[]), stale)
         result = second.run_reconcile([7])
 

@@ -51,6 +51,11 @@ import install_drainer
 import kanban_config
 import service_manager
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 # Captured before any patching, so a fixture's own runner can still delegate
 # the commands it is not standing in for — `git`, above all, which every
@@ -61,6 +66,22 @@ REAL_CONTROLLER_RUN = drain_prs_service.run_command
 # manager, and a command that escaped this set would be visible as an argument
 # vector this suite never recorded.
 MANAGED_COMMANDS = frozenset({"launchctl", "systemctl"})
+
+
+def _reap(process):
+    """End a piped child a test started and close the pipes it holds.
+
+    `kill` alone leaves the child's stdout and stderr to the finalizer, which
+    reports each as a `ResourceWarning` during whatever test runs next. Closing
+    the pipes does not wait on the child's output, so a grandchild that still
+    holds the other end cannot stall a cleanup.
+    """
+    process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=30)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
 
 
 def _completed(args):
@@ -3079,7 +3100,7 @@ class QueuedRecordWriterTests(RelocationFixture):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(process.kill)
+        self.addCleanup(_reap, process)
         self.process = process
         self.wait_for(self.ready, "the queued writer never bound its paths")
         return process
@@ -3502,7 +3523,7 @@ class PreGateWriterTests(PreGateControllerFixture):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(process.kill)
+        self.addCleanup(_reap, process)
         self.process = process
         self.wait_for(self.ready, "the pre-gate writer never bound its paths")
         return process
@@ -3929,7 +3950,7 @@ class StaleInvocationFixture(PreGateControllerFixture):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(self.process.kill)
+        self.addCleanup(_reap, self.process)
         self.wait_for(self.ready, "the stale controller never bound its paths")
         self.assertEqual(
             self.ready.read_text(encoding="utf-8"), str(self.legacy_record)
@@ -4397,7 +4418,7 @@ class RelocatedDrainerStopFixture(PreGateControllerFixture):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(process.kill)
+        self.addCleanup(_reap, process)
         return process
 
     def start_relocated_drainer(self):
@@ -4432,7 +4453,8 @@ class RelocatedDrainerStopFixture(PreGateControllerFixture):
         try:
             self.drainer.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            self.drainer.kill()
+            pass
+        _reap(self.drainer)
 
     def wait_for(self, path, message):
         """`PreGateControllerFixture`'s wait, taught which process to blame.
@@ -4952,7 +4974,7 @@ class LockDescriptorTests(PreGateControllerFixture):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(process.kill)
+        self.addCleanup(_reap, process)
         self.process = process
         self.wait_for(self.ready, "the holder never bound its paths")
         self.assertEqual(
@@ -5461,7 +5483,7 @@ class ProcessDescriptorTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 text=True,
             )
-            self.addCleanup(process.kill)
+            self.addCleanup(_reap, process)
             self.assertEqual(process.stdout.read(4), "open")
             holders, reason = install_drainer._processes_holding_open(held)
             self.assertIsNone(reason)

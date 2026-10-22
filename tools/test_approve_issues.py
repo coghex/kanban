@@ -27,6 +27,11 @@ from unittest import mock
 import approve_issues
 import kanban_config
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_SOURCE = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
@@ -1686,8 +1691,11 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             for runner in runners
         ]
         for worker in workers:
-            worker.wait(timeout=90)
-            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+            # Closing the pipes is the test's job; leaving them to the
+            # finalizer is a ResourceWarning.
+            with worker:
+                worker.wait(timeout=90)
+                self.assertEqual(worker.returncode, 0, worker.stderr.read())
 
         status, entries = module.read_reviewer_ledger(path)
         self.assertEqual(status, module.LEDGER_INTACT)
