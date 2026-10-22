@@ -813,7 +813,9 @@ head, review-marker, check, mergeability and base gates below all still apply.
 Approval is the only signal the drainer reads, so on a repository whose drainer runs continuously
 there is otherwise no way to approve a pull request without merging it. Attach the `merge:hold`
 label to keep one out: it means "approved or not, do not merge". The name is fixed and is not a
-configuration key. `install` creates it, as [Install](#install) says.
+configuration key, and it is matched case-insensitively, as GitHub treats label names, so an
+existing `Merge:Hold` that `install` accepts holds too. `install` creates it, as
+[Install](#install) says.
 
 A pull request carrying it is never merged, readied from draft, or updated from the default branch
 by the drainer, and never has a failed check rerun for it, in a polling pass or with `--pr`. It is left exactly as
