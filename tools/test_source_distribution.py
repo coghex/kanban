@@ -497,8 +497,14 @@ _SHIM_RESPONSES = [
     {"binary": "claude", "match": ["plugin", "list", "--json"], "stdout": "[]"},
     # launchd: no job of ours is loaded, and loading one succeeds.
     {"binary": "launchctl", "match": ["print"], "exit": 1},
-    # The repository has no `merge:hold` label yet, and creating it succeeds.
-    {"binary": "gh", "match": ["label", "list"], "stdout": "[]"},
+    # The repository has no `merge:hold` label yet -- the exact-name lookup
+    # answers 404 -- and creating it succeeds.
+    {
+        "binary": "gh",
+        "match": ["api"],
+        "stdout": '{"message": "Not Found", "status": "404"}',
+        "exit": 1,
+    },
     # systemd: the user manager is reachable, and knows no unit of ours.
     {
         "binary": "systemctl",

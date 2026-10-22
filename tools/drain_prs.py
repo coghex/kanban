@@ -5942,9 +5942,18 @@ def request_base_update(
     the ordinary behind-base path and the fallbacks from a merge past a
     coordination-only advance end here, so a candidate that did not merge is
     always left with an update in flight rather than stranded.
+
+    The hold is read from the snapshot every caller hands in, and refused here
+    rather than only at the callers that read it first: the fallback from a
+    rejected merge past a base advance asks with a snapshot taken after the
+    rejection, which can carry a hold the one before it did not.
     """
     number = pr["number"]
     head = pr["headRefOid"]
+    if has_label(pr, HOLD_LABEL):
+        log(f"PR #{number}: carries {HOLD_LABEL}; not updating its branch")
+        set_outcome(report, "not_eligible", describe_hold(number))
+        return False
     entry = state["prs"].get(str(number))
     pending = entry.get("branch_update_attempt") if isinstance(entry, dict) else None
     if isinstance(pending, dict):

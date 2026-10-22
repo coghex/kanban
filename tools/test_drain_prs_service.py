@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -5595,22 +5596,31 @@ class FakeGithubLabels:
     """A repository's labels behind the `gh` calls `ensure_hold_label` makes.
 
     Stands in for `run_command`, so nothing here reaches a network, and records
-    every call so a case can say which repository it was aimed at.
+    every call so a case can say which repository it was aimed at. The lookup
+    is exact-name, as GitHub's is, and is not bounded by any page size.
     """
 
-    def __init__(self, labels=(), *, create_fails=False, create_races=False):
+    def __init__(self, labels=(), *, create_fails=False, create_races=False,
+                 lookup_error=None):
         self.labels = set(labels)
         self.create_fails = create_fails
-        # Someone else creates the label between this run's list and create:
-        # the create is refused, and the next list shows the label.
+        # Someone else creates the label between this run's lookup and create:
+        # the create is refused, and the next lookup finds the label.
         self.create_races = create_races
+        # A lookup that fails for a reason other than the label being absent.
+        self.lookup_error = lookup_error
         self.calls = []
 
     def __call__(self, args, *, check=True):
         self.calls.append(list(args))
-        if args[:3] == ["gh", "label", "list"]:
+        if args[:2] == ["gh", "api"]:
+            if self.lookup_error is not None:
+                return _completed(1, stderr=self.lookup_error)
+            name = urllib.parse.unquote(args[2].rsplit("/", 1)[1])
+            if name in self.labels:
+                return _completed(stdout=json.dumps({"name": name}))
             return _completed(
-                stdout=json.dumps([{"name": name} for name in sorted(self.labels)])
+                1, stdout='{"message":"Not Found"}', stderr="gh: Not Found (HTTP 404)"
             )
         if args[:3] == ["gh", "label", "create"]:
             if self.create_races:
@@ -5651,11 +5661,24 @@ class HoldLabelProvisioningTests(unittest.TestCase):
         self.assertEqual(create[create.index("--repo") + 1], "acme/widgets")
         self.assertIn("merge:hold", fake.labels)
         # Every call names the job's repository and no other.
-        for call in fake.calls:
-            self.assertEqual(call[call.index("--repo") + 1], "acme/widgets")
+        lookup = fake.calls[0]
+        self.assertEqual(
+            lookup, ["gh", "api", "repos/acme/widgets/labels/merge%3Ahold"]
+        )
 
     def test_an_existing_label_is_left_alone(self):
         fake = FakeGithubLabels({"merge:hold", "bug"})
+
+        result = self.ensure(fake)
+
+        self.assertEqual(result, {"label": "merge:hold", "created": False})
+        self.assertEqual(fake.creations(), [])
+
+    def test_an_existing_label_in_a_repository_with_many_labels_is_found(self):
+        # A label list is bounded by a page size; the lookup is not, so a
+        # repository past that bound neither re-creates the label nor fails
+        # every install with "already exists".
+        fake = FakeGithubLabels({f"label-{n}" for n in range(500)} | {"merge:hold"})
 
         result = self.ensure(fake)
 
@@ -5680,7 +5703,18 @@ class HoldLabelProvisioningTests(unittest.TestCase):
         self.assertIn("acme/widgets", str(raised.exception))
         self.assertIn("403", str(raised.exception))
 
-    def test_an_unreadable_label_listing_fails_rather_than_guessing(self):
+    def test_a_lookup_that_fails_for_another_reason_is_an_error_not_a_miss(self):
+        fake = FakeGithubLabels(lookup_error="gh auth login required")
+
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            self.ensure(fake)
+
+        self.assertIn("merge:hold", str(raised.exception))
+        self.assertIn("auth", str(raised.exception))
+        # Nothing was created on a guess.
+        self.assertEqual(fake.creations(), [])
+
+    def test_an_unreadable_lookup_fails_rather_than_guessing(self):
         def garbled(args, *, check=True):
             return _completed(stdout="<html>captive portal</html>")
 

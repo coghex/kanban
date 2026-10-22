@@ -3099,8 +3099,10 @@ class SinglePrMergeHoldTests(MergeHoldFixture):
         self.assertEqual(result["reason"], "not_eligible")
         self.assert_left_alone()
 
-    def test_the_hold_does_not_change_what_the_review_publisher_sees(self):
+    def test_the_drainer_writes_no_label_on_a_held_pr(self):
         # The drainer reads verdict labels and writes none, hold or no hold.
+        # What the canonical publisher does to a held pull request is pinned in
+        # `tools/test_pr_review_draft_transition.py`.
         self.script_pr_view({"labels": [APPROVED, HOLD]})
 
         self.run_single()

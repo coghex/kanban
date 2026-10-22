@@ -17,6 +17,7 @@ import threading
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -2237,25 +2238,40 @@ HOLD_LABEL_COLOR = "FBCA04"
 HOLD_LABEL_DESCRIPTION = "Approved or not, the PR drainer must not merge this"
 
 
-def repository_label_names(job: DrainerJob) -> set[str]:
+def hold_label_exists(job: DrainerJob) -> bool:
+    """Whether the job's repository has the hold label, by exact name.
+
+    A lookup of that one label rather than a read of the repository's label
+    list: a list is bounded by a page size, and a repository whose labels
+    outgrew it would report an existing `merge:hold` missing, try to create it,
+    be told it already exists, and fail every install from then on. Only a
+    missing label answers "no"; any other failure is an error, never a guess.
+    """
     proc = run_command(
         [
             "gh",
-            "label",
-            "list",
-            "--repo",
-            job.identity,
-            "--limit",
-            "200",
-            "--json",
-            "name",
-        ]
+            "api",
+            f"repos/{job.identity}/labels/{urllib.parse.quote(HOLD_LABEL, safe='')}",
+        ],
+        check=False,
     )
-    try:
-        return {item["name"] for item in json.loads(proc.stdout)}
-    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+    detail = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    if proc.returncode != 0:
+        if "404" in detail or "Not Found" in detail:
+            return False
         raise ServiceError(
-            f"Could not read the labels of {job.identity}: {proc.stdout!r}"
+            f"Could not look up the {HOLD_LABEL!r} label in {job.identity}: "
+            f"{detail.strip() or 'unknown error'}"
+        )
+    try:
+        document = json.loads(proc.stdout)
+        return isinstance(document, dict) and (
+            str(document.get("name", "")).casefold() == HOLD_LABEL.casefold()
+        )
+    except json.JSONDecodeError as exc:
+        raise ServiceError(
+            f"Could not read the {HOLD_LABEL!r} label of {job.identity}: "
+            f"{proc.stdout!r}"
         ) from exc
 
 
@@ -2265,15 +2281,16 @@ def ensure_hold_label(job: DrainerJob) -> dict[str, Any]:
 
     The one GitHub write `install` performs. Created when missing, left alone
     when present, and a creation that lost a race to someone else's counts as
-    success once the labels are read again -- the same shape as
-    `approve_issues.ensure_verdict_labels`. When the label still cannot be
+    success once it is looked up again -- the same shape as
+    `approve_issues.ensure_verdict_labels`, but by exact name rather than from
+    a bounded list. When the label still cannot be
     confirmed the install fails naming it, rather than reporting an install
     whose `merge:hold` would silently do nothing.
 
     Scoped to `job.identity`, the repository the job drains, and never to the
     checkout the scripts were installed from.
     """
-    if HOLD_LABEL in repository_label_names(job):
+    if hold_label_exists(job):
         return {"label": HOLD_LABEL, "created": False}
     proc = run_command(
         [
@@ -2291,7 +2308,7 @@ def ensure_hold_label(job: DrainerJob) -> dict[str, Any]:
         check=False,
     )
     if proc.returncode != 0:
-        if HOLD_LABEL not in repository_label_names(job):
+        if not hold_label_exists(job):
             detail = (proc.stderr or proc.stdout or "").strip() or "unknown error"
             raise ServiceError(
                 f"Could not create the {HOLD_LABEL!r} label in {job.identity}: "

@@ -1248,10 +1248,12 @@ reimplement the removal, and `--check` remains read-only.
   its own approval (§2.2), and finalization (§2.10) is unchanged. The label's
   name is fixed, not configuration. Because the drainer **adds no label to a
   pull request**, the one GitHub write on this surface is the controller's
-  `install`, which runs `gh label list` and, when `merge:hold` is missing,
-  `gh label create` against the repository the job drains — never the tree the
-  scripts came from — treats a concurrent creation as success once the labels
-  are read again, and fails naming the label when it cannot confirm it exists.
+  `install`, which looks the label up by exact name with `gh api` — never from
+  a bounded label list — and, when `merge:hold` is missing, runs
+  `gh label create` against the repository the job drains, never the tree the
+  scripts came from. It treats a concurrent creation as success once the label
+  is looked up again, and fails naming the label when it cannot confirm it
+  exists.
   It runs after the job is installed, so every refusal the install owns comes
   first and nothing is held under its installation lock. `tools/install_drainer.py` reaches it through
   that controller step, and `start`'s definition refresh does not. Covered by
