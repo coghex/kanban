@@ -998,11 +998,15 @@ class PortableBackendTests(unittest.TestCase):
             'PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")',
             source,
         )
+        # The persona comes from the same cell (#827), not from a literal.
+        self.assertIn(
+            'gate_display("claude", "APPROVE_ISSUES_CLAUDE_DISPLAY_NAME")', source
+        )
         roster = tomllib.loads(
             (REPO_ROOT / "models.toml.example").read_text(encoding="utf-8")
         )
         self.assertEqual(
-            roster["roles"]["issue_gate"]["claude"]["model"], "claude-fable-5-1"
+            roster["roles"]["issue_gate"]["claude"]["model"], "claude-opus-5-5"
         )
 
 

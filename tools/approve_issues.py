@@ -61,8 +61,8 @@ DEFAULT_INTERVAL_SECONDS = 60
 RETIRED_REVIEWER_CELLS: dict[str, tuple[str, ...]] = {
     "codex": ("gpt-6-astra@xhigh", "gpt-5.6-sol@xhigh", "gpt-5.6-terra@xhigh",
               "gpt-5.5@xhigh"),
-    "claude": ("claude-fable-5-1@xhigh", "claude-opus-5@xhigh",
-               "claude-fable-5@xhigh"),
+    "claude": ("claude-fable-5-1@high", "claude-fable-5-1@xhigh",
+               "claude-opus-5@xhigh", "claude-fable-5@xhigh"),
 }
 # Retained spellings for the three this file named individually before the
 # table above existed.
@@ -129,6 +129,21 @@ def gate_effort(provider: str, variable: str) -> str:
         return override
     assignment = ISSUE_GATE_ASSIGNMENTS.get(provider)
     return assignment.effort if assignment else UNRESOLVED_ASSIGNMENT_VALUE
+
+
+def gate_display(provider: str, variable: str) -> str:
+    """The name a reviewer signs with: the override, else the roster's label.
+
+    The roster is the single owner of what a reviewer is called, as it is of
+    what runs, so the default is the `issue_gate` assignment's `display`, never
+    a model name spelled in this file. An unresolved assignment carries the
+    same sentinel the model and effort do.
+    """
+    override = os.environ.get(variable)
+    if override:
+        return override
+    assignment = ISSUE_GATE_ASSIGNMENTS.get(provider)
+    return assignment.display if assignment else UNRESOLVED_ASSIGNMENT_VALUE
 
 
 # The current canonical reviewer assignment, per provider: what runs, and what
@@ -366,13 +381,13 @@ class Reviewer:
 
 CODEX_REVIEWER = Reviewer(
     "codex",
-    os.environ.get("APPROVE_ISSUES_CODEX_DISPLAY_NAME", "GPT-6-Astra"),
+    gate_display("codex", "APPROVE_ISSUES_CODEX_DISPLAY_NAME"),
     CODEX_MODEL,
     CODEX_EFFORT,
 )
 CLAUDE_REVIEWER = Reviewer(
     "claude",
-    os.environ.get("APPROVE_ISSUES_CLAUDE_DISPLAY_NAME", "Claude Fable 5.1"),
+    gate_display("claude", "APPROVE_ISSUES_CLAUDE_DISPLAY_NAME"),
     CLAUDE_MODEL,
     CLAUDE_EFFORT,
 )
@@ -1414,8 +1429,9 @@ def reviewer_for_key(key: str) -> Reviewer:
 # persona changes -- `rereview_reviewers` computes the rereview route from
 # them, and a v2 review that predates the `verdicts=` marker field has nowhere
 # else to recover a per-reviewer verdict from. Dropping a name here strands
-# every such review's route, so names are only ever added. The current
-# compiled default is listed too rather than left to the resolution above: an
+# every such review's route, so names are only ever added. The names the
+# compiled defaults signed with before the roster supplied them stay listed,
+# and `reviewer_display_names` adds the roster's current label to them: an
 # operator who sets APPROVE_ISSUES_*_DISPLAY_NAME must still read back the
 # markers signed before they set it.
 HISTORICAL_REVIEWER_DISPLAY_NAMES: dict[str, tuple[str, ...]] = {
@@ -1428,8 +1444,12 @@ def reviewer_display_names(key: str) -> list[str]:
     reviewer = reviewer_for_key(key)
     names = [reviewer.display_name]
     # The configured persona first -- an operator's own
-    # APPROVE_ISSUES_*_DISPLAY_NAME is what this run signs with -- then every
+    # APPROVE_ISSUES_*_DISPLAY_NAME is what this run signs with -- then the
+    # roster's current label, which an override does not retire, then every
     # retired one it does not already spell.
+    assignment = ISSUE_GATE_ASSIGNMENTS.get(key)
+    if assignment and assignment.display not in names:
+        names.append(assignment.display)
     for name in HISTORICAL_REVIEWER_DISPLAY_NAMES.get(key, ()):
         if name not in names:
             names.append(name)
