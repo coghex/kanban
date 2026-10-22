@@ -912,6 +912,31 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(self.fx.read(self.fx.work), EDITED)
         self.assertIsNone(self.fx.pending())
 
+    def test_a_receipt_reachable_only_through_a_merges_second_parent_is_found(self):
+        # PR #836 round 3. A path-limited log simplifies history, so a merge that
+        # kept an older copy of the document through its first parent hides a
+        # receipt reachable through its second, and resume would publish again.
+        self.die("settle_landed")
+        receipt = self.fx.origin_tip()
+        base = run(["git", "rev-parse", f"{receipt}~1"], self.fx.primary)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        run(["git", "checkout", "-q", "-B", "side", base], self.fx.primary)
+        self.fx.write(self.fx.primary, "# Other, edited\n", OTHER)
+        run(["git", "commit", "-qam", "an unrelated edit on a side line"], self.fx.primary)
+        run(["git", "merge", "-q", "-s", "ours", "--no-edit", receipt], self.fx.primary)
+        run(["git", "push", "-q", "origin", "side:master"], self.fx.primary)
+        self.assertEqual(self.fx.origin_blob(), blob_of(NOTES))
+        self.assertEqual(
+            run(["git", "merge-base", "--is-ancestor", receipt, "master"], self.fx.origin) or "ok",
+            "ok",
+        )
+        outcome = self.approve(EDITED)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "receipt")
+        self.assertEqual(outcome["receipt_commit"], receipt)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertIsNone(self.fx.pending())
+
     def test_landing_with_a_write_root_that_moved_on_keeps_the_record_and_says_so(self):
         self.die("settle_landed", )
         self.fx.upstream_edit(EDITED.replace("- line 7\n", "- line 7, a later advance\n"))
@@ -1593,6 +1618,53 @@ class LocalCheckpointTests(ApprovedFixture):
             )
         self.assertEqual(caught.exception.status, "resolution-unverified")
         self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
+    def test_a_merged_landing_hidden_by_a_later_advance_resolves_on_the_branch_only(self):
+        # PR #836 round 3. The tool publishes merged content and stops before
+        # `--keep` settles the file, so the applied blob never appears upstream
+        # and the working copy still holds it. Only the receipt proves the
+        # landing, and the tracker has to ask for it.
+        ref = self.confirmed_transaction()
+        self.fx.upstream_edit(UPSTREAM_ELSEWHERE)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        self.mode("dies-before-keep")
+        error = self.failure(self.approve, self.STATUS)
+        self.assertEqual(error.status, "landed-but-divergent")
+        self.assertNotEqual(self.fx.origin_blob(), blob_of(self.STATUS))
+        self.fx.upstream_edit(UPSTREAM_ELSEWHERE + "\nthe entry is gone\n")
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("landed on master", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.action_resolve(
+                self.fx.work, ref, *tracker.read_record(self.fx.work, ref),
+                "branch", "master",
+            )
+        self.assertEqual(caught.exception.status, "resolution-unverified")
+
+    def test_a_recorded_publication_that_cannot_be_verified_refuses_local_resolution(self):
+        ref = self.confirmed_transaction()
+        self.mode("refuse")
+        self.approve(self.STATUS)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        orphan = run(["git", "commit-tree", "HEAD^{tree}", "-m", "orphan"], self.fx.work)
+        self.helper_replacement_for(record, orphan)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("could not be verified", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
+    def helper_replacement_for(self, record, rendered_tip):
+        """The same record, now naming a tip outside the branch's history."""
+        fields = approved.new_pending_fields(
+            REPOSITORY, DOC, record["approved_blob"], record["baseline"],
+            rendered_tip, "m",
+        )
+        commit = approved.build_pending_commit(self.fx.work, DOC, fields)
+        run(["git", "update-ref", record["ref"], commit], self.fx.work)
 
     def test_a_malformed_applied_record_licenses_nothing(self):
         ref = self.confirmed_transaction()

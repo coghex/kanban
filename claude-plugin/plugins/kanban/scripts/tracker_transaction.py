@@ -32,12 +32,12 @@ working, and almost none of them track this file, so it is a tracked plugin
 asset in its own right: `tools/tracker_transaction.py` is the source and
 byte-identical copies ship in both bundles. The document-write modules load
 this one from beside themselves to report both outstanding records from a
-single preflight; this one loads none of them (issue #830), so the
-dependency runs one way and a bundle needs no particular sibling for the
-tracker half to work. The one fact it needs from the document side — which
-content the approved-document helper applied locally and has not landed — is
+single preflight. This one no longer loads the publisher (issue #830). The
+content the approved-document helper applied locally and has not landed is
 read from the `refs/kanban/applied-locally` reference both of them key
-identically, and tools/test_approved_document.py pins that key.
+identically (tools/test_approved_document.py pins that key), and whether a
+recorded publication has landed is asked of the helper on the one local
+resolution path that needs it, failing closed when it cannot answer.
 
 ## The record is repository-shared, not worktree-local
 
@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -1358,6 +1359,54 @@ def applied_ref(repository: str, document: str) -> str:
     return f"{APPLIED_NAMESPACE}/{record_key(repository, document)}"
 
 
+def approved_document_module():
+    """tools/approved_document.py, loaded from beside this file.
+
+    Asked one question only it can answer: whether a recorded publication has
+    already landed, which for a three-way merge is decided by a receipt on the
+    branch and not by any blob this module could name. That module loads this
+    one for its preflight, and this one loads it only here, on the local
+    resolution path, which that module never reaches; the two loads do not
+    recur.
+    """
+    source = Path(__file__).resolve().parent / "approved_document.py"
+    spec = importlib.util.spec_from_file_location("_kanban_approved_for_tracker", source)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"no loader for {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def recorded_publication_landed(root: Path, record: dict, branch: str):
+    """(landed, why) for the publication the helper recorded, if it recorded one.
+
+    Fails closed: a record that cannot be read, a module that cannot be loaded,
+    or a landing that cannot be verified is reported as undecided, and an
+    undecided landing may not license a local resolution.
+    """
+    ref = pending_publication_ref(record["repository"], record["document"])
+    recorded = git(
+        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
+    ).stdout.decode().strip()
+    if not recorded:
+        return False, None
+    try:
+        module = approved_document_module()
+        pending = module.read_pending(root, record["repository"], record["document"])
+        info = module.landing(root, branch, pending)
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        return None, (
+            f"whether the publication recorded at {ref} landed could not be "
+            f"verified ({getattr(error, 'message', error)})"
+        )
+    return info["landed"], (
+        f"the publication recorded at {ref} landed on {branch} ({info['via']})"
+        if info["landed"]
+        else None
+    )
+
+
 def pending_publication_ref(repository: str, document: str) -> str:
     return f"{PENDING_PUBLICATION_NAMESPACE}/{record_key(repository, document)}"
 
@@ -1447,6 +1496,14 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
                 f"{document} at some revision, so it is landed rather than "
                 "locally applied and is verified on the branch"
             )
+    landed, why = recorded_publication_landed(root, record, branch)
+    if landed is None:
+        return False, why
+    if landed:
+        return False, (
+            f"{why}, so {document} is landed rather than locally applied and is "
+            "verified on the branch"
+        )
     return True, f"{document} was applied locally and has not landed on {branch}"
 
 

@@ -31,6 +31,7 @@ behavior beyond a clean landing:
     claims-success             prints a landing and exits 0 without publishing
     pushed-but-failed          publishes, then exits 2 with an error
     racing-edit                the file changes before the tool reads it
+    dies-before-keep           publishes, then stops before `--keep` settles the file
     lacks-expect, lacks-keep   `--help` omits that flag
 """
 
@@ -148,6 +149,9 @@ def main(args):
     git("fetch", "-q", "origin", DEFAULT)
     if pushed.returncode:
         print("docs-push: could not push; nothing else changed", file=sys.stderr)
+        return 2
+    if MODE == "dies-before-keep":
+        print("docs-push: interrupted while settling the worktree", file=sys.stderr)
         return 2
     can_fast_forward = git("merge-base", "--is-ancestor", "HEAD", upstream, check=False).returncode == 0
     if keep and not can_fast_forward:

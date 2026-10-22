@@ -949,17 +949,20 @@ def find_receipt(root: Path, remote: str, pending: dict) -> str | None:
     """The commit on `remote`, since the recorded tip, that carries this
     attempt's marker, or None.
 
-    Limited to the document's own history, and the marker must be a whole line
-    of the message rather than a substring of one. The oldest match wins: the
+    Searched over the complete reachable range, and the marker must be a whole
+    line of the message rather than a substring of one. The oldest match wins: the
     tool is only invoked while nothing has landed, so a second match could only
     be a copy of the first.
     """
     document = pending["document"]
+    # The whole reachable range, with no path limit: a path-limited log applies
+    # history simplification, and a merge that kept an older copy of the
+    # document through its first parent hides a receipt that is reachable
+    # through its second. The receipt's scope is validated below instead.
     log = git_out(
         [
             "log", "--format=%H%x1f%B%x1e",
-            f"{pending['rendered_tip']}..{remote}", "--",
-            f":(literal){document}",
+            f"{pending['rendered_tip']}..{remote}",
         ],
         cwd=root,
     )

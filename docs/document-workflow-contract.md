@@ -1368,8 +1368,11 @@ is unchanged: it verifies the approved disposition and the artifact identity in
 the document reachable from a freshly fetched `origin/<default>`.
 `--resolve --source local` is permitted only for content the helper's exact
 applied record shows was applied and has not landed: the reference must name a
-blob, the working copy must still be that blob, and the branch must not already
-carry it. A hand edit permits nothing, and neither does the mere absence of an
+blob, the working copy must still be that blob, no revision of the document on
+the branch's history may carry that blob, and the helper's recorded publication,
+when there is one, must have no verified landing (a receipt, for a merged
+publication whose blob differs from the approved one). A landing that cannot be
+verified refuses rather than permits. A hand edit permits nothing, and neither does the mere absence of an
 old lane. The checkpoint is a **local** one: the result reports `published:
 false` and, from the helper's pending record, `publication_obligation`. A
 successful local checkpoint resolves the tracker half only; it does not clear
