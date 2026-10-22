@@ -7,9 +7,9 @@ Run as:
         --repo coghex/kanban --root <write-root> --path docs/ui-bugs.md \\
         --acquire --approved --publication-tip <sha> --plan -   < plan.json
 
-Issue #327. `tools/publish_coordination_doc.py` made the *document* half of a
-disposition recoverable: a pending publication is recorded before the push, and
-the processing workflows stop during preflight while one is outstanding. The
+Issue #327. The document half of a disposition became recoverable first: a
+pending publication is recorded before the document is handed over, and the
+processing workflows stop during preflight while one is outstanding. The
 *tracker* half had no such record. A run could create a label, create an issue,
 comment on another, and edit an umbrella epic, then terminate before the
 document mutation was recorded — and the next invocation would see an unchanged
@@ -30,10 +30,14 @@ find the twenty-first defect.
 Issue #370. The processing assets install into whatever repository a session is
 working, and almost none of them track this file, so it is a tracked plugin
 asset in its own right: `tools/tracker_transaction.py` is the source and
-byte-identical copies ship in both bundles. The pair travels together — this
-module loads `publish_coordination_doc.py` from beside itself and that module
-loads this one from beside itself — so a bundle carrying one without the other
-carries neither.
+byte-identical copies ship in both bundles. The document-write modules load
+this one from beside themselves to report both outstanding records from a
+single preflight; this one loads none of them (issue #830), so the
+dependency runs one way and a bundle needs no particular sibling for the
+tracker half to work. The one fact it needs from the document side — which
+content the approved-document helper applied locally and has not landed — is
+read from the `refs/kanban/applied-locally` reference both of them key
+identically, and tools/test_approved_document.py pins that key.
 
 ## The record is repository-shared, not worktree-local
 
@@ -41,7 +45,7 @@ The declared assets write in the `docs-wip` linked worktree, and a later
 invocation may resolve a different write root for the same repository. So the
 record is a Git reference under `refs/kanban/tracker-transaction/`, resolved
 through the repository's *common* Git directory, which every linked worktree of
-the clone shares — the same placement `tools/publish_coordination_doc.py` uses
+the clone shares — the same placement `tools/approved_document.py` uses
 for its pending-publication record, and for the same reason.
 
 ## Every transition is a compare-and-swap
@@ -72,7 +76,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -83,6 +86,12 @@ import sys
 from pathlib import Path
 
 NAMESPACE = "refs/kanban/tracker-transaction"
+
+# The two references the approved-document helper keys with the same digest as
+# this module's own record, so a preflight can answer for all three. Read here,
+# never written: the helper owns them.
+APPLIED_NAMESPACE = "refs/kanban/applied-locally"
+PENDING_PUBLICATION_NAMESPACE = "refs/kanban/pending-publication"
 
 # The record travels as a blob in the reference's tree rather than in its commit
 # subject. A subject is a message, and `commit-tree` is entitled to clean one
@@ -234,13 +243,13 @@ def git_out(args, *, cwd: Path, input_bytes: bytes | None = None) -> str:
 # ---------------------------------------------------------------- identity --
 #
 # The four helpers below are deliberately this module's own rather than imported
-# from tools/publish_coordination_doc.py, which defines the same four. That
-# module loads *this* one to report both outstanding records from a single
-# preflight (requirement 8), so importing back would make two independently
-# invocable command-line tools mutually dependent. The duplication is pinned
-# instead: tools/test_tracker_transaction.py asserts both modules key a
-# (repository, document) pair identically, so the two cannot drift apart
-# unnoticed.
+# from tools/approved_document.py (or the publisher it replaces), which define
+# the same four. Those modules load *this* one to report both outstanding
+# records from a single preflight (requirement 8), so importing back would make
+# two independently invocable command-line tools mutually dependent. The
+# duplication is pinned instead: tools/test_tracker_transaction.py and
+# tools/test_approved_document.py assert the modules key a (repository,
+# document) pair identically, so they cannot drift apart unnoticed.
 
 
 def normalized_slug(raw: str) -> str:
@@ -1343,123 +1352,116 @@ def action_publication_pending(root, ref, record, observed) -> dict:
     return {"status": "publication-pending"} | transaction_report(record, ref, commit)
 
 
-def publication_module():
-    """tools/publish_coordination_doc.py, loaded from beside this file.
+def applied_ref(repository: str, document: str) -> str:
+    """The reference the approved-document helper (and the publisher before it)
+    writes when, and only when, its own write of the document succeeded."""
+    return f"{APPLIED_NAMESPACE}/{record_key(repository, document)}"
 
-    That module loads this one to report both records from a single preflight,
-    and this one loads it to ask the single question only it can answer: whether
-    this document has a direct-publication lane at all. Neither call path calls
-    back into the other, so the two loads do not recur — and asking is strictly
-    better than restating §7's classification parser here, where the copy could
-    disagree with the module that actually publishes.
-    """
-    source = Path(__file__).resolve().parent / "publish_coordination_doc.py"
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "_kanban_publish_for_tracker", source
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(f"no loader for {source}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception as error:  # noqa: BLE001 - reported, never raised bare
-        raise TransactionError(
-            "publication-module-unavailable",
-            f"the publication module at {source} could not be loaded ({error}), "
-            "so whether this document publishes to the branch cannot be decided",
-        ) from error
-    return module
+
+def pending_publication_ref(repository: str, document: str) -> str:
+    return f"{PENDING_PUBLICATION_NAMESPACE}/{record_key(repository, document)}"
 
 
 def local_resolution_permitted(root: Path, record: dict, branch: str):
     """Whether this document may be resolved against the working tree, and why
     not when it may not.
 
-    `--source local` exists for exactly one outcome: the publication module
-    reported `not-published` *and* applied the approved content to the document
-    itself. Then the working tree is the only evidence there will ever be, and a
-    legitimate terminal state. Both halves matter, and each rules out a case:
+    `--source local` exists for exactly one outcome: the approved-document
+    helper applied the approved content to the document and has not landed it.
+    Then the working tree is the evidence there is, and a legitimate terminal
+    state for the tracker half. What licenses it is the helper's own applied
+    record — the exact content it wrote, named by a reference — and nothing
+    else:
 
-    - a document that *does* have a coordination lane belongs on the branch, and
-      clearing it from a locally edited cursor would leave the next preflight
-      clear while the entry never landed; and
-    - a working tree the module did not write is somebody else's edit, whether
-      the document is tracked or not.
+    - a hand-edited document carrying a terminal entry looks identical from
+      here, and the absence of a reference is what says nobody applied it;
+    - a document changed since the helper wrote it is somebody else's later
+      edit, whatever it started as; and
+    - a document the branch already carries is landed, not locally applied, so
+      it resolves against the branch.
 
-    A document absent from the publication tip is not a third case (#605): the
-    module writes one over the working copy the run's own preflight observed,
-    and records that write exactly as it records a write over a tracked
-    baseline, so whether the disposition reached the document is decided by
-    the same record below. Being novel neither licenses nor forbids a local
-    resolution by itself — a novel document with a lane still resolves on the
-    branch only, and a novel document the module never wrote is still refused.
-    Nor is a tracked document applied over the copy the preflight observed
-    (#727): that write is recorded the same way, so it resolves through the
-    same record, and a tracked document the module never wrote, or one changed
-    since it wrote it, is refused exactly as before.
+    Whether the document has a direct-publication lane is deliberately not a
+    question this module asks. That is the publication tool's decision, taken
+    from its own configuration, and an old lane's absence licenses nothing here:
+    permission is derived from what the helper recorded, not from what a
+    classification says it would have done.
 
     The permission is derived rather than asserted: the caller says which source
-    it wants, and this decides whether that source is admissible, from the same
-    classification the publication module itself applies.
+    it wants, and this decides whether that source is admissible. The branch is
+    fetched first, so "not landed" is a statement about the branch now rather
+    than about a cached ref.
     """
-    publisher = publication_module()
     git(["fetch", "origin", branch], cwd=root)
-    tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
     document = record["document"]
-    try:
-        publishable, why_not = publisher.eligibility(
-            root, record["repository"], tip, document
-        )
-    except Exception as error:  # noqa: BLE001 - reported, never raised bare
-        # Issue #370: for an owner outside §7 the classification comes from that
-        # repository's own configuration, which can be present and unreadable.
-        # Then whether this document publishes to the branch is unknown, and an
-        # unknown lane may not clear a record: resolving from the working tree
-        # is admissible only for a document that provably has no lane.
-        raise TransactionError(
-            "publication-classification-unavailable",
-            f"whether {document} publishes directly to {branch} could not be "
-            f"decided ({getattr(error, 'message', error)}), so this record "
-            "cannot be resolved from the working tree",
-        ) from error
-    if publishable:
-        return False, (
-            f"{document} publishes directly to {branch}, so its disposition is "
-            "verified there rather than in the working tree"
-        )
-    # Classification says the module *would* decline to publish it. That is not
-    # the same as the module having applied anything: a hand-edited document
-    # carrying a terminal entry looks identical from here. What tells them apart
-    # is the reference the module writes when — and only when — its own write
-    # succeeded, naming the exact content it wrote.
-    applied = publisher.applied_ref(record["repository"], document)
+    applied = applied_ref(record["repository"], document)
     recorded = git(
         ["rev-parse", "--verify", "--quiet", applied], cwd=root, check=False
     ).stdout.decode().strip()
     if not recorded:
         return False, (
-            f"the publication module never applied a disposition to {document} "
-            f"locally ({applied} does not exist), so the working tree is somebody "
-            "else's edit rather than an approved mutation"
+            f"the approved-document helper never applied a disposition to "
+            f"{document} locally ({applied} does not exist), so the working tree "
+            "is somebody else's edit rather than an approved mutation"
         )
-    present = publisher.working_blob(root, document)
+    kind = git(["cat-file", "-t", recorded], cwd=root, check=False)
+    if kind.stdout.decode().strip() != "blob":
+        return False, (
+            f"the applied record {applied} names {recorded}, which is not the "
+            "blob of applied content a record must name, so it cannot license a "
+            "local resolution"
+        )
+    target = root / document
+    present = (
+        git_out(["hash-object", "--", str(target)], cwd=root)
+        if target.is_file()
+        else None
+    )
     if present != recorded:
         return False, (
-            f"{document} is not the content the publication module applied "
+            f"{document} is not the content the approved-document helper applied "
             f"({present} rather than {recorded}), so it has been changed since"
         )
-    return True, why_not
+    landed = git(
+        ["rev-parse", "--verify", "--quiet", f"origin/{branch}:{document}"],
+        cwd=root, check=False,
+    ).stdout.decode().strip()
+    if landed == recorded:
+        return False, (
+            f"origin/{branch} already carries the applied content of {document}, "
+            "so it is landed rather than locally applied and is verified there"
+        )
+    return True, f"{document} was applied locally and has not landed on {branch}"
+
+
+def publication_obligation(root: Path, record: dict) -> dict:
+    """What a local checkpoint leaves outstanding.
+
+    Resolving a transaction against the locally applied document records the
+    tracker half as done. It says nothing about publication: a pending record
+    the helper wrote is still there, still stops the next preflight, and is
+    cleared only by a landing that is verified on the branch.
+    """
+    ref = pending_publication_ref(record["repository"], record["document"])
+    recorded = git(
+        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
+    ).stdout.decode().strip()
+    return {
+        "published": False,
+        "publication_obligation": "outstanding" if recorded else "none-recorded",
+        "pending_publication_ref": ref,
+        "pending_publication_commit": recorded or None,
+    }
 
 
 def published_document(root: Path, record: dict, source: str, branch: str) -> str:
     """The bytes resolution is verified against.
 
     `branch` is the ordinary case: the published document as the remote
-    publication branch itself carries it. `local` is the `not-published`
-    outcome, where the helper declined publication for a `pr-atomic`,
-    unmatched, or not-yet-tracked document and applied the approved content to
-    the working tree instead — a legitimate terminal state for such a document,
-    and the only evidence there is.
+    publication branch itself carries it, after a fresh fetch. `local` is the
+    document the approved-document helper applied to the working tree and has
+    not landed — a legitimate terminal state for the tracker half, and the
+    only evidence there is until the document lands. The caller has already
+    established that the helper's applied record licenses it.
     """
     document = record["document"]
     if source == "local":
@@ -1686,8 +1688,9 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
             entry_lines=lines,
             **transaction_report(record, ref, observed),
         )
+    obligation = publication_obligation(root, record) if source == "local" else {}
     clear_record(root, ref, observed, _binding(record))
-    return {
+    return obligation | {
         "status": STATE_RESOLVED,
         "source": source,
         "required_tokens": tokens,
@@ -1831,8 +1834,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=("branch", "local"),
         default="branch",
         help="verify resolution against the publication branch, or against the "
-        "locally applied document when the helper reported not-published having "
-        "written and recorded that document itself",
+        "locally applied document when the approved-document helper applied and "
+        "recorded that content and it has not landed",
     )
     args = parser.parse_args(argv)
 
