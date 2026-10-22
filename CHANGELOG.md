@@ -15,6 +15,19 @@ created above it.
 
 ### Unreleased
 
+- Added the `merge:hold` repository label, which keeps a pull request out of
+  the PR drainer whatever its approval says (#774). A held pull request is never
+  merged, readied from draft, updated or rerun, in a polling pass or with
+  `--pr`, which reports `not_eligible` naming the hold and changes nothing; a
+  review verdict (closed, `changes_requested`, `not_approved`) still takes
+  precedence. The label is read live, checked again at both merge boundaries
+  and in the post-merge audit, and costs no failure cooldown; removing it makes
+  the pull request eligible again on the next pass. The controller's `install`
+  now creates the label in the repository the job drains (the first GitHub write
+  on the install path); re-run `tools/install_drainer.py` on an existing
+  installation to provision it. `docs/pr-drainer.md`,
+  `docs/agent-workflow-contract.md` §2.4 and the drain-prs skill say so.
+  Bundles: Claude 1.80.0, Codex 1.79.0.
 - The canonical issue reviewer accepts a third delivery unit next to the pull
   request and the direct documentation landing: one reviewed commit in a named
   local repository, delivered through the target repository's own local-commit

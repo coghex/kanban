@@ -929,6 +929,32 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         # The staging reference is cleaned up on the refusal like any other.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
 
+    def test_a_hold_applied_during_the_build_refuses_the_swap(self):
+        # The hold is a live veto at this boundary too: the third read, taken
+        # once the merge commit exists, is the last thing before the default
+        # branch is written, and nothing may land past a hold seen there.
+        held = {
+            "labels": [
+                {"name": drain_prs.APPROVE_LABEL},
+                {"name": drain_prs.HOLD_LABEL},
+            ]
+        }
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(**held)
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(report["reason"], "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, report["message"])
+        self.assertFalse(report["merged"])
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
     def test_a_coordination_only_advance_merges_without_a_branch_update(self):
         self._script_pr_view(
             self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
@@ -1720,6 +1746,38 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertIn("CLOSED", message)
         self.assertIn("MERGED", message)
         self.assertTrue(self._swapped())
+
+    def test_a_hold_applied_during_a_refused_merge_does_not_get_the_branch_updated(self):
+        # The fallback from a rejected swap asks for the update with a snapshot
+        # read after the rejection, so a hold that arrived in between has to
+        # be honoured there too.
+        held = {
+            "labels": [
+                {"name": drain_prs.APPROVE_LABEL},
+                {"name": drain_prs.HOLD_LABEL},
+            ]
+        }
+        # The fourth snapshot is what the update would settle to: a regression
+        # that requested it must fail the assertions below, not wait for it.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(**held),
+            self._settled(),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertFalse(result)
+        self.assertEqual(report["reason"], "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, report["message"])
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertFalse(self._swapped())
+        self.assertFalse(report["merged"])
 
     def test_a_refusal_over_a_head_that_moved_defers_for_rereview(self):
         # A refusal is only a reason to request the branch update once the

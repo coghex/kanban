@@ -381,6 +381,146 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                 restore.assert_not_called()
                 self.assertNotIn("draft state was restored", str(excinfo.exception))
 
+    # -- issue #774: the drainer's hold label and the canonical publisher ----
+
+    HOLD = {"name": "merge:hold"}
+
+    def held(self, *, draft: bool) -> dict:
+        return {**self.pr(draft=draft), "labels": [self.HOLD]}
+
+    def test_the_verdict_label_commands_never_touch_the_hold(self):
+        root, repo = Path("/fake-repo"), "coghex/kanban"
+        for brand, module in self.modules.items():
+            for verdict, add, remove in (
+                ("APPROVE", "reviewed:approve", "reviewed:changes"),
+                ("CHANGES_REQUESTED", "reviewed:changes", "reviewed:approve"),
+            ):
+                with self.subTest(brand=brand, verdict=verdict), mock.patch.object(
+                    module, "run"
+                ) as run:
+                    module.set_verdict_label(
+                        root, repo, 89, verdict, "reviewed:approve", "reviewed:changes"
+                    )
+                    module.clear_verdict_labels(
+                        root, repo, 89, "reviewed:approve", "reviewed:changes"
+                    )
+                    switch, clear = (call.args[0] for call in run.call_args_list)
+                    self.assertEqual(
+                        switch,
+                        ["gh", "pr", "edit", "89", "-R", repo,
+                         "--add-label", add, "--remove-label", remove],
+                    )
+                    self.assertEqual(
+                        clear,
+                        ["gh", "pr", "edit", "89", "-R", repo,
+                         "--remove-label", "reviewed:approve",
+                         "--remove-label", "reviewed:changes"],
+                    )
+                    self.assertNotIn("merge:hold", switch + clear)
+
+    def test_approving_a_held_draft_still_readies_it_and_leaves_the_hold(self):
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.held(draft=True)
+                before = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:approve"],
+                    "ready_for_review": False,
+                }
+                after = {**before, "ready_for_review": True}
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module, pr, "APPROVE", [before, after]
+                )
+                with stack:
+                    code, result = self.publish(module, pr, "APPROVE")
+                    module.set_verdict_label.assert_called_once_with(
+                        Path("/fake-repo"), "coghex/kanban", 89, "APPROVE",
+                        "reviewed:approve", "reviewed:changes",
+                    )
+
+                self.assertEqual(code, 0)
+                self.assertTrue(result["ready_for_review"])
+                ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                restore.assert_not_called()
+                clear.assert_not_called()
+
+    def test_requesting_changes_on_a_held_draft_leaves_both_alone(self):
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.held(draft=True)
+                verified = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:changes"],
+                    "ready_for_review": False,
+                }
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module, pr, "CHANGES_REQUESTED", [verified]
+                )
+                with stack:
+                    code, result = self.publish(module, pr, "CHANGES_REQUESTED")
+                    module.set_verdict_label.assert_called_once_with(
+                        Path("/fake-repo"), "coghex/kanban", 89, "CHANGES_REQUESTED",
+                        "reviewed:approve", "reviewed:changes",
+                    )
+
+                self.assertEqual(code, 0)
+                self.assertFalse(result["ready_for_review"])
+                ready.assert_not_called()
+                restore.assert_not_called()
+                clear.assert_not_called()
+
+    def test_publication_verification_accepts_a_held_pr(self):
+        # The verdict labels are read out of the label set, so a label beside
+        # them is neither an error nor reported as one.
+        for verdict, label in (
+            ("APPROVE", "reviewed:approve"),
+            ("CHANGES_REQUESTED", "reviewed:changes"),
+        ):
+            for brand, module in self.modules.items():
+                with self.subTest(brand=brand, verdict=verdict):
+                    pr = {
+                        **self.pr(draft=False),
+                        "labels": [{"name": label}, self.HOLD],
+                    }
+                    marker = mock.Mock()
+                    marker.group.side_effect = {
+                        "head": "a" * 40,
+                        "verdict": verdict,
+                        "models": "unspecified",
+                        "reviewers": "codex",
+                    }.__getitem__
+                    arguments = [
+                        Path("/fake-repo"), "coghex/kanban", 89,
+                        [module.CODEX_REVIEWER],
+                    ]
+                    if brand == "claude":
+                        arguments.append(["unspecified"])
+                    arguments += [
+                        "a" * 40, verdict, "k1", "reviewed:approve", "reviewed:changes",
+                    ]
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+                        stack.enter_context(
+                            mock.patch.object(
+                                module, "gate_status",
+                                return_value={**self.gate(), "overridden_issues": []},
+                            )
+                        )
+                        stack.enter_context(mock.patch.object(module, "viewer_login", return_value="me"))
+                        stack.enter_context(mock.patch.object(module, "pr_comments", return_value=[]))
+                        stack.enter_context(
+                            mock.patch.object(
+                                module, "latest_owned_review_marker",
+                                return_value=(marker, "https://example.test/c"),
+                            )
+                        )
+                        verified = module.verify_publication(
+                            *arguments, allow_no_issue=False
+                        )
+
+                    self.assertEqual(verified["labels"], [label])
+                    self.assertTrue(verified["ready_for_review"])
+
     def test_ready_and_restore_use_github_draft_commands(self):
         for brand, module in self.modules.items():
             with self.subTest(brand=brand), mock.patch.object(module, "run") as run:

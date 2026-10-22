@@ -151,6 +151,72 @@ class LatestCheckTests(unittest.TestCase):
         self.assertEqual(regression[0], "checks_pending")
 
 
+class MergeHoldGateTests(unittest.TestCase):
+    """`merge:hold` at the pre-merge re-check both merge paths share, and in the
+    post-merge audit that turns a slipped-through hold into an incident."""
+
+    HEAD = "a" * 40
+    GATES = drain_prs.GateConfig(required_ci_check=None, required_review_check=None)
+
+    def pr(self, *labels):
+        return {
+            "number": 7,
+            "headRefOid": self.HEAD,
+            "labels": [{"name": name} for name in labels],
+            "statusCheckRollup": [],
+        }
+
+    def test_a_hold_regresses_an_otherwise_clear_gate_as_not_eligible(self):
+        pr = self.pr(drain_prs.APPROVE_LABEL, drain_prs.HOLD_LABEL)
+        with mock.patch.object(drain_prs, "blocking_review_marker", return_value=None):
+            regression = drain_prs.gate_regression(mock.sentinel.ctx, pr, self.GATES)
+        self.assertIsNotNone(regression)
+        reason, message, _ = regression
+        self.assertEqual(reason, "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, message)
+
+    def test_the_hold_matches_however_the_label_is_cased(self):
+        for name in ("merge:hold", "Merge:Hold", "MERGE:HOLD"):
+            with self.subTest(name=name):
+                self.assertTrue(drain_prs.is_held(self.pr(name)))
+        for name in ("merge:holds", "hold", "reviewed:approve"):
+            with self.subTest(name=name):
+                self.assertFalse(drain_prs.is_held(self.pr(name)))
+        self.assertFalse(drain_prs.is_held({}))
+
+    def test_a_differently_cased_hold_is_audited_too(self):
+        audited = self.pr(drain_prs.APPROVE_LABEL, "Merge:Hold")
+        with mock.patch.object(drain_prs, "get_pr", return_value=audited):
+            with self.assertRaises(drain_prs.PostMergeAuditError):
+                drain_prs.audit_merged_pr(mock.sentinel.ctx, 7, self.HEAD, self.GATES)
+
+    def test_an_unheld_pr_still_passes_it(self):
+        pr = self.pr(drain_prs.APPROVE_LABEL)
+        with mock.patch.object(drain_prs, "blocking_review_marker", return_value=None):
+            self.assertIsNone(
+                drain_prs.gate_regression(mock.sentinel.ctx, pr, self.GATES)
+            )
+
+    def test_a_withdrawn_approval_outranks_the_hold(self):
+        pr = self.pr(drain_prs.HOLD_LABEL)
+        regression = drain_prs.gate_regression(mock.sentinel.ctx, pr, self.GATES)
+        self.assertEqual(regression[0], "not_approved")
+
+    def test_the_post_merge_audit_names_a_hold_that_slipped_through(self):
+        audited = self.pr(drain_prs.APPROVE_LABEL, drain_prs.HOLD_LABEL)
+        with mock.patch.object(drain_prs, "get_pr", return_value=audited):
+            with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+                drain_prs.audit_merged_pr(
+                    mock.sentinel.ctx, 7, self.HEAD, self.GATES
+                )
+        self.assertIn(drain_prs.HOLD_LABEL, str(raised.exception))
+
+    def test_the_post_merge_audit_passes_an_unheld_merge(self):
+        audited = self.pr(drain_prs.APPROVE_LABEL)
+        with mock.patch.object(drain_prs, "get_pr", return_value=audited):
+            drain_prs.audit_merged_pr(mock.sentinel.ctx, 7, self.HEAD, self.GATES)
+
+
 class ActionsRerunTests(unittest.TestCase):
     def test_extracts_run_id_from_actions_details_url(self):
         check = {
