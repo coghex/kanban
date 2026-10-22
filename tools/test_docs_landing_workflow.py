@@ -21,6 +21,7 @@ Pinned from the PR #792 review:
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -142,6 +143,111 @@ class DocsLandingWorkflowTests(unittest.TestCase):
         for path in DRAFTING_ASSETS + SOLVE_ASSETS + PR_FIX_ASSETS:
             with self.subTest(path=path):
                 self.assertNotIn("docs-push --expect", read(path))
+
+
+# Issue #829 retired the /push-docs workflow and the tools/docs_land.sh and
+# tools/docs_land_paths.py helpers behind it. Nothing tracked may name them
+# again except where the retirement is the subject.
+RETIRED_LANDING_NAMES = re.compile(r"docs_land|push-docs|push_docs")
+
+# Paths allowed to carry a retired name, and why: history that must not be
+# rewritten, the publisher's frozen diagnostic (the same string in its two
+# bundled copies, until the publisher is replaced), and this module, whose
+# pattern above is the rejected literal.
+RETIRED_NAME_EXEMPT_PATHS = (
+    "CHANGELOG.md",
+    "docs/product_readiness_findings.md",
+    "docs/coordination/process-report-publication-removal.md",
+    "tools/publish_coordination_doc.py",
+    "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
+    "tools/test_docs_landing_workflow.py",
+)
+RETIRED_NAME_EXEMPT_PREFIXES = ("docs/designs/",)
+
+def without_migration_notes(text):
+    """`text` with each "Migration note" section removed: a section headed
+    so explains the retirement and names the retired tools by design. It runs
+    to the next heading of the same or a higher level."""
+    out = []
+    skipping = None
+    for line in text.splitlines(keepends=True):
+        heading = re.match(r"(#{1,6}) ", line)
+        if heading:
+            level = len(heading.group(1))
+            if skipping is not None and level <= skipping:
+                skipping = None
+            if skipping is None and line[level:].startswith(" Migration note"):
+                skipping = level
+        if skipping is None:
+            out.append(line)
+    return "".join(out)
+
+
+def retired_name_offenders(files):
+    """Every `path:line` in `files` (a mapping of path to text) that names a
+    retired landing-lane tool outside the exempt paths and migration notes."""
+    offenders = []
+    for path, text in sorted(files.items()):
+        if path in RETIRED_NAME_EXEMPT_PATHS or path.startswith(
+            RETIRED_NAME_EXEMPT_PREFIXES
+        ):
+            continue
+        for number, line in enumerate(without_migration_notes(text).splitlines(), 1):
+            if RETIRED_LANDING_NAMES.search(line):
+                offenders.append(f"{path}:{number}")
+    return offenders
+
+
+def tracked_text_files():
+    listing = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if listing.returncode != 0:
+        return None
+    files = {}
+    for name in listing.stdout.decode("utf-8").split("\0"):
+        if not name:
+            continue
+        path = REPO_ROOT / name
+        try:
+            files[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return files
+
+
+class RetiredLandingLaneTests(unittest.TestCase):
+    def test_no_tracked_asset_names_the_retired_lane(self):
+        files = tracked_text_files()
+        if files is None:
+            self.skipTest("not a git work tree")
+        self.assertEqual(retired_name_offenders(files), [])
+
+    def test_the_scan_sees_a_retired_name_and_spares_a_migration_note(self):
+        # A rule that matched nothing, or everything, would pass the test
+        # above while asserting nothing.
+        sample = {
+            "a.md": "run tools/docs_" + "land.sh now\n",
+            "b.md": "use /push" + "-docs\n",
+            "c.md": "# Title\n\n## Migration note: gone\n\nthe push_" + "docs tool\n\n## Next\n\nclean\n",
+            "d.md": "## Next\n\nclean\n## Migration note\nnames push" + "-docs\n### Sub\nstill push" + "-docs\n",
+            "docs/designs/e.md": "push" + "-docs\n",
+            "CHANGELOG.md": "push" + "-docs\n",
+        }
+        self.assertEqual(retired_name_offenders(sample), ["a.md:1", "b.md:1"])
+
+    def test_the_retired_files_stay_deleted(self):
+        for relative in (
+            "tools/docs_" + "land.sh",
+            "tools/docs_" + "land_paths.py",
+            "claude-plugin/plugins/kanban/commands/push" + "-docs.md",
+            "codex-plugin/plugins/kanban/skills/push" + "-docs",
+        ):
+            with self.subTest(path=relative):
+                self.assertFalse((REPO_ROOT / relative).exists())
 
 
 if __name__ == "__main__":

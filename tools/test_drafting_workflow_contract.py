@@ -171,7 +171,7 @@ ART_POLICY_ISSUE_ASSETS = (
 #
 # The fragments are distinctive to the art policy rather than bare anchor words.
 # `texture` also appears in an unrelated example invocation in design-epic, and
-# `placeholder` in note-problem, process-design-doc, triage, and push-docs, in
+# `placeholder` in note-problem, process-design-doc, and triage, in
 # both brands; a tuple keyed on either single word would make the negative
 # control below fail against assets that owe this policy nothing.
 ART_POLICY_ISSUE_RULES = (

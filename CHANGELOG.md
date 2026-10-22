@@ -25,6 +25,15 @@ created above it.
   confirms them; any other issue keeps the one-pull-request contract.
   `docs/drafting-workflow-contract.md` §3.4 lists the unit. Reinstall the
   packaged backend with `tools/install_issue_review.py` to pick it up.
+- Retired the `/push-docs` documentation-landing workflow and the
+  `docs_land.sh` and `docs_land_paths.py` helpers behind it, slice A
+  of #775's consolidation (#829). Documentation lands with `docs-push`; content
+  left in a `docs-wip` worktree lands with named-path `docs-push <paths>` from
+  that worktree, as the migration notes in `docs/workflow-setup.md` and the two
+  plugin READMEs say. §7's classification table, the publisher and
+  `workflow.direct_publication_paths` are unchanged. Bundles: Claude 1.79.0,
+  Codex 1.78.0, Grok 1.11.5, Kimi 1.10.5, Google 1.8.5, Claude-on-Copilot
+  1.0.5.
 - The solve family writes a verdict or evidence write-up under `docs/archive/`
   unless the spec names its path; design notes and contracts are still updated
   where they live (#823). `docs/agent-workflow-contract.md` §2.1 tells a

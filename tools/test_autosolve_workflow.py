@@ -633,7 +633,6 @@ class DocsOnlyLaneTests(unittest.TestCase):
                     "do not fold any other document in while doing this",
                     squashed,
                 )
-                self.assertNotIn("{{cmd:push-docs}}", squashed)
 
     def test_both_renderings_describe_the_direct_land_outcome_up_front(self):
         # The grounding above only holds if the command's own description --

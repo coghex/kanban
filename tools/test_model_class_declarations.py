@@ -34,7 +34,7 @@ EXPECTED_CLASS = {
     "backlog-review": "A",
     # B: narrow, well-specified, operational work.
     "triage": "B", "retriage": "B", "drain-prs": "B", "finalize": "B",
-    "janitor": "B", "push-docs": "B",
+    "janitor": "B",
 }
 
 

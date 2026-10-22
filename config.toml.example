@@ -63,7 +63,7 @@ coordination_paths = []
 # Empty by default, and leaving it out entirely is a supported, deliberate
 # configuration: a workflow whose document is not covered applies its approved
 # mutation to the working copy, records it, reports not-published, and the edits
-# accumulate for a human to land in one batch (tools/docs_land.sh). Declare a
+# accumulate for a human to land by name with docs-push. Declare a
 # path here only if you want an unattended default-branch push per approved
 # disposition -- and note that each such push is itself an advance the drainer
 # must then answer for every open approved PR.

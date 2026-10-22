@@ -477,6 +477,21 @@ procedure](../README.md#9-confirm-nothing-still-resolves-through-the-old-archive
 resolves every installed link to where the chain ends, which is the check that
 licenses removing the old archive.
 
+## Migration note: recovering documentation left in a `docs-wip` worktree
+
+The `/push-docs` workflow and the `docs_land.sh` and
+`docs_land_paths.py` helpers behind it were retired (issue #829).
+Documentation lands with the owner's `docs-push` tool, run from whatever
+worktree holds the document. Retiring the workflow deletes no worktree, branch,
+pending record or unpublished document, so a `docs-wip` worktree that still
+holds content keeps it.
+
+To recover that content, run `docs-push [-m "message"] <paths...>` from the
+`docs-wip` worktree, naming each path. `docs-push` refuses a path its
+configuration lists as code; such a path goes through a pull request with its
+code instead. Nothing batches or drains the worktree any more, so land each
+document by name and remove the worktree yourself when it is empty.
+
 ## Removal
 
 Each component is removed with the provider's own command, or by deleting
