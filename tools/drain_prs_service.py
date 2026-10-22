@@ -3543,12 +3543,16 @@ def main() -> int:
             return run_service(job, args.repo)
         require_requested_identity(job, args.repo)
         if args.command == "install":
-            # Before the job is written, so a repository the label cannot be
-            # confirmed in is never reported installed. `start` refreshes the
-            # definition through `install_job` without it: starting a drainer
-            # never waits on GitHub for a label.
-            hold_label = ensure_hold_label(job)
-            value = {**install_job(job), "hold_label": hold_label}
+            # After the job, so every refusal `install_job` owns -- a running
+            # drainer, a stale invocation, a relocated installation -- is
+            # raised before anything is written to GitHub, and outside its
+            # installation lock, which a `gh` call must not hold. A label that
+            # cannot be confirmed still fails the install rather than letting
+            # it report success; re-running it is the repair. `start`
+            # refreshes the definition through `install_job` without this:
+            # starting a drainer never waits on GitHub for a label.
+            installed = install_job(job)
+            value = {**installed, "hold_label": ensure_hold_label(job)}
         elif args.command == "uninstall":
             value = uninstall_job(job)
         elif args.command == "start":

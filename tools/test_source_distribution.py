@@ -497,6 +497,8 @@ _SHIM_RESPONSES = [
     {"binary": "claude", "match": ["plugin", "list", "--json"], "stdout": "[]"},
     # launchd: no job of ours is loaded, and loading one succeeds.
     {"binary": "launchctl", "match": ["print"], "exit": 1},
+    # The repository has no `merge:hold` label yet, and creating it succeeds.
+    {"binary": "gh", "match": ["label", "list"], "stdout": "[]"},
     # systemd: the user manager is reachable, and knows no unit of ours.
     {
         "binary": "systemctl",
@@ -1041,6 +1043,9 @@ class SourceDistributionTest(unittest.TestCase):
             ("claude", 0),
             ("launchctl", 0),
             ("systemctl", 0),
+            # The controller's `install` makes sure the drainer's `merge:hold`
+            # label exists in the target repository (issue #774).
+            ("gh", 0),
         ):
             shim = binaries / name
             shim.write_text(

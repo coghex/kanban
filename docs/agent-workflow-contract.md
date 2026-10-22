@@ -1251,8 +1251,9 @@ reimplement the removal, and `--check` remains read-only.
   `install`, which runs `gh label list` and, when `merge:hold` is missing,
   `gh label create` against the repository the job drains — never the tree the
   scripts came from — treats a concurrent creation as success once the labels
-  are read again, and fails naming the label, before the job is written, when
-  it cannot confirm it exists. `tools/install_drainer.py` reaches it through
+  are read again, and fails naming the label when it cannot confirm it exists.
+  It runs after the job is installed, so every refusal the install owns comes
+  first and nothing is held under its installation lock. `tools/install_drainer.py` reaches it through
   that controller step, and `start`'s definition refresh does not. Covered by
   `tools/test_single_pr_drain.py`, `tools/test_drain_prs_service.py`,
   `tools/test_pure_logic.py` and `tools/test_integration.py`.

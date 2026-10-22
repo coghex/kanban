@@ -5690,8 +5690,9 @@ class HoldLabelProvisioningTests(unittest.TestCase):
 
 
 class InstallCommandHoldLabelTests(unittest.TestCase):
-    """The label is provisioned by the `install` command, before the job is
-    written, and by no other path."""
+    """The label is provisioned by the `install` command, after the job is
+    installed and so after every refusal `install_job` owns, and by no other
+    path."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -5734,9 +5735,20 @@ class InstallCommandHoldLabelTests(unittest.TestCase):
 
         code, output = self.main(ensure=ensure, install=install)
 
+        # Reported as a failure, not as an install that happened to work.
         self.assertEqual(code, 1)
-        install.assert_not_called()
         self.assertEqual(output, "")
+
+    def test_an_install_the_controller_refuses_never_reaches_github(self):
+        ensure = mock.Mock()
+        install = mock.Mock(
+            side_effect=drain_prs_service.ServiceError("Stop the running drainer")
+        )
+
+        code, _ = self.main(ensure=ensure, install=install)
+
+        self.assertEqual(code, 1)
+        ensure.assert_not_called()
 
     def test_starting_the_drainer_never_waits_on_the_label(self):
         # `start` refreshes the definition through `install_job` and must keep

@@ -179,8 +179,8 @@ before their flags; without one, each acts on the latest open incident.
 - `install`: install or refresh this repository's managed job without starting
   the drainer. It also makes sure the repository the job drains has the
   `merge:hold` label — created when missing, left alone when present — and
-  fails naming that label before the job is written if it cannot confirm it
-  exists; re-run `install` to repair that. Report the `hold_label` field of
+  fails naming that label if it cannot confirm it exists; re-run `install` to
+  repair that. Report the `hold_label` field of
   its result. This is the one GitHub write `install` performs, and `start`
   never does it.
 - `start`: report whether it started or was already running. Run this only when

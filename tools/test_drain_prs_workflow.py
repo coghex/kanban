@@ -1155,7 +1155,7 @@ class MergeHoldTests(unittest.TestCase):
             "It also makes sure the repository the job drains has the "
             "`merge:hold` label"
         ),
-        "install fails naming it": "fails naming that label before the job is written",
+        "install fails naming it": "fails naming that label if it cannot confirm it exists",
         "start never does it": "`start` never does it",
     }
 
