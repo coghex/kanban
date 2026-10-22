@@ -199,8 +199,7 @@ asset, an unresolved open decision — ends this run; report it.
 ## 3. Documentation-only issues without a pull-request lane
 
 **Override, not a stop.** Some issues' effective spec states that the change
-must land through the target repository's own direct-publication tooling — a
-documentation worktree and a landing script such as `tools/docs_land.sh` —
+must land through the target repository's own direct-publication tooling
 rather than through a pull request. {{cmd:solve}}'s own contract only knows
 how to open a pull request, so left alone it treats that instruction as a
 conflict and releases the claim without implementing anything. This step
@@ -250,16 +249,10 @@ the branch that will keep working:
   this checkout's own repository matches `$REPO` and the change is otherwise
   simple enough to land without a pull request. Stop and report that. Do
   not reclaim the issue; {{cmd:solve}} already released it. This {{brand:title}} bundle
-<!-- brand:grok,kimi,google -->
-  packages only {{cmd:solve}} and {{cmd:autosolve}}; it does not package {{cmd:push-docs}}. Do
-  not invent a landing, do not call a Claude or Codex {{cmd:push-docs}} skill,
-  and do not open a pull request just to avoid the stop.
-<!-- brand:claude-copilot -->
-  packages only {{cmd:solve}} and {{cmd:autosolve}}; it does not package {{cmd:push-docs}}. Do
-  not invent a landing, do not call Claude Code's or Codex's {{cmd:push-docs}},
-  which are packaged for other hosts, and do not open a pull request just to
-  avoid the stop.
-<!-- /brand -->
+  packages only {{cmd:solve}} and {{cmd:autosolve}}; it ships no documentation
+  landing workflow. Do not invent a landing, do not call a landing workflow
+  packaged for another host, and do not open a pull request just to avoid the
+  stop.
 
 When {{cmd:solve}} lands documentation for an issue, unless the spec names its
 path, a verdict or evidence write-up goes under `docs/archive/`, because it

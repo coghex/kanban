@@ -344,16 +344,6 @@ COMMAND_SOURCES = (
         ),
     ),
     CommandSource(
-        name="push-docs",
-        source="tools/command_sources/push-docs.md",
-        outputs=BUNDLE_OUTPUTS,
-        note=(
-            "Issue #410's documentation-landing workflow. Both brands invoke "
-            "the tracked tools/docs_land.sh identically, so the two rendered "
-            "assets differ only in argument conventions and sigils."
-        ),
-    ),
-    CommandSource(
         name="retriage",
         source="tools/command_sources/retriage.md",
         outputs=BUNDLE_OUTPUTS,
