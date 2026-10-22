@@ -19,7 +19,7 @@ $issue-rereview, the drafting contract's repair loop for a changes-requested
 issue; issue #328 added $note-problem while transposing /draft-report, closing
 the last Codex-only document gap; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered $triage roadmap, its $retriage refresh, the
-$push-docs documentation-landing workflow, the $backlog-review backlog audit,
+$backlog-review backlog audit,
 the $drain-prs drainer control surface, the
 $fix approved-pull-request workflow, the $finalize manual merge fallback, which
 had no Codex copy at all before that slice rendered one, the $janitor pipeline
@@ -27,7 +27,7 @@ housekeeping audit, and — issue #576, the eighth and last of that arc — the
 $autosolve autonomous solve-and-review loop. $project-review and
 $auto-project-review were removed again when the guide replaced them.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-three); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set
+(all twenty-two); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set
 Kanban's own dashboard used to spawn by name (the five above; it spawns none
 now, and the set stays as the packaged partition). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
@@ -143,13 +143,6 @@ DOCUMENT_SKILL_NAMES = {
 # tools/test_reconcile_approvals.py beside $triage's.
 ROADMAP_SKILL_NAMES = {"triage", "retriage"}
 
-# The documentation-landing workflow vendored by issue #410. Rendered from
-# tools/command_sources/push-docs.md exactly the way the roadmap workflow
-# above is, and like it user-invoked and excluded from Haskell name parity.
-# Its behavioral assertions live in tools/test_docs_land.py beside the
-# tools/docs_land.sh helper both brands' renderings invoke.
-PUBLICATION_SKILL_NAMES = {"push-docs"}
-
 # The backlog audit vendored by issue #430, slice VEND-3. Rendered from
 # tools/command_sources/backlog-review.md the way the two sets above are, and
 # like them user-invoked and excluded from Haskell name parity. It is its own
@@ -228,7 +221,6 @@ EXPECTED_SKILL_NAMES = (
     | DRAFTING_SKILL_NAMES
     | DOCUMENT_SKILL_NAMES
     | ROADMAP_SKILL_NAMES
-    | PUBLICATION_SKILL_NAMES
     | BACKLOG_SKILL_NAMES
     | DRAINER_SKILL_NAMES
     | PULL_REQUEST_FIX_SKILL_NAMES
@@ -597,7 +589,6 @@ class SkillDiscoveryTests(unittest.TestCase):
             DRAFTING_SKILL_NAMES
             | DOCUMENT_SKILL_NAMES
             | ROADMAP_SKILL_NAMES
-            | PUBLICATION_SKILL_NAMES
             | BACKLOG_SKILL_NAMES
             | DRAINER_SKILL_NAMES
             | PULL_REQUEST_FIX_SKILL_NAMES
@@ -609,17 +600,11 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(
-            PUBLICATION_SKILL_NAMES
-            & (DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES | ROADMAP_SKILL_NAMES),
-            set(),
-        )
-        self.assertEqual(
             BACKLOG_SKILL_NAMES
             & (
                 DRAFTING_SKILL_NAMES
                 | DOCUMENT_SKILL_NAMES
                 | ROADMAP_SKILL_NAMES
-                | PUBLICATION_SKILL_NAMES
             ),
             set(),
         )
@@ -629,7 +614,6 @@ class SkillDiscoveryTests(unittest.TestCase):
                 DRAFTING_SKILL_NAMES
                 | DOCUMENT_SKILL_NAMES
                 | ROADMAP_SKILL_NAMES
-                | PUBLICATION_SKILL_NAMES
                 | BACKLOG_SKILL_NAMES
             ),
             set(),
@@ -640,7 +624,6 @@ class SkillDiscoveryTests(unittest.TestCase):
                 DRAFTING_SKILL_NAMES
                 | DOCUMENT_SKILL_NAMES
                 | ROADMAP_SKILL_NAMES
-                | PUBLICATION_SKILL_NAMES
                 | BACKLOG_SKILL_NAMES
                 | DRAINER_SKILL_NAMES
                 | PULL_REQUEST_FIX_SKILL_NAMES
@@ -653,7 +636,6 @@ class SkillDiscoveryTests(unittest.TestCase):
                 DRAFTING_SKILL_NAMES
                 | DOCUMENT_SKILL_NAMES
                 | ROADMAP_SKILL_NAMES
-                | PUBLICATION_SKILL_NAMES
                 | BACKLOG_SKILL_NAMES
                 | DRAINER_SKILL_NAMES
                 | PULL_REQUEST_FIX_SKILL_NAMES
@@ -673,7 +655,6 @@ class SkillDiscoveryTests(unittest.TestCase):
                 | DRAFTING_SKILL_NAMES
                 | DOCUMENT_SKILL_NAMES
                 | ROADMAP_SKILL_NAMES
-                | PUBLICATION_SKILL_NAMES
                 | BACKLOG_SKILL_NAMES
                 | DRAINER_SKILL_NAMES
                 | PULL_REQUEST_FIX_SKILL_NAMES
@@ -2045,7 +2026,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-three as one that reads only the
+    short description must see the same twenty-two as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

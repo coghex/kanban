@@ -25,7 +25,7 @@ The mechanism's own subject is a fixture, deliberately.
 rendered into either bundle directory becomes an invokable command; VEND-0
 vendored none, and `FixtureIsNotShippedTests` still holds `fixture-command` to
 that. Since VEND-1 (issue #393) the registry also holds `triage`, since
-issue #410 `push-docs`, since VEND-2 (issue #427) `retriage`, since
+VEND-2 (issue #427) `retriage`, since
 VEND-3 (issue #430) `backlog-review`, since VEND-5 (issue #511) `drain-prs`, since VEND-7
 (issue #544) `finalize`, since VEND-9 (issue #575) `janitor`, since VEND-8
 (issue #576) `autosolve`, and -- authored
@@ -59,12 +59,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty-four names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-three names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
 # Both grew by one in VEND-1, which added the first source that ships, by
-# one more when issue #410 vendored `push-docs`, by one more again in
+# one more in
 # VEND-2, which vendored `retriage`, by one more in VEND-3, which vendored
 # `backlog-review`, by one more in VEND-4, which vendored `project-review`,
 # by one more in VEND-5, which vendored `drain-prs`, by one more when
@@ -75,8 +75,10 @@ CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 # gained a workflow without gaining a directory -- by one more in VEND-8,
 # which vendored `autosolve` and closed the arc. Issue #685's `auto-project-review`
 # and VEND-4's `project-review` added two more, removed again with that workflow.
-SHIPPED_CLAUDE_COUNT = 24
-SHIPPED_CODEX_COUNT = 23
+# Issue #829 retired the documentation-landing workflow issue #410 had vendored,
+# which took one from each count.
+SHIPPED_CLAUDE_COUNT = 23
+SHIPPED_CODEX_COUNT = 22
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -84,7 +86,6 @@ CLAUDE_ONLY_WORKFLOW = "draft-issues"
 # the fixture, not a blanket rule the first vendored workflow had to relax.
 SHIPPING_SOURCE_NAMES = {
     "triage",
-    "push-docs",
     "retriage",
     "backlog-review",
     "drain-prs",

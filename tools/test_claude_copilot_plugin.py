@@ -233,7 +233,7 @@ class PluginLayoutTests(unittest.TestCase):
     def test_the_plugin_manifest_declares_version_1_0_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.4")
+        self.assertEqual(document["version"], "1.0.5")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -481,8 +481,8 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn("--expected-route codex", text)
         for origin in OTHER_ORIGINS:
             self.assertNotIn(origin, text)
-        self.assertIn("does not package /push-docs", text)
-        self.assertNotIn("land it\n  with /push-docs", text)
+        self.assertIn("it ships no documentation\n  landing workflow", text)
+        self.assertIn("do not call a landing workflow\n  packaged for another host", text)
         self.assertIn("Do\n  not reclaim the issue", text)
 
     def test_autosolve_never_spawns_another_claude_session(self):

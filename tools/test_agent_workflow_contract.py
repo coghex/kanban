@@ -194,7 +194,6 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
@@ -235,7 +234,6 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/commands/triage.md",
-    "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
@@ -407,17 +405,6 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
         "find",
         "head",
     },
-}
-
-# Issue #410's documentation-landing pair, pinned the same way. Both brands'
-# fences resolve the repository root with `git` and then invoke the worked
-# repository's own tools/docs_land.sh by path — a repository tool rather than
-# an external command, which is why nothing further is discovered. The Codex
-# skill needs no find/head lookup because the helper ships with the
-# repository being worked, not with the bundle.
-PUSH_DOCS_SURFACE_EXPECTED_COMMANDS = {
-    "claude-plugin/plugins/kanban/commands/push-docs.md": {"git"},
-    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md": {"git"},
 }
 
 # Issue #430's backlog audit, pinned the same way and for a sharper reason: it
@@ -704,44 +691,6 @@ DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
 # tools/<subpackage>/fake_cli.py that is an ordinary module.
 TOOLS_DIR = REPO_ROOT / "tools"
 TOOL_SURFACE_EXCLUDED_PATHS = {"fake_cli.py"}
-
-# The repository's shell helpers (issue #410): tools/ modules that are shell
-# scripts rather than Python, so the discovered .py walk above never scans
-# them. Enumerated like the plugin surfaces, with what the extractor recovers
-# from each pinned below so the scan cannot silently shrink to nothing.
-TOOL_SHELL_SURFACE_FILES = [
-    "tools/docs_land.sh",
-]
-
-TOOL_SHELL_SURFACE_EXPECTED_COMMANDS = {
-    "tools/docs_land.sh": {
-        "awk", "dirname", "git", "grep", "mktemp", "python3", "sed", "tr",
-    },
-}
-
-# Shell reserved words and builtins are not external dependencies; every
-# other recovered name must carry an `executable` manifest row.
-SHELL_RESERVED_AND_BUILTINS = {
-    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
-    "until", "do", "done", "in", "break", "continue", "return", "exit",
-    "shift", "trap", "set", "cd", "echo", "printf", "read", "local", "exec",
-    "eval", "true", "false", "wait", "export", "unset",
-}
-
-# A shell function defined in the script itself, whose invocations are not
-# external commands.
-SHELL_FUNCTION_DEF_RE = re.compile(
-    r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", re.MULTILINE
-)
-
-# Heredoc bodies in a raw script are input, not commands — including the
-# unquoted-delimiter form the markdown extractor deliberately ignores,
-# because packaged assets never use it while this script does.
-SHELL_HEREDOC_BODY_RE = re.compile(
-    r"(<<-?\s*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)[^\n]*\n)"
-    r".*?^[ \t]*(?P=tag)[ \t]*$\n?",
-    re.DOTALL | re.MULTILINE,
-)
 
 MANIFEST_ROW_RE = re.compile(
     r"^(?P<id>[\w-]+)\s*\|\s*(?P<kind>[\w-]+)\s*\|\s*(?P<token>[^|]+?)\s*\|"
@@ -1341,35 +1290,6 @@ SYSTEMD_ARTIFACTS = (
 SERVICE_MANAGER_ARTIFACTS = LAUNCHD_ARTIFACTS + SYSTEMD_ARTIFACTS
 
 
-def discovered_shell_script_commands(content):
-    """Every external command a raw tools/ shell script invokes, recognized
-    with the same leading-word and subshell/pipe machinery as the packaged
-    workflows' bash fences, after dropping comment lines, heredoc bodies,
-    reserved words and builtins, and the script's own function names."""
-    body = SHELL_HEREDOC_BODY_RE.sub(lambda match: match.group(1), content)
-    lines = [
-        line for line in body.splitlines()
-        if not line.lstrip().startswith("#")
-    ]
-    scannable = "\n".join(lines)
-    names = {
-        match.group(1)
-        for match in SUBSHELL_OR_PIPE_COMMAND_RE.finditer(scannable)
-    }
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or ASSIGNMENT_RE.match(stripped):
-            continue
-        leading = LEADING_COMMAND_RE.match(stripped)
-        if leading:
-            names.add(leading.group(1))
-    return (
-        names
-        - SHELL_RESERVED_AND_BUILTINS
-        - set(SHELL_FUNCTION_DEF_RE.findall(content))
-    )
-
-
 def tool_surface_files(tools_dir=TOOLS_DIR):
     """Every eligible module of the tools/ surface, discovered by walking it."""
     return sorted(
@@ -1474,7 +1394,7 @@ ART_POLICY_CONTROL_ASSETS = (
 #
 # The fragments are distinctive to the art policy rather than bare anchor words.
 # `texture` also appears in an unrelated example invocation in design-epic, and
-# `placeholder` in note-problem, process-design-doc, triage, and push-docs, in
+# `placeholder` in note-problem, process-design-doc, and triage, in
 # both brands; a tuple keyed on either single word would make the negative
 # control fail against assets that owe this policy nothing.
 ART_POLICY_SOLVE_RULES = (
@@ -2206,63 +2126,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
 
-    def test_every_tool_shell_script_command_is_documented(self):
-        # The tools/ walk above scans Python modules only, so a shell helper
-        # reaches the reconciliation solely by being enumerated — and what
-        # the extractor recovers from each is pinned, so the scan cannot
-        # pass by discovering nothing.
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
-        }
-        for relative_path in TOOL_SHELL_SURFACE_FILES:
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            found = discovered_shell_script_commands(content)
-            self.assertEqual(
-                found,
-                TOOL_SHELL_SURFACE_EXPECTED_COMMANDS[relative_path],
-                relative_path,
-            )
-            for name in sorted(found):
-                self.assertIn(
-                    name,
-                    executable_tokens,
-                    undocumented_command_message(relative_path, name),
-                )
-
-    def test_push_docs_asset_command_discovery_is_not_vacuous(self):
-        # The two documentation-landing assets reach the completeness loops
-        # above by being listed, and a loop over an asset the extractor
-        # recovers nothing from reports no undocumented command for the same
-        # reason a loop over nothing does. Pin what each actually invokes so
-        # a rewrite that stops resolving the repository root fails here.
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
-        }
-        for relative_path, expected in sorted(
-            PUSH_DOCS_SURFACE_EXPECTED_COMMANDS.items()
-        ):
-            self.assertTrue(
-                relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES
-                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_COPILOT_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by any plugin surface list",
-            )
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            found = discovered_commands_for_plugin_file(relative_path, content)
-            self.assertEqual(found, expected, relative_path)
-            for name in found:
-                self.assertIn(
-                    name,
-                    executable_tokens,
-                    undocumented_command_message(relative_path, name),
-                )
+    def test_tools_holds_no_shell_helper(self):
+        # The tools/ walk above scans Python modules only, and the last shell
+        # helper was retired in issue #829 along with the extractor that
+        # scanned it. A shell script added under tools/ would reach no
+        # reconciliation, so it fails here until one is built for it.
+        self.assertEqual(sorted(TOOLS_DIR.rglob("*.sh")), [])
 
     def test_backlog_review_asset_command_discovery_is_not_vacuous(self):
-        # The counterpart of the push-docs pin above for the one vendored
-        # workflow that mutates a tracker. Requirement 5 of issue #430 is that
+        # The pin for the one vendored workflow that mutates a tracker.
+        # Requirement 5 of issue #430 is that
         # no `gh` call in either rendered file omits `-R "$REPO"`; that rule is
         # only meaningful while `gh` is really discoverable in the asset, so
         # what each file invokes is pinned exactly rather than merely checked
