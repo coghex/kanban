@@ -12,6 +12,11 @@ from unittest import mock
 
 import drain_prs
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 class GateConfigTests(unittest.TestCase):
     def _context(self, path):
