@@ -124,7 +124,10 @@ what stays separate is the responsibility, not the distribution.
 
 The gate reviews an issue as the contract for exactly one delivery unit, in
 both its `initial` and `rereview` modes. The default unit is one pull request.
-The only other is one direct documentation landing through the target
+The only others are the two below, and each is available only to a qualifying
+issue.
+
+The first is one direct documentation landing through the target
 repository's own direct-publication lane, followed by closing the issue — the
 disposition `autosolve`'s documentation-only step (step 3) delivers — and an
 issue qualifies for it only when all three of that step's conditions hold: the
@@ -134,10 +137,37 @@ repository's own required reading (`CLAUDE.md` or `AGENTS.md`) confirms that
 lane exists and applies to the issue's actual changes. The reviewer verifies
 the last condition in the checked-out repository and does not request changes
 or raise an open decision merely because a qualifying issue forbids a pull
-request or closes after the landing. Every other issue — one touching code,
-tests, configuration, or generated output, naming no lane, or naming a lane the
-repository does not confirm — remains a one-pull-request contract, and every
-other readiness criterion applies to both units unchanged.
+request or closes after the landing. An issue touching code, tests,
+configuration, or generated output does not qualify for it.
+
+The second is one reviewed commit in a named local repository, delivered
+through the target repository's own local-commit lane: the implementation
+lives in a separate local repository, often one with no remote, the commit
+merges into that repository's canonical checkout under the lane's gates, and
+the issue stays in the target repository's tracker, open until that commit's
+evidence is linked. An issue qualifies for it only when all three conditions
+hold: the effective spec names a local repository as the implementation owner
+and states that delivery is through that lane rather than a pull request; it
+names the lane's gates — an isolated checkout and branch, opposite-brand review
+of the exact commit, recorded test evidence, and named merge authorization; and
+the repository's own required reading (`CLAUDE.md` or `AGENTS.md`) confirms
+that lane and those gates. The reviewer verifies the last condition in the
+checked-out repository only — naming the local repository does not authorize
+inspecting it — and confirms the lane applies to the issue's actual changes.
+It does not request changes or raise an open decision merely because a
+qualifying issue forbids a pull request, forbids a remote for the local
+repository, forbids copying that repository's code into the target repository,
+or stays open until the commit's evidence is linked. The workflows that solve
+an issue do not implement or merge that commit; the target repository's own
+lane and its manager do.
+
+Every issue that qualifies for neither unit — one naming no lane, naming a lane
+the repository does not confirm or that does not apply to its changes, or
+omitting a gate — remains a one-pull-request contract, and one touching code,
+tests, configuration, or generated output is a pull-request contract unless it
+qualifies for the local-commit unit. Every other readiness criterion applies
+to all three units unchanged, including that `open_decisions` and
+`recommended_disposition` are empty for `APPROVE`.
 
 ### 3.5 Not a candidate-hunting workflow: arc decomposition
 

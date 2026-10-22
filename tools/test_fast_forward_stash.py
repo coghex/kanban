@@ -40,6 +40,11 @@ import drain_prs
 import drain_prs_service
 import git_fixture
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 def run_git(args, *, cwd, check=True):
     proc = subprocess.run(

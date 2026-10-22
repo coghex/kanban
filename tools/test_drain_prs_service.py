@@ -27,6 +27,11 @@ import drain_prs_service
 import kanban_config
 import service_manager
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 
 def setUpModule():

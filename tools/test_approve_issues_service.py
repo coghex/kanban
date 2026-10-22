@@ -34,6 +34,11 @@ from unittest import mock
 import approve_issues
 import approve_issues_service as service
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 CONTROLLER = Path(__file__).resolve().parent / "approve_issues_service.py"
 
@@ -2428,6 +2433,8 @@ class StopRacingASpawnTests(ApprovalFixture):
             )
         self.assertIsNotNone(child)
         self.assertEqual(spawned, [child])
+        # The child is the test's from here, pipes included.
+        self.addCleanup(_close_pipes, child)
         self.addCleanup(_kill_quietly, child.pid)
         # Signalled where it stands, then collected: the group is gone and
         # nothing of the pass is left running.
@@ -2533,6 +2540,27 @@ class FailureAfterSpawnTests(ApprovalFixture):
         self.controller = service.Controller(
             self.job_, backend=self.backend, interval=0.0, legacy_policy="dual"
         )
+        # Every backend this controller spawns, kept so the test can look at
+        # its pipes after the failure has been handled: nothing else holds a
+        # reference once the controller lets go of the child.
+        self.children = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            self.children.append(child)
+            return child
+
+        patcher = mock.patch.object(service.subprocess, "Popen", recording_popen)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def assert_pipes_are_closed(self):
+        """Both of the backend's pipes, on every child the controller spawned."""
+        self.assertEqual(len(self.children), 1)
+        for child in self.children:
+            self.assertTrue(child.stdout.closed, "the backend's stdout pipe is open")
+            self.assertTrue(child.stderr.closed, "the backend's stderr pipe is open")
 
     def fail_once_the_backend_is_up(self, error):
         """A side effect that waits for the pass to be genuinely running --
@@ -2553,6 +2581,9 @@ class FailureAfterSpawnTests(ApprovalFixture):
         # The grandchild ignores SIGINT and SIGTERM, so only a signal to the
         # whole group can have removed it.
         wait_until(lambda: process_gone(orphan_pid), message="the orphan to be gone")
+        # Nothing is left to read the pipes of a pass that was abandoned, so
+        # abandoning it has to close them.
+        self.assert_pipes_are_closed()
 
     def test_a_status_write_that_fails_after_the_spawn_ends_the_group(self):
         with mock.patch.object(
@@ -2604,6 +2635,22 @@ class FailureAfterSpawnTests(ApprovalFixture):
                 self.controller.start_child(
                     self.controller.backend_argv("--review-queue")
                 )
+        self.assert_group_is_gone()
+
+    def test_the_pipes_close_even_when_ending_the_group_itself_fails(self):
+        # `abandon_child` clears up after a failure and must not leave a pipe
+        # behind because one of its own steps raised.
+        child = self.controller.start_child(
+            self.controller.backend_argv("--review-queue")
+        )
+        wait_until(self.orphan_path.exists, message="the backend to spawn its child")
+        with mock.patch.object(
+            self.controller, "signal_child_group", side_effect=OSError("no such group")
+        ):
+            with self.assertRaises(OSError):
+                self.controller.abandon_child(child)
+        self.controller.terminate_process_group(child)
+        child.wait(timeout=30)
         self.assert_group_is_gone()
 
     def test_the_whole_run_records_the_failure_with_nothing_left_running(self):
@@ -2756,6 +2803,13 @@ def _kill_quietly(pid):
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _close_pipes(child):
+    """Close the backend pipes of a child a test took over from `start_child`."""
+    for pipe in (child.stdout, child.stderr):
+        if pipe is not None:
+            pipe.close()
 
 
 # ---------------------------------------------------------------------------

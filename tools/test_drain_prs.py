@@ -31,6 +31,11 @@ import drain_prs_service
 import fake_cli
 import kanban_models
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"

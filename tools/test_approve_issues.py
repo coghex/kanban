@@ -27,6 +27,11 @@ from unittest import mock
 import approve_issues
 import kanban_config
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_SOURCE = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
@@ -134,11 +139,78 @@ class ReviewPromptContractTests(unittest.TestCase):
                 self.assertIn(
                     "testable spec for one delivery unit: one pull request, or, "
                     "for a qualifying issue, one direct documentation landing "
-                    "followed by closing the issue.",
+                    "followed by closing the issue, or one reviewed commit in a "
+                    "named local repository delivered through the target "
+                    "repository's own local-commit lane.",
                     prompt,
                 )
                 # No unconditional one-PR constraint survives anywhere in it.
                 self.assertNotIn("one-PR", prompt)
+
+    def test_every_reviewer_in_both_modes_accepts_a_qualifying_local_commit(self):
+        # Issue #826: a repository can declare a third route, one reviewed
+        # commit in a separate local repository, and the gate must be able to
+        # approve an issue that forbids a pull request for it. The brief is the
+        # same for every reviewer, so each one is exercised, not only Codex.
+        for reviewer in (
+            approve_issues.CODEX_REVIEWER,
+            approve_issues.CLAUDE_REVIEWER,
+        ):
+            for mode in ("initial", "rereview"):
+                with self.subTest(reviewer=reviewer.key, mode=mode):
+                    prompt = approve_issues.review_prompt(reviewer, {}, mode=mode)
+                    self.assertIn(
+                        "one reviewed commit in a named local repository, "
+                        "delivered through the target repository's own "
+                        "local-commit lane",
+                        prompt,
+                    )
+                    self.assertIn(
+                        "open until that commit's evidence is linked", prompt
+                    )
+                    for condition in (
+                        "names a local repository as the implementation owner "
+                        "and states that delivery is through that lane rather "
+                        "than a pull request",
+                        "an isolated checkout and branch, opposite-brand review "
+                        "of the exact commit, recorded test evidence, and named "
+                        "merge authorization",
+                        "(its `CLAUDE.md` or `AGENTS.md`) confirms that lane and "
+                        "those gates",
+                        "Verify the third condition in the checked-out "
+                        "repository only: naming the local repository does not "
+                        "authorize inspecting it.",
+                        "Confirm the lane applies to the issue's actual changes, "
+                        "not merely that some local-commit lane exists.",
+                    ):
+                        self.assertIn(condition, prompt)
+                    self.assertIn(
+                        "merely because a qualifying issue forbids a pull "
+                        "request, forbids a remote for the local repository, "
+                        "forbids copying that repository's code into the target "
+                        "repository",
+                        prompt,
+                    )
+                    # A non-qualifying issue keeps the pull-request contract, and
+                    # the code fallback yields only to the local-commit unit.
+                    self.assertIn(
+                        "A non-qualifying issue remains a one-pull-request "
+                        "contract exactly as before: an issue that qualifies "
+                        "for neither unit",
+                        prompt,
+                    )
+                    self.assertIn("or omits a gate", prompt)
+                    self.assertIn(
+                        "is a pull-request contract unless it qualifies for the "
+                        "local-commit unit",
+                        prompt,
+                    )
+                    # The verdict and output rules are not relaxed for it.
+                    self.assertIn(
+                        "`open_decisions` and `recommended_disposition` must "
+                        "both be empty for APPROVE",
+                        prompt,
+                    )
 
 
 class PortableDefaultPathTests(unittest.TestCase):
@@ -1907,8 +1979,11 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             for runner in runners
         ]
         for worker in workers:
-            worker.wait(timeout=90)
-            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+            # Closing the pipes is the test's job; leaving them to the
+            # finalizer is a ResourceWarning.
+            with worker:
+                worker.wait(timeout=90)
+                self.assertEqual(worker.returncode, 0, worker.stderr.read())
 
         status, entries = module.read_reviewer_ledger(path)
         self.assertEqual(status, module.LEDGER_INTACT)

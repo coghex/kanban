@@ -181,7 +181,17 @@ jobs:
           fetch-depth: 0
 
       - name: Tooling tests
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
+        # The canonical command, unchanged. Its output is kept so the guard
+        # after it can read it: a leaked file, pipe, or directory is announced
+        # by a ResourceWarning that never changes the exit status, so a green
+        # run can still hold one. The suite's own status is passed on after the
+        # guard has looked.
+        run: |
+          output="$(mktemp)"
+          python3 -m unittest discover -s tools -p 'test_*.py' 2>&1 | tee "$output"
+          status="${PIPESTATUS[0]}"
+          python3 tools/check_resource_warnings.py "$output"
+          exit "$status"
 
   # The evidence for the drainer's Linux support, per
   # docs/designs/linux_portability_design.md decision D-1: no Linux host is known to
