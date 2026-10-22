@@ -59,8 +59,8 @@ The installer does not require `sudo`.
 
 Installing also makes sure the repository the job drains has the `merge:hold` label described in
 [Holding a pull request](#holding-a-pull-request): it is created when missing, left alone when
-present, and a creation that lost a race to someone else's counts as done once the labels are
-read again. That is the one GitHub write `install` performs, and it targets the repository the job
+present (looked up by exact name, so a repository with many labels is no different), and a
+creation that lost a race to someone else's counts as done once it is looked up again. That is the one GitHub write `install` performs, and it targets the repository the job
 drains, never the tree the scripts came from. If the label still cannot be confirmed the install
 fails naming it, after the job itself is installed and after every refusal the install owns, so
 re-running the installer is the repair. `start`
