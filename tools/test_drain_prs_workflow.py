@@ -1127,5 +1127,75 @@ class OfflineStateTests(unittest.TestCase):
                 self.assertIn("skips the final cleanup\n  pass", policy)
 
 
+class MergeHoldTests(unittest.TestCase):
+    """Issue #774: the `merge:hold` label, as the drain-prs asset states it.
+
+    The rules are asserted against every asset that owes them, and the control
+    is the bundles that ship no drain-prs asset at all, so a rule matching every
+    bundle could not pass while asserting nothing.
+    """
+
+    HOLD_RULES = {
+        "what the hold stops": (
+            "A pull request carrying the `merge:hold` label is never merged, "
+            "readied from draft, updated or rerun by the drainer"
+        ),
+        "no incident for it": "opens no incident for the hold",
+        "release without a restart": (
+            "removing the label makes it eligible again on the next pass, with "
+            "no restart"
+        ),
+        "hold before approving": (
+            "apply the hold before the review that would approve a pull request"
+        ),
+        "the workflow never labels": (
+            "This workflow never applies or removes the label itself."
+        ),
+        "install provisions the label": (
+            "It also makes sure the repository the job drains has the "
+            "`merge:hold` label"
+        ),
+        "install fails naming it": "fails naming that label before the job is written",
+        "start never does it": "`start` never does it",
+    }
+
+    def test_every_asset_states_each_rule(self):
+        for relative_path in (SOURCE, *RENDERED_ASSETS):
+            text = flat(read(relative_path))
+            for rule, phrase in self.HOLD_RULES.items():
+                with self.subTest(asset=relative_path, rule=rule):
+                    self.assertIn(phrase, text)
+
+    def test_the_check_fails_on_an_asset_missing_a_rule(self):
+        stripped = flat(read(CLAUDE_ASSET)).replace("merge:hold", "merge-hold")
+        for rule, phrase in self.HOLD_RULES.items():
+            if "merge:hold" in phrase:
+                self.assertNotIn(phrase, stripped, rule)
+
+    def test_no_other_bundle_ships_a_drain_prs_asset_to_update(self):
+        shipped = sorted(
+            str(path.relative_to(REPO_ROOT))
+            for bundle in (
+                "grok-plugin",
+                "kimi-plugin",
+                "google-plugin",
+                "claude-copilot-plugin",
+            )
+            for path in (REPO_ROOT / bundle).rglob("*")
+            if path.is_file() and "drain-prs" in path.name.lower()
+        )
+        self.assertEqual(shipped, [])
+        self.assertEqual(
+            sorted(
+                str(path.relative_to(REPO_ROOT))
+                for bundle in ("claude-plugin", "codex-plugin")
+                for path in (REPO_ROOT / bundle).rglob("*")
+                if path.is_file() and path.parent.name in {"commands", "drain-prs"}
+                and "drain-prs" in str(path)
+            ),
+            sorted(RENDERED_ASSETS),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

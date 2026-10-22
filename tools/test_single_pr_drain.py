@@ -2914,5 +2914,330 @@ class SinglePrMissingCheckReconciliationTests(SinglePrCliFixture):
         self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
 
 
+HOLD = {"name": drain_prs.HOLD_LABEL}
+APPROVED = {"name": drain_prs.APPROVE_LABEL}
+# What a drainer must never do to a pull request it leaves alone.
+HOLD_FORBIDDEN_MUTATIONS = (
+    ("pr", "merge"),
+    ("pr", "ready"),
+    ("pr", "edit"),
+    ("pr", "update-branch"),
+    ("pr", "comment"),
+    ("run", "rerun"),
+    ("issue", "close"),
+)
+
+
+class MergeHoldFixture(SinglePrCliFixture):
+    def assert_left_alone(self, *numbers):
+        """No call that mutates a pull request, and nothing about any of them
+        beyond reads. `numbers` are the pull requests that must not even be
+        read."""
+        for prefix in HOLD_FORBIDDEN_MUTATIONS:
+            self.assertEqual(self.gh_calls(*prefix), [], prefix)
+        for number in numbers:
+            self.assertEqual(self.gh_calls("pr", "view", str(number)), [])
+        self.assertEqual(self.open_incidents(), [])
+
+    def script_pr_list(self, *pages):
+        """Queue one `gh pr list` response per page, consumed in order."""
+        for page in pages:
+            self.fake.script("gh", ["pr", "list"], stdout=json.dumps(page))
+
+    def listed(self, number, *labels, draft=False, head=None):
+        return {
+            "number": number,
+            "labels": list(labels),
+            "isDraft": draft,
+            "headRefOid": head or self.head_sha,
+        }
+
+    def pass_state(self):
+        if not self.state_path.exists():
+            return {"prs": {}, "active_pr": None}
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def drainer_log(self):
+        """What a polling pass logged: it writes to its log file, not stderr."""
+        return "".join(
+            path.read_text(encoding="utf-8") for path in sorted(self.log_dir.glob("*"))
+        )
+
+
+class SinglePrMergeHoldTests(MergeHoldFixture):
+    """`merge:hold` in `--pr` mode: approval is read, the hold vetoes."""
+
+    def test_a_held_otherwise_mergeable_pr_is_not_eligible(self):
+        self.script_pr_view({"labels": [APPROVED, HOLD]})
+        before = run_git(["rev-parse", "master"], cwd=self.main)
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assert_result(
+            result,
+            outcome="no_action",
+            reason="not_eligible",
+            merged=False,
+            would_merge=False,
+            dry_run=False,
+        )
+        self.assertIn(drain_prs.HOLD_LABEL, result["message"])
+        self.assert_left_alone()
+        self.assertEqual(len(self.gh_calls("pr", "view", "42")), 1)
+        self.assertEqual(run_git(["rev-parse", "master"], cwd=self.main), before)
+        self.assertTrue(self.feature_wt.exists())
+        self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        # Nothing was recorded for it, so nothing is left to reset on release.
+        self.assertNotIn("42", self.pass_state().get("prs", {}))
+
+    def test_a_held_pr_is_not_eligible_in_a_dry_run_either(self):
+        self.script_pr_view({"labels": [APPROVED, HOLD]})
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["would_merge"])
+        self.assertIn(drain_prs.HOLD_LABEL, result["message"])
+        self.assert_left_alone()
+
+    def test_a_closed_pr_keeps_its_own_reason_under_a_hold(self):
+        self.script_pr_view({"state": "CLOSED", "labels": [APPROVED, HOLD]})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertIn("no longer open", result["message"])
+        self.assertNotIn(drain_prs.HOLD_LABEL, result["message"])
+
+    def test_changes_requested_outranks_a_hold(self):
+        self.script_pr_view(
+            {"labels": [APPROVED, {"name": drain_prs.CHANGES_LABEL}, HOLD]}
+        )
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "changes_requested")
+        self.assertNotIn(drain_prs.HOLD_LABEL, result["message"])
+
+    def test_a_missing_approval_outranks_a_hold(self):
+        self.script_pr_view({"labels": [HOLD]})
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "not_approved")
+        self.assertNotIn(drain_prs.HOLD_LABEL, result["message"])
+
+    def test_an_approved_held_draft_is_not_readied(self):
+        self.script_pr_view({"isDraft": True, "labels": [APPROVED, HOLD]})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, result["message"])
+        self.assert_left_alone()
+
+    def test_a_dry_run_does_not_claim_it_would_ready_a_held_draft(self):
+        self.script_pr_view({"isDraft": True, "labels": [APPROVED, HOLD]})
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertNotIn("ready for review", proc.stderr)
+        self.assert_left_alone()
+
+    def test_a_hold_applied_before_the_final_read_stops_the_merge(self):
+        # Selected and prepared as approved and clean; the label arrives while
+        # the candidate is being processed.
+        self.script_pr_view({}, {}, {"labels": [APPROVED, HOLD]})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, result["message"])
+        self.assert_left_alone()
+
+    def test_a_hold_does_not_get_a_behind_base_pr_updated(self):
+        self.script_pr_view(
+            {"labels": [APPROVED, HOLD], "mergeStateStatus": "BEHIND"}
+        )
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assert_left_alone()
+
+    def test_a_hold_does_not_open_a_conflict_incident(self):
+        self.script_pr_view(
+            {
+                "labels": [APPROVED, HOLD],
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+            }
+        )
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assert_left_alone()
+
+    def test_a_hold_does_not_get_a_failed_check_rerun(self):
+        self.script_pr_view(
+            {
+                "labels": [APPROVED, HOLD],
+                "statusCheckRollup": self.failed_ci_rollup(),
+            }
+        )
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assert_left_alone()
+
+    def test_the_hold_does_not_change_what_the_review_publisher_sees(self):
+        # The drainer reads verdict labels and writes none, hold or no hold.
+        self.script_pr_view({"labels": [APPROVED, HOLD]})
+
+        self.run_single()
+
+        self.assertEqual(self.label_edits(), [])
+
+
+class MergeHoldQueuePassTests(MergeHoldFixture):
+    """`merge:hold` in a polling pass, driven as `--once` runs."""
+
+    def run_pass(self, *extra):
+        proc = self.run_cli("--once", *extra)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def test_the_held_pr_is_skipped_and_the_other_merges(self):
+        self.script_pr_list(
+            [
+                self.listed(41, APPROVED, HOLD, head="b" * 40),
+                self.listed(42, APPROVED),
+            ]
+        )
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        self.run_pass()
+
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+        self.assertEqual(self.gh_calls("pr", "merge", "41"), [])
+        self.assertEqual(self.gh_calls("pr", "view", "41"), [])
+        self.assertIn("PR #41: carries merge:hold", self.drainer_log())
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+
+    def test_a_held_draft_is_not_readied(self):
+        self.script_pr_list([self.listed(42, APPROVED, HOLD, draft=True)])
+
+        self.run_pass()
+
+        self.assert_left_alone(42)
+
+    def test_a_dry_run_does_not_say_it_would_ready_a_held_draft(self):
+        self.script_pr_list([self.listed(42, APPROVED, HOLD, draft=True)])
+
+        proc = self.run_pass("--dry-run")
+
+        self.assertNotIn("ready for review", proc.stderr + self.drainer_log())
+        self.assert_left_alone(42)
+
+    def test_removing_the_hold_makes_the_same_pr_merge_on_a_later_pass(self):
+        # Pass 1 selects the PR as unheld; the label is there when it is
+        # processed, so this is a real skip by process_pr, which must not
+        # count as a failure or start a cooldown that outlasts the label.
+        self.script_pr_list(
+            [self.listed(42, APPROVED)],
+            [self.listed(42, APPROVED)],
+        )
+        self.script_pr_view({"labels": [APPROVED, HOLD]}, {})
+        self.script_merge_and_cleanup()
+
+        self.run_pass()
+
+        self.assertIn("PR #42: carries merge:hold; skipping", self.drainer_log())
+        self.assert_left_alone()
+        entry = self.pass_state()["prs"]["42"]
+        self.assertEqual(entry["consecutive_failures"], 0)
+        self.assertEqual(entry["retry_after_attempt"], 0)
+        self.assertIsNone(self.pass_state()["active_pr"])
+
+        self.run_pass()
+
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+
+    def test_a_pr_held_at_listing_time_merges_once_the_label_is_removed(self):
+        self.script_pr_list(
+            [self.listed(42, APPROVED, HOLD)],
+            [self.listed(42, APPROVED)],
+        )
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        self.run_pass()
+        self.assert_left_alone()
+        self.assertFalse(
+            self.state_path.exists() and "42" in self.pass_state()["prs"]
+        )
+
+        self.run_pass()
+
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+
+    def test_a_held_pr_neither_keeps_the_lane_nor_spends_the_recovery_turn(self):
+        # PR 41 owns the active lane and its head moved since it was approved,
+        # which is the shape recovery would spend its one turn rereviewing.
+        # Held, it does neither, and PR 42 is merged in the same pass.
+        old_head = "a" * 40
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 3,
+                "active_pr": 41,
+                "prs": {
+                    "41": self.state_entry(old_head),
+                    "42": self.state_entry(self.head_sha),
+                },
+            }
+        )
+        self.fake.script(
+            "gh",
+            ["pr", "view", "41"],
+            stdout=json.dumps(
+                {
+                    **self.base_pr_json(),
+                    "number": 41,
+                    "headRefOid": "b" * 40,
+                    "labels": [APPROVED, HOLD],
+                }
+            ),
+        )
+        self.script_pr_list(
+            [self.listed(41, APPROVED, HOLD, head="b" * 40), self.listed(42, APPROVED)]
+        )
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        self.run_pass()
+
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+        self.assertEqual(self.gh_calls("pr", "merge", "41"), [])
+        log = self.drainer_log()
+        self.assertIn("PR #41: head changed", log)
+        self.assertIn("carries merge:hold", log)
+        self.assertIsNone(self.pass_state()["active_pr"])
+        # Held, not forgotten: its entry waits for the label to be removed.
+        self.assertIn("41", self.pass_state()["prs"])
+
+
 if __name__ == "__main__":
     unittest.main()

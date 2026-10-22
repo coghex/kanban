@@ -7,6 +7,7 @@ test invokes launchctl, git against a real remote, or a network.
 
 import contextlib
 import fcntl
+import io
 import json
 import os
 import plistlib
@@ -5588,6 +5589,161 @@ class StopBudgetFitsTheTransitionTests(unittest.TestCase):
             drain_prs.SHUTDOWN_CLEANUP_BUDGET_SECONDS,
             drain_prs_service.STOP_TIMEOUT_SECONDS / 2,
         )
+
+
+class FakeGithubLabels:
+    """A repository's labels behind the `gh` calls `ensure_hold_label` makes.
+
+    Stands in for `run_command`, so nothing here reaches a network, and records
+    every call so a case can say which repository it was aimed at.
+    """
+
+    def __init__(self, labels=(), *, create_fails=False, create_races=False):
+        self.labels = set(labels)
+        self.create_fails = create_fails
+        # Someone else creates the label between this run's list and create:
+        # the create is refused, and the next list shows the label.
+        self.create_races = create_races
+        self.calls = []
+
+    def __call__(self, args, *, check=True):
+        self.calls.append(list(args))
+        if args[:3] == ["gh", "label", "list"]:
+            return _completed(
+                stdout=json.dumps([{"name": name} for name in sorted(self.labels)])
+            )
+        if args[:3] == ["gh", "label", "create"]:
+            if self.create_races:
+                self.labels.add(args[3])
+                return _completed(1, stderr="already exists")
+            if self.create_fails:
+                return _completed(1, stderr="HTTP 403: Resource not accessible")
+            self.labels.add(args[3])
+            return _completed()
+        raise AssertionError(f"unexpected command {args}")
+
+    def creations(self):
+        return [call for call in self.calls if call[:3] == ["gh", "label", "create"]]
+
+
+class HoldLabelProvisioningTests(unittest.TestCase):
+    """Requirement 5 of issue #774: `install` makes sure `merge:hold` exists in
+    the repository the job drains."""
+
+    JOB = mock.Mock(identity="acme/widgets")
+
+    def ensure(self, fake):
+        with mock.patch.object(drain_prs_service, "run_command", fake):
+            return drain_prs_service.ensure_hold_label(self.JOB)
+
+    def test_the_name_is_the_one_the_drainer_reads(self):
+        self.assertEqual(drain_prs_service.HOLD_LABEL, drain_prs.HOLD_LABEL)
+
+    def test_a_missing_label_is_created_in_the_jobs_repository(self):
+        fake = FakeGithubLabels({"bug"})
+
+        result = self.ensure(fake)
+
+        self.assertEqual(result, {"label": "merge:hold", "created": True})
+        self.assertEqual(len(fake.creations()), 1)
+        create = fake.creations()[0]
+        self.assertEqual(create[3], "merge:hold")
+        self.assertEqual(create[create.index("--repo") + 1], "acme/widgets")
+        self.assertIn("merge:hold", fake.labels)
+        # Every call names the job's repository and no other.
+        for call in fake.calls:
+            self.assertEqual(call[call.index("--repo") + 1], "acme/widgets")
+
+    def test_an_existing_label_is_left_alone(self):
+        fake = FakeGithubLabels({"merge:hold", "bug"})
+
+        result = self.ensure(fake)
+
+        self.assertEqual(result, {"label": "merge:hold", "created": False})
+        self.assertEqual(fake.creations(), [])
+
+    def test_a_creation_that_lost_a_race_is_a_success(self):
+        fake = FakeGithubLabels(create_races=True)
+
+        result = self.ensure(fake)
+
+        self.assertEqual(result["label"], "merge:hold")
+        self.assertFalse(result["created"])
+
+    def test_a_label_that_cannot_be_confirmed_fails_naming_it(self):
+        fake = FakeGithubLabels(create_fails=True)
+
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            self.ensure(fake)
+
+        self.assertIn("merge:hold", str(raised.exception))
+        self.assertIn("acme/widgets", str(raised.exception))
+        self.assertIn("403", str(raised.exception))
+
+    def test_an_unreadable_label_listing_fails_rather_than_guessing(self):
+        def garbled(args, *, check=True):
+            return _completed(stdout="<html>captive portal</html>")
+
+        with mock.patch.object(drain_prs_service, "run_command", garbled):
+            with self.assertRaises(drain_prs_service.ServiceError):
+                drain_prs_service.ensure_hold_label(self.JOB)
+
+
+class InstallCommandHoldLabelTests(unittest.TestCase):
+    """The label is provisioned by the `install` command, before the job is
+    written, and by no other path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / ".git").mkdir()
+
+    def main(self, *, ensure, install):
+        argv = ["drain_prs_service.py", "--path", str(self.repo), "--json", "install"]
+        output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                drain_prs_service, "resolve_job", return_value=mock.Mock()
+            ),
+            mock.patch.object(drain_prs_service, "require_requested_identity"),
+            mock.patch.object(drain_prs_service, "ensure_hold_label", ensure),
+            mock.patch.object(drain_prs_service, "install_job", install),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = drain_prs_service.main()
+        return code, output.getvalue()
+
+    def test_a_confirmed_label_is_reported_with_the_install(self):
+        ensure = mock.Mock(return_value={"label": "merge:hold", "created": True})
+        install = mock.Mock(return_value={"installed": True})
+
+        code, output = self.main(ensure=ensure, install=install)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(output),
+            {"installed": True, "hold_label": {"label": "merge:hold", "created": True}},
+        )
+
+    def test_a_label_that_cannot_be_confirmed_fails_the_install(self):
+        ensure = mock.Mock(side_effect=drain_prs_service.ServiceError("no merge:hold"))
+        install = mock.Mock(return_value={"installed": True})
+
+        code, output = self.main(ensure=ensure, install=install)
+
+        self.assertEqual(code, 1)
+        install.assert_not_called()
+        self.assertEqual(output, "")
+
+    def test_starting_the_drainer_never_waits_on_the_label(self):
+        # `start` refreshes the definition through `install_job` and must keep
+        # working while GitHub is unreachable.
+        source = Path(drain_prs_service.__file__).read_text(encoding="utf-8")
+        start = source[source.index("def start_service(") : source.index("def stop_service(")]
+        self.assertNotIn("ensure_hold_label", start)
 
 
 if __name__ == "__main__":

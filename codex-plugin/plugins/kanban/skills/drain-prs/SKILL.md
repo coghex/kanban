@@ -129,6 +129,13 @@ pull request that actually reaches a stale-head rereview is left unmerged, with
 one open `no-agent-mode` per-PR incident recording it. That incident clears by
 itself once that pull request no longer needs a rereview, or through `ack`.
 
+A pull request carrying the `merge:hold` label is never merged, readied from
+draft, updated or rerun by the drainer — approved or not — and opens no
+incident for the hold; removing the label makes it eligible again on the next
+pass, with no restart. When the drainer is running, apply the hold before the
+review that would approve a pull request. This workflow never applies or
+removes the label itself.
+
 An eligible merge conflict is not repaired. The drainer records one open per-PR
 incident naming the conflicting files and stops merging that pull request — it
 touches no label, merges nothing, and creates no worktree. That incident clears
@@ -160,7 +167,12 @@ before their flags; without one, each acts on the latest open incident.
   its own when a check gets through. Name when it went offline and what failed
   from the `offline` field; it is not a crash and needs no recovery.
 - `install`: install or refresh this repository's managed job without starting
-  the drainer.
+  the drainer. It also makes sure the repository the job drains has the
+  `merge:hold` label — created when missing, left alone when present — and
+  fails naming that label before the job is written if it cannot confirm it
+  exists; re-run `install` to repair that. Report the `hold_label` field of
+  its result. This is the one GitHub write `install` performs, and `start`
+  never does it.
 - `start`: report whether it started or was already running. Run this only when
   the user explicitly supplied `start` or asked to start or resume the drainer
   in this turn.

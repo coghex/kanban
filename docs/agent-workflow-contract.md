@@ -1232,6 +1232,30 @@ reimplement the removal, and `--check` remains read-only.
   reviewer. This is the drainer's merge policy, and §2.10's manual finalization
   fallback keeps its own separate gate; `docs/pr-drainer.md` documents the
   operator-visible consequences.
+- **Merge hold:** a pull request carrying the `merge:hold` repository label is
+  never merged, readied from draft or updated by the drainer, and never has a
+  failed check rerun for it, in a polling pass or in `--pr` mode, whatever its
+  approval says (issue #774). The label is read live, never stored: before the draft readying
+  in both modes, before any mutation in `process_pr`, at both merge boundaries
+  through the shared pre-merge re-check, and in the post-merge audit, where a
+  hold that slipped through is a gate violation. An observed hold is a skip
+  reported as `not_eligible` with a message naming the label, never a failure,
+  so it records no cooldown; a review verdict (closed, `changes_requested`,
+  `not_approved`) keeps precedence over it. A held pull request neither takes
+  the active lane nor spends the recovery turn, and opens no incident for the
+  hold. It does not affect review: the canonical coordinator still applies and
+  removes `reviewed:*` labels and still readies an approved draft as part of
+  its own approval (§2.2), and finalization (§2.10) is unchanged. The label's
+  name is fixed, not configuration. Because the drainer **adds no label to a
+  pull request**, the one GitHub write on this surface is the controller's
+  `install`, which runs `gh label list` and, when `merge:hold` is missing,
+  `gh label create` against the repository the job drains — never the tree the
+  scripts came from — treats a concurrent creation as success once the labels
+  are read again, and fails naming the label, before the job is written, when
+  it cannot confirm it exists. `tools/install_drainer.py` reaches it through
+  that controller step, and `start`'s definition refresh does not. Covered by
+  `tools/test_single_pr_drain.py`, `tools/test_drain_prs_service.py`,
+  `tools/test_pure_logic.py` and `tools/test_integration.py`.
 - **Inputs:** repository path and repository identity; the repository's own
   service definition — a LaunchAgent plist under `~/Library/LaunchAgents` on
   macOS, a unit file under `~/.config/systemd/user` on Linux — each of which is
