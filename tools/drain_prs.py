@@ -1175,6 +1175,20 @@ def has_label(pr: dict[str, Any], label: str) -> bool:
     return any(item["name"] == label for item in pr.get("labels", []))
 
 
+def is_held(pr: dict[str, Any]) -> bool:
+    """Whether the pull request carries the hold label.
+
+    Compared case-insensitively, unlike the verdict labels, because GitHub
+    treats a repository's label names that way: an installation that finds an
+    existing `Merge:Hold` and so creates nothing has to be held by it too, or
+    the label it accepted would not hold anything.
+    """
+    return any(
+        str(item.get("name", "")).casefold() == HOLD_LABEL.casefold()
+        for item in pr.get("labels", [])
+    )
+
+
 def get_open_approved_prs(
     ctx: RepoContext,
     *,
@@ -1201,7 +1215,7 @@ def get_open_approved_prs(
         labels = {item["name"] for item in pr.get("labels", [])}
         if APPROVE_LABEL not in labels or CHANGES_LABEL in labels:
             continue
-        if HOLD_LABEL in labels:
+        if is_held(pr):
             # Before the draft readying below: a held pull request is left
             # exactly as the repository has it, and never becomes a candidate,
             # so it cannot own the active lane either.
@@ -3008,7 +3022,7 @@ def audit_merged_pr(
         problems.append(f"{APPROVE_LABEL!r} label missing")
     if has_label(audited, CHANGES_LABEL):
         problems.append(f"{CHANGES_LABEL!r} label present")
-    if has_label(audited, HOLD_LABEL):
+    if is_held(audited):
         problems.append(f"{HOLD_LABEL!r} label present")
     for kind, name in check_names.items():
         state = configured_check_state(audited, name)
@@ -3631,7 +3645,7 @@ def recover_stale_approval(
                 forget_pr(state, number)
             continue
 
-        if has_label(pr, HOLD_LABEL):
+        if is_held(pr):
             # A held pull request is not the drainer's to rereview, restore or
             # carry forward, and it must not spend the one recovery turn a
             # cycle owns. Nothing is forgotten: the entry waits for the hold
@@ -5735,7 +5749,7 @@ def gate_regression(
     # merge: both merge boundaries ask this question immediately before they
     # land anything. Reported as not_eligible, which is a skip, never a raise,
     # so it costs no failure cooldown that would outlast the label.
-    if has_label(pr, HOLD_LABEL):
+    if is_held(pr):
         return (
             "not_eligible",
             f"PR #{number} is held by {HOLD_LABEL}; it was labelled before "
@@ -5950,7 +5964,7 @@ def request_base_update(
     """
     number = pr["number"]
     head = pr["headRefOid"]
-    if has_label(pr, HOLD_LABEL):
+    if is_held(pr):
         log(f"PR #{number}: carries {HOLD_LABEL}; not updating its branch")
         set_outcome(report, "not_eligible", describe_hold(number))
         return False
@@ -6093,7 +6107,7 @@ def process_pr(
     # before every mutation below: a held pull request gets no conflict
     # incident, no branch update, no CI rerun and no merge. A skip, not a
     # DrainError, so the queue records no failure and no cooldown.
-    if has_label(pr, HOLD_LABEL):
+    if is_held(pr):
         log(f"PR #{number}: carries {HOLD_LABEL}; skipping")
         set_outcome(report, "not_eligible", describe_hold(number))
         return False
@@ -7195,7 +7209,7 @@ def prepare_single_pr(
             report, "not_approved", f"PR #{number} is not labelled {APPROVE_LABEL}."
         )
         return False
-    if has_label(pr, HOLD_LABEL):
+    if is_held(pr):
         # Before the draft readying below, and after the verdicts above: a
         # closed, changes-requested or unapproved pull request keeps its own
         # reason, and the hold is reported only for one that would otherwise

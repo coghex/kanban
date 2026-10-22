@@ -5685,6 +5685,24 @@ class HoldLabelProvisioningTests(unittest.TestCase):
         self.assertEqual(result, {"label": "merge:hold", "created": False})
         self.assertEqual(fake.creations(), [])
 
+    def test_an_existing_label_spelled_differently_counts_as_present(self):
+        # GitHub's lookup is case-insensitive, and the drainer's runtime gates
+        # are too (`drain_prs.is_held`), so what the install accepts holds.
+        fake = FakeGithubLabels()
+
+        def lookup(args, *, check=True):
+            fake.calls.append(list(args))
+            return _completed(stdout=json.dumps({"name": "Merge:Hold"}))
+
+        with mock.patch.object(drain_prs_service, "run_command", lookup):
+            result = drain_prs_service.ensure_hold_label(self.JOB)
+
+        self.assertEqual(result, {"label": "merge:hold", "created": False})
+        self.assertEqual(fake.creations(), [])
+        self.assertTrue(
+            drain_prs.is_held({"labels": [{"name": "Merge:Hold"}]})
+        )
+
     def test_a_creation_that_lost_a_race_is_a_success(self):
         fake = FakeGithubLabels(create_races=True)
 

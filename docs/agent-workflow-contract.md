@@ -1246,7 +1246,9 @@ reimplement the removal, and `--check` remains read-only.
   hold. It does not affect review: the canonical coordinator still applies and
   removes `reviewed:*` labels and still readies an approved draft as part of
   its own approval (§2.2), and finalization (§2.10) is unchanged. The label's
-  name is fixed, not configuration. Because the drainer **adds no label to a
+  name is fixed, not configuration, and is matched case-insensitively, as
+  GitHub treats label names, so the label `install` accepts is the one the
+  gates read. Because the drainer **adds no label to a
   pull request**, the one GitHub write on this surface is the controller's
   `install`, which looks the label up by exact name with `gh api` — never from
   a bounded label list — and, when `merge:hold` is missing, runs

@@ -175,6 +175,21 @@ class MergeHoldGateTests(unittest.TestCase):
         self.assertEqual(reason, "not_eligible")
         self.assertIn(drain_prs.HOLD_LABEL, message)
 
+    def test_the_hold_matches_however_the_label_is_cased(self):
+        for name in ("merge:hold", "Merge:Hold", "MERGE:HOLD"):
+            with self.subTest(name=name):
+                self.assertTrue(drain_prs.is_held(self.pr(name)))
+        for name in ("merge:holds", "hold", "reviewed:approve"):
+            with self.subTest(name=name):
+                self.assertFalse(drain_prs.is_held(self.pr(name)))
+        self.assertFalse(drain_prs.is_held({}))
+
+    def test_a_differently_cased_hold_is_audited_too(self):
+        audited = self.pr(drain_prs.APPROVE_LABEL, "Merge:Hold")
+        with mock.patch.object(drain_prs, "get_pr", return_value=audited):
+            with self.assertRaises(drain_prs.PostMergeAuditError):
+                drain_prs.audit_merged_pr(mock.sentinel.ctx, 7, self.HEAD, self.GATES)
+
     def test_an_unheld_pr_still_passes_it(self):
         pr = self.pr(drain_prs.APPROVE_LABEL)
         with mock.patch.object(drain_prs, "blocking_review_marker", return_value=None):

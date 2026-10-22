@@ -2991,6 +2991,26 @@ class SinglePrMergeHoldTests(MergeHoldFixture):
         # Nothing was recorded for it, so nothing is left to reset on release.
         self.assertNotIn("42", self.pass_state().get("prs", {}))
 
+    def test_the_hold_is_matched_however_github_spells_it(self):
+        # GitHub treats label names case-insensitively, so an installation
+        # that accepted an existing `Merge:Hold` is held by it too.
+        self.script_pr_view({"labels": [APPROVED, {"name": "Merge:Hold"}]})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assertIn(drain_prs.HOLD_LABEL, result["message"])
+        self.assert_left_alone()
+
+    def test_a_hold_spelled_differently_at_the_final_read_stops_the_merge(self):
+        self.script_pr_view({}, {}, {"labels": [APPROVED, {"name": "MERGE:HOLD"}]})
+
+        result, _ = self.run_single()
+
+        self.assertEqual(result["reason"], "not_eligible")
+        self.assert_left_alone()
+
     def test_a_held_pr_is_not_eligible_in_a_dry_run_either(self):
         self.script_pr_view({"labels": [APPROVED, HOLD]})
 
@@ -3137,6 +3157,15 @@ class MergeHoldQueuePassTests(MergeHoldFixture):
         self.assertEqual(
             run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
         )
+
+    def test_a_differently_cased_hold_leaves_a_draft_unreadied_and_unlisted(self):
+        self.script_pr_list(
+            [self.listed(42, APPROVED, {"name": "Merge:Hold"}, draft=True)]
+        )
+
+        self.run_pass()
+
+        self.assert_left_alone(42)
 
     def test_a_held_draft_is_not_readied(self):
         self.script_pr_list([self.listed(42, APPROVED, HOLD, draft=True)])
