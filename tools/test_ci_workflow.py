@@ -38,6 +38,13 @@ each is bound to the layout and the questions of one workflow, and a shared
 parser would make a change to either file's tests a change to both workflows'
 contracts.
 
+The python job's step is executed too. It keeps the suite's output and has
+`tools/check_resource_warnings.py` read it, since a leaked file or pipe is
+reported by a finalizer and never changes the exit status; the step runs here
+over a scratch `tools/` holding a deliberate leak (the guard must fail), the
+same test with the file closed (it must pass), and a failing test (the job must
+still fail and show that test's log lines).
+
 The extractor is dependency-free -- CI runs this suite with the runner's bare
 `python3`, which has no YAML library -- so it walks the workflow by
 indentation.
@@ -50,6 +57,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -74,6 +82,7 @@ HASKELL_JOB = "haskell"
 PYTHON_JOB = "python"
 SYSTEMD_JOB = "systemd-drainer-lifecycle"
 SDIST_STEP = "Source distribution"
+TOOLING_STEP = "Tooling tests"
 PREFIX_STEP = "Establish a runner-owned compiler installation prefix"
 VERIFY_STEP = "Verify the pinned toolchain"
 
@@ -257,7 +266,7 @@ def step_run_script(job, step_name):
     return "\n".join(script) + "\n"
 
 
-def run_script(script, env, *, extra_path=None, path=None):
+def run_script(script, env, *, extra_path=None, path=None, cwd=None):
     """Run an extracted step script the way the runner would."""
     full = dict(os.environ)
     full.update(env)
@@ -271,6 +280,7 @@ def run_script(script, env, *, extra_path=None, path=None):
         text=True,
         capture_output=True,
         stdin=subprocess.DEVNULL,
+        cwd=cwd,
     )
 
 
@@ -384,6 +394,97 @@ class CiWorkflowShapeTests(unittest.TestCase):
         # Which versions those are, and that `release.yml` installs the same
         # ones the same way, is tools/test_toolchain_parity.py's subject.
         self.assertIn("cabal-version:", directives)
+
+
+# -- the quiet-run guard, executed -----------------------------------------
+
+TOOLS_DIR = Path(__file__).resolve().parent
+
+
+class QuietRunGuardTests(unittest.TestCase):
+    """The python job's guard run as a runner would run it.
+
+    The job keeps the suite's output and has `check_resource_warnings.py` read
+    it, because a leak is reported by a finalizer and never changes the exit
+    status. The step's own script is extracted and run in a scratch directory
+    whose `tools/` holds the capture, the guard, and one test module -- with
+    the capture installed, as the real modules have it -- so what is executed
+    is the step, the guard, and the capture together.
+    """
+
+    LEAKING = """\
+import unittest
+
+import captured_output
+
+captured_output.install()
+
+
+class Leaks(unittest.TestCase):
+    def test_a_file_left_open(self):
+        # Read-only and never closed: the finalizer reports it, the exit
+        # status stays 0.
+        self.leaked = open(__file__, "rb")
+        del self.leaked
+        import gc
+
+        gc.collect()
+"""
+
+    CLOSED = LEAKING.replace(
+        "        self.leaked = open(__file__, \"rb\")\n        del self.leaked\n",
+        "        with open(__file__, \"rb\"):\n            pass\n",
+    )
+
+    FAILING = """\
+import unittest
+
+import captured_output
+
+captured_output.install()
+
+
+class Fails(unittest.TestCase):
+    def test_a_failure(self):
+        print("a log line the failure report must carry")
+        self.fail("deliberate")
+"""
+
+    def run_step(self, source):
+        scratch = tempfile.mkdtemp(prefix="quiet-run-guard-")
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        tools = Path(scratch) / "tools"
+        tools.mkdir()
+        for name in ("captured_output.py", "check_resource_warnings.py"):
+            shutil.copy2(TOOLS_DIR / name, tools / name)
+        (tools / "test_subject.py").write_text(source, encoding="utf-8")
+        return run_script(
+            step_run_script(PYTHON_JOB, TOOLING_STEP), {}, cwd=scratch
+        )
+
+    def test_the_job_runs_the_canonical_command_through_the_guard(self):
+        script = step_run_script(PYTHON_JOB, TOOLING_STEP)
+        self.assertIn("python3 -m unittest discover -s tools -p 'test_*.py'", script)
+        self.assertIn("tools/check_resource_warnings.py", script)
+
+    def test_a_leaked_file_fails_the_guard_though_the_suite_exits_zero(self):
+        proc = self.run_step(self.LEAKING)
+        # The leak is real and the suite passed, which is the whole reason the
+        # guard reads output instead of trusting the status.
+        self.assertIn("OK", proc.stderr + proc.stdout)
+        self.assertIn("ResourceWarning", proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("leaked-resource", proc.stderr)
+
+    def test_the_same_test_with_the_file_closed_passes_the_guard(self):
+        proc = self.run_step(self.CLOSED)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("ResourceWarning", proc.stdout + proc.stderr)
+
+    def test_a_failing_suite_still_fails_the_job_and_shows_its_logs(self):
+        proc = self.run_step(self.FAILING)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("a log line the failure report must carry", proc.stdout + proc.stderr)
 
 
 # -- the aggregate's own decision, executed --------------------------------

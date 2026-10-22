@@ -23,6 +23,11 @@ import fake_cli
 import git_fixture
 import service_manager
 
+# Keep each test's console output off the console unless the test fails.
+import captured_output
+
+captured_output.install()
+
 
 # The paginated comment feed drain_prs reads for pr-review markers, for the
 # `acme/widgets` slug every fixture here installs.

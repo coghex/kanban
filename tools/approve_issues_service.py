@@ -1983,16 +1983,26 @@ class Controller:
         clearing up after cannot be replaced by a wait that never returns.
         Nothing here re-raises: the original failure is the one worth
         reporting.
+
+        The backend's stdout and stderr pipes are closed on the way out, on
+        every exit. Nothing is left to read them: `communicate` is what closes
+        them on a pass that ran to completion, and this is a pass that did not.
         """
-        self.signal_child_group(child, signal.SIGINT)
         try:
-            child.wait(timeout=STOP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            self.terminate_process_group(child)
-            with contextlib.suppress(subprocess.TimeoutExpired):
+            self.signal_child_group(child, signal.SIGINT)
+            try:
                 child.wait(timeout=STOP_GRACE_SECONDS)
-        # Whatever the backend started and did not reap goes with it.
-        self.terminate_process_group(child)
+            except subprocess.TimeoutExpired:
+                self.terminate_process_group(child)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=STOP_GRACE_SECONDS)
+            # Whatever the backend started and did not reap goes with it.
+            self.terminate_process_group(child)
+        finally:
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError):
+                        pipe.close()
         with contextlib.suppress(OSError):
             self.log(
                 "A pass could not be supervised to completion; its backend process "
