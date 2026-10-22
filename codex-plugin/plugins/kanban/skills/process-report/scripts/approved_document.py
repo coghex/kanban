@@ -1028,12 +1028,19 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
                 "landed": True, "via": "receipt", "published_blob": published,
                 "receipt_commit": receipt,
             }
-    present = blob_at(root, remote, document)
-    if present is not None and present == approved:
-        return {
-            "landed": True, "via": "already-present", "published_blob": approved,
-            "receipt_commit": None,
-        }
+    # "Nothing to land": the branch carries the approved blob at this path now,
+    # or carried it at the tip the record was made against. The second half is
+    # what keeps the verdict across an interruption: a later edit that moves the
+    # document away from those bytes does not un-establish that the mutation
+    # was already there, and republishing would reinstate it over that edit.
+    for revision in (remote, pending["rendered_tip"]):
+        if tip_reachable or revision == remote:
+            present = blob_at(root, revision, document)
+            if present is not None and present == approved:
+                return {
+                    "landed": True, "via": "already-present", "published_blob": approved,
+                    "receipt_commit": None,
+                }
     if not tip_reachable:
         raise DocumentError(
             "pending-stale",

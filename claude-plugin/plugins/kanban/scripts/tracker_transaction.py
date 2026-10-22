@@ -1471,31 +1471,41 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
             f"{document} is not the content the approved-document helper applied "
             f"({present} rather than {recorded}), so it has been changed since"
         )
-    # "Not landed" is a statement about the branch's history, not about its tip:
-    # a later edit can replace the landed content (and the entry the tracker
-    # transaction needs) while the landing itself stays a fact. So the content's
-    # blob is looked for in every revision of the document that reached the
-    # branch, and a history that cannot be read refuses rather than guesses.
-    history = git(
-        [
-            "log", "--no-renames", "--raw", "--no-abbrev", "--format=",
-            f"origin/{branch}", "--", f":(literal){document}",
-        ],
-        cwd=root, check=False,
-    )
-    if history.returncode != 0:
+    # "Not landed" is a statement about the branch's whole reachable history,
+    # not about its tip and not about a path-simplified view of it: a later edit
+    # can replace the landed content (and the entry the tracker transaction
+    # needs) while the landing stays a fact, and a merge that kept an older copy
+    # of the document through its first parent hides a landing reachable
+    # through its second. So the content's blob is looked for at the document's
+    # path in every reachable commit, and a history that cannot be read
+    # refuses rather than guesses.
+    if "\n" in document:
+        return False, f"{document} has a newline in its name, so its history cannot be searched"
+    commits = git(["rev-list", f"origin/{branch}"], cwd=root, check=False)
+    if commits.returncode != 0:
         return False, (
-            f"the history of {document} on origin/{branch} could not be read, so "
+            f"the history of origin/{branch} could not be read, so whether the "
+            "applied content already landed cannot be decided"
+        )
+    names = "".join(
+        f"{commit}:{document}\n"
+        for commit in commits.stdout.decode().split()
+    )
+    probed = git(
+        ["cat-file", "--batch-check=%(objectname)"],
+        cwd=root, check=False, input_bytes=names.encode(),
+    )
+    if probed.returncode != 0:
+        return False, (
+            f"the revisions of {document} on origin/{branch} could not be read, so "
             "whether the applied content already landed cannot be decided"
         )
-    for line in history.stdout.decode(errors="replace").splitlines():
-        fields = line.split("\t", 1)[0].split()
-        if len(fields) >= 5 and fields[3] == recorded:
-            return False, (
-                f"origin/{branch} already carried the applied content of "
-                f"{document} at some revision, so it is landed rather than "
-                "locally applied and is verified on the branch"
-            )
+    if recorded in probed.stdout.decode().split():
+        return False, (
+            f"origin/{branch} already carried the applied content of "
+            f"{document} at some revision, so it is landed rather than "
+            "locally applied and is verified on the branch"
+        )
     landed, why = recorded_publication_landed(root, record, branch)
     if landed is None:
         return False, why

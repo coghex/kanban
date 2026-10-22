@@ -900,6 +900,24 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(len(self.calls()), 1)
         self.assertIsNone(self.fx.pending())
 
+    def test_an_already_present_landing_survives_a_later_revert_and_is_never_republished(self):
+        # PR #836 round 4. The branch already carried the approved bytes; the run
+        # died before cleanup; then the document moved away from them. The
+        # recorded tip still carries them, so the mutation is not republished
+        # over the later edit.
+        self.fx.upstream_edit(EDITED)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        self.die("settle_landed")
+        self.assertEqual(self.calls(), [])
+        self.fx.upstream_edit(NOTES.replace("- line 8\n", "- line 8, edited later\n"))
+        tip = self.fx.origin_tip()
+        outcome = self.approve(EDITED)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "already-present")
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.fx.origin_tip(), tip)
+        self.assertIsNone(self.fx.pending())
+
     def test_a_same_document_advance_after_the_push_is_still_published(self):
         self.die("settle_landed")
         receipt_blob = self.fx.origin_blob()
@@ -1665,6 +1683,41 @@ class LocalCheckpointTests(ApprovedFixture):
         )
         commit = approved.build_pending_commit(self.fx.work, DOC, fields)
         run(["git", "update-ref", record["ref"], commit], self.fx.work)
+
+    def test_a_legacy_applied_only_landing_behind_a_merge_resolves_on_the_branch_only(self):
+        # PR #836 round 4. The publisher applied the disposition locally and
+        # recorded only the applied reference. Those exact bytes then landed,
+        # and a merge kept the older document through its first parent while the
+        # landing stays reachable through its second.
+        ref = self.confirmed_transaction()
+        outcome = publisher.publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=self.STATUS.encode(), message="legacy",
+            expected_working_copy=blob_of(NOTES),
+        )
+        self.assertEqual(outcome["status"], "not-published")
+        self.assertEqual(self.fx.applied(), blob_of(self.STATUS))
+        self.assertIsNone(self.fx.pending())
+        self.fx.upstream_edit(self.STATUS)
+        receipt = self.fx.origin_tip()
+        base = run(["git", "rev-parse", f"{receipt}~1"], self.fx.primary)
+        run(["git", "checkout", "-q", "-B", "side", base], self.fx.primary)
+        self.fx.write(self.fx.primary, "# Other, edited\n", OTHER)
+        run(["git", "commit", "-qam", "an unrelated edit on a side line"], self.fx.primary)
+        run(["git", "merge", "-q", "-s", "ours", "--no-edit", receipt], self.fx.primary)
+        run(["git", "push", "-q", "origin", "side:master"], self.fx.primary)
+        self.assertEqual(self.fx.origin_blob(), blob_of(NOTES))
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("already carried the applied content", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.action_resolve(
+                self.fx.work, ref, *tracker.read_record(self.fx.work, ref),
+                "branch", "master",
+            )
+        self.assertEqual(caught.exception.status, "resolution-unverified")
 
     def test_a_malformed_applied_record_licenses_nothing(self):
         ref = self.confirmed_transaction()
