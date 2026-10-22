@@ -587,18 +587,23 @@ existing coordinator error path rather than retrying with another identity.
     nothing to stdout, and never falls back to the defaults, because an
     operator who edited the file to change a model must never have a reviewer
     quietly run on the one they believed they replaced. The reviewer display
-    names in published comments are deliberately *not* roster-derived: they
-    are a reviewer persona this backend parses back out of historical markers,
-    and they keep their own `APPROVE_ISSUES_CODEX_DISPLAY_NAME` /
-    `APPROVE_ISSUES_CLAUDE_DISPLAY_NAME` overrides. Precisely because a
-    persona can therefore name something other than what ran, the review
-    prompt and the published comment's header state the resolved model and
-    effort *beside* the persona rather than through it. The persona list the
-    backend parses historical summaries with only ever grows: a retired name
-    stays readable, because a review predating the marker's `verdicts=` field
-    has nothing else to recover a per-reviewer verdict — and therefore a
-    rereview route — from. The `models=` field's rule is narrower, and stated
-    next.
+    names in published comments come from the same cells: each defaults to the
+    `display` of that provider's `roles.issue_gate` assignment, so the
+    persona a review signs with is the roster's own label rather than a name
+    this file spells. `APPROVE_ISSUES_CODEX_DISPLAY_NAME` /
+    `APPROVE_ISSUES_CLAUDE_DISPLAY_NAME` remain explicit overrides, and win
+    outright. When the roster is unusable, or a provider is not loaded, and no
+    override is set, the display carries the same unresolved sentinel the
+    model and effort do; an absent roster file is the compiled defaults and
+    their labels. An override can still make a persona name something other
+    than what ran, so the review prompt and the published comment's header
+    state the resolved model and effort *beside* the persona rather than
+    through it. The persona list the backend parses historical summaries with
+    only ever grows: a retired name stays readable, and the roster's current
+    `display` is read back as well even when an override changed what the run
+    signs with, because a review predating the marker's `verdicts=` field has
+    nothing else to recover a per-reviewer verdict — and therefore a rereview
+    route — from. The `models=` field's rule is narrower, and stated next.
     The resolved assignment is what a published marker's `models=` field
     records, and that record is all it is. Whether an approval stands depends
     only on three things: the marker's `spec=` is the issue's current spec

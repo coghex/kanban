@@ -76,7 +76,7 @@ class CompiledDefaultsTests(unittest.TestCase):
         # build is byte-identical to what the retired literals produced.
         for cell, expected in (
             (("issue_gate", "codex"), ("gpt-6-astra", "high")),
-            (("issue_gate", "claude"), ("claude-fable-5-1", "high")),
+            (("issue_gate", "claude"), ("claude-opus-5-5", "xhigh")),
             (("drain_rereview", "codex"), ("gpt-6-sol", "medium")),
             (("pr_review", "codex"), ("gpt-6-sol", "xhigh")),
             (("pr_review", "claude"), ("claude-opus-5-5", "xhigh")),
@@ -112,10 +112,10 @@ class CompiledAssignmentTests(unittest.TestCase):
         ("pr_revise", "codex"): ("gpt-6-sol", "high", "GPT-6-Sol high"),
         ("pr_revise", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_review", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
-        ("issue_review", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
-        ("issue_revise", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
+        ("issue_review", "claude"): ("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
+        ("issue_revise", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_gate", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
-        ("issue_gate", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
+        ("issue_gate", "claude"): ("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
         ("drain_rereview", "codex"): ("gpt-6-sol", "medium", "GPT-6-Sol medium"),
         ("drain_rereview", "claude"): ("claude-opus-5-5", "medium", "Opus 5.5 medium"),
     }
@@ -149,9 +149,19 @@ class CompiledAssignmentTests(unittest.TestCase):
                 "pr_revise": ["high"],
                 "issue_review": ["xhigh"],
                 "issue_revise": ["high"],
-                "issue_gate": ["high"],
+                # The one lane that is not uniform: the Claude gate runs at
+                # xhigh, the owner's current policy, and the Codex gate at high.
+                "issue_gate": ["high", "xhigh"],
                 "drain_rereview": ["medium"],
             },
+        )
+        self.assertEqual(
+            {
+                provider: effort
+                for (role, provider), (_m, effort, _d) in self.EXPECTED_CELLS.items()
+                if role == "issue_gate"
+            },
+            {"codex": "high", "claude": "xhigh"},
         )
 
     def test_the_selectable_models_are_the_ones_still_in_use(self):

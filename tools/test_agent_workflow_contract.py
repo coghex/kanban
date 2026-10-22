@@ -3604,33 +3604,47 @@ class RecurringTimerInventoryTests(unittest.TestCase):
 
 
 class IssueGateInstructionParityTests(unittest.TestCase):
-    """The packaged workflow assets name the gate's models; the backend picks
-    them. PR #629 moved the `issue_gate` efforts and left four assets telling
-    agents a route the backend no longer takes.
+    """The packaged workflow assets describe the gate's route without naming a
+    model; the backend picks it from the roster. PR #629 moved the
+    `issue_gate` efforts and left four assets telling agents a route the
+    backend no longer takes, and #827 moved the Claude cell again -- so the
+    assets now say "the roster's `issue_gate` assignment" and name no model,
+    persona or effort for the next change to strand.
 
     Nothing executes these strings, so no other gate catches the drift -- and
     they are the program an agent follows, which is exactly why CLAUDE.md holds
-    a bundle asset to a regression assertion like any other code. The
-    expectation is RESOLVED from the roster rather than spelled here, so the
-    next assignment change fails this instead of shipping stale instructions.
+    a bundle asset to a regression assertion like any other code. The routing
+    itself is the part worth holding: who reviews which origin, and where each
+    dissent goes, is `approve_issues.py`'s `rereview_reviewers` and the
+    origin-to-opposite-brand rule, and it is what these assertions pin.
     """
 
     # Every asset that states the canonical gate route, and the negative
     # control beneath it: assets that delegate reviewer selection without
     # naming a model owe nothing here.
-    NAMING_ASSETS = (
+    REVIEW_ASSETS = (
         "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
         "claude-plugin/plugins/kanban/commands/issue-review.md",
+    )
+    REREVIEW_ASSETS = (
         "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
         "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     )
+    NAMING_ASSETS = REVIEW_ASSETS + REREVIEW_ASSETS
     DELEGATING_ASSETS = (
         "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
         "claude-plugin/plugins/kanban/commands/pr-review.md",
     )
 
-    def gate_displays(self):
-        # The tracked reader itself, not a second spelling of its values.
+    CODEX_CELL = "the roster's Codex `issue_gate` assignment"
+    CLAUDE_CELL = "the roster's Claude `issue_gate` assignment"
+
+    def read(self, asset):
+        return (REPO_ROOT / asset).read_text(encoding="utf-8")
+
+    def retired_and_current_names(self):
+        # The tracked reader itself, not a second spelling of its values, plus
+        # the personas the backend retired.
         import sys
 
         if str(REPO_ROOT / "tools") not in sys.path:
@@ -3638,42 +3652,50 @@ class IssueGateInstructionParityTests(unittest.TestCase):
         import kanban_models
 
         roster = kanban_models.DEFAULT_ROSTER
-        return {
-            provider: roster.assignment_for("issue_gate", provider).display
-            for provider in ("codex", "claude")
+        names = {
+            "Claude Fable 5.1",
+            "Claude Opus 5",
+            "Claude Fable 5",
+            "GPT-6-Astra",
+            "GPT-5.6-Sol",
+            "GPT-5.6-Terra",
         }
+        for provider in ("codex", "claude"):
+            assignment = roster.assignment_for("issue_gate", provider)
+            names |= {assignment.model, assignment.display}
+        return names
 
-    def test_every_naming_asset_states_the_resolved_gate_route(self):
-        displays = self.gate_displays()
-        # "GPT-6-Astra high" / "Fable 5.1 high" -> the prose spells the persona
-        # and effort, so assert on the display the roster actually resolves.
-        codex_display = displays["codex"]
-        claude_display = displays["claude"].replace("Fable", "Claude Fable")
-        for asset in self.NAMING_ASSETS:
-            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
+    def test_the_review_assets_route_each_origin_through_the_roster(self):
+        for asset in self.REVIEW_ASSETS:
+            text = self.read(asset)
             with self.subTest(asset=asset):
-                self.assertIn(codex_display, text)
-                self.assertIn(claude_display, text)
+                self.assertIn(f"`issue-origin:claude` to {self.CODEX_CELL}", text)
+                self.assertIn(f"`issue-origin:codex` to {self.CLAUDE_CELL}", text)
+                # The third arm of the route is unchanged and still stated.
+                self.assertIn("unmarked legacy issues to independent reviews by both", text)
 
-    def test_no_naming_asset_states_a_route_the_backend_does_not_take(self):
-        displays = self.gate_displays()
-        stale = {
-            f"GPT-6-Astra {effort}"
-            for effort in ("minimal", "low", "medium", "high", "xhigh")
-        } - {displays["codex"]}
-        stale |= {
-            f"Claude Fable 5.1 {effort}"
-            for effort in ("low", "medium", "high", "xhigh")
-        } - {displays["claude"].replace("Fable", "Claude Fable")}
+    def test_the_rereview_assets_route_each_dissent_through_the_roster(self):
+        for asset in self.REREVIEW_ASSETS:
+            text = self.read(asset)
+            with self.subTest(asset=asset):
+                self.assertIn(f"Codex dissent routes to {self.CLAUDE_CELL}", text)
+                self.assertIn(f"Claude dissent routes to {self.CODEX_CELL}", text)
+                self.assertIn(
+                    "dissent from both routes to the Codex assignment", text
+                )
+
+    def test_no_naming_asset_names_a_model_persona_or_effort(self):
+        names = self.retired_and_current_names()
         for asset in self.NAMING_ASSETS:
-            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
-            for wording in sorted(stale):
-                with self.subTest(asset=asset, wording=wording):
-                    self.assertNotIn(wording, text)
+            text = self.read(asset)
+            for name in sorted(names):
+                with self.subTest(asset=asset, name=name):
+                    self.assertNotIn(name, text)
 
     def test_the_delegating_assets_name_no_gate_model_at_all(self):
         # The negative control: a rule that matched everything could pass
         # while asserting nothing.
+        names = self.retired_and_current_names()
         for asset in self.DELEGATING_ASSETS:
             path = REPO_ROOT / asset
             with self.subTest(asset=asset):
@@ -3681,7 +3703,13 @@ class IssueGateInstructionParityTests(unittest.TestCase):
                 # control silently, which is the one thing a negative control
                 # must never do.
                 self.assertTrue(path.exists(), f"{asset} is gone; retarget this control")
-                self.assertNotIn("GPT-6-Astra", path.read_text(encoding="utf-8"))
+                text = path.read_text(encoding="utf-8")
+                for name in sorted(names):
+                    self.assertNotIn(name, text)
+                # And they do not carry the roster-routing wording either, so
+                # the positive assertions above are not satisfied by a phrase
+                # every asset happens to contain.
+                self.assertNotIn("`issue_gate` assignment", text)
 
 
 if __name__ == "__main__":
