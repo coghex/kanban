@@ -287,7 +287,8 @@ enabled = false
 # below are exactly the `coordination` rows of docs/agent-workflow-contract.md
 # section 7 -- the findings, code-health, and design documents and the vision
 # whose content nothing in that repository reads, plus the docs/coordination/ directory of
-# free-form notes, declared once rather than per file. So the drainer may
+# free-form notes and the docs/archive/ directory of finished records, each declared once
+# rather than per file. So the drainer may
 # merge past an advance that only touches them instead of requesting a branch
 # update that cannot change the result. tools/test_document_classification.py
 # reconciles this list against those rows by effective coverage, so the two
@@ -297,6 +298,7 @@ enabled = false
 # and is never inferred for another.
 [repositories."coghex/kanban".workflow]
 coordination_paths = [
+  "docs/archive/",
   "docs/code-health-report.md",
   "docs/coordination/",
   "docs/designs/",

@@ -462,6 +462,10 @@ marker, instead of being committed to the branch — unless `docs-push` refuses
 the path as code, or this checkout's own `origin` is not the pull request's base
 repository (a fork checkout): `docs-push` publishes to `origin`, so in either
 case the documentation is committed to the branch like the code.
+Unless the spec names its path, a verdict or evidence write-up goes under
+`docs/archive/`, because it records finished work and repositories hide that
+directory from search; design notes and contracts are updated where they live.
+That decides only where the file goes, not how it lands.
 
 Before pushing, re-fetch the pull request branch from the recorded head
 repository and verify its remote head still equals the recorded SHA. If the

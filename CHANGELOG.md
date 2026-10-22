@@ -15,6 +15,15 @@ created above it.
 
 ### Unreleased
 
+- The solve family writes a verdict or evidence write-up under `docs/archive/`
+  unless the spec names its path; design notes and contracts are still updated
+  where they live (#823). `docs/agent-workflow-contract.md` §2.1 tells a
+  repository using these workflows to hide `docs/archive/` from search: a root
+  `.ignore` entry in Git, `.rgignore` in Pijul, which reads `.ignore` itself.
+  This repository does so, classifies `docs/archive/` as a `coordination`
+  directory, and leaves it and `.ignore` out of the release. Bundles: Claude
+  1.77.0, Codex 1.76.0, Grok 1.11.3, Kimi 1.10.3, Google 1.8.3,
+  Claude-on-Copilot 1.0.3.
 - Rewrote the contracts around the board, the usage panel and the tracked
   skills and scripts (epic #794, child 6, #800). The application is now the
   four-column board and the Codex and Claude usage panel, with `--usage`,
