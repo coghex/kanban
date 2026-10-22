@@ -77,6 +77,8 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 
 The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents or systemd user units. The one exception is the source-release check below, which runs the real `cabal` against this checkout; it still writes only to a temporary directory.
 
+A passing run writes nothing but unittest's progress characters and its summary. Suites that run the drainer or the approval service in-process call `captured_output.install()` (`tools/captured_output.py`), which keeps each test's console output off the console and appends it to that test's failure report instead; a new suite that drives code which logs to stdout or stderr does the same. A leaked file, pipe, or temporary directory shows up as a `ResourceWarning` and is never captured: close it where it was opened, because CI's `python` job fails the run when its output carries one (`tools/check_resource_warnings.py`).
+
 The Haskell suite includes the golden-frame tests, which compare rendered
 terminal frames with the files checked in under `test/golden/`. A normal run
 only ever reads them. After a deliberate rendering change, rewrite them with
