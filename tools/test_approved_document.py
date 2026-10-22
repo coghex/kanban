@@ -902,6 +902,60 @@ class InterruptionTests(ApprovedFixture):
         self.assertIsNotNone(self.fx.pending())
         self.assertIn("local work after", self.fx.read(self.fx.work))
 
+    def failing_delete(self, ref):
+        """`git update-ref -d <ref> <old>` fails, as a contended or read-only
+        reference store would make it."""
+        real = approved.git
+
+        def git(args, **kwargs):
+            if args[:2] == ["update-ref", "-d"] and args[2] == ref:
+                return subprocess.CompletedProcess(args, 1, b"", b"fatal: cannot lock")
+            return real(args, **kwargs)
+
+        patcher = unittest.mock.patch.object(approved, "git", git)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_cleanup_that_fails_is_reported_and_the_next_run_finishes_it(self):
+        for which, ref in (
+            ("pending", approved.pending_ref(REPOSITORY, DOC)),
+            ("applied", approved.applied_ref(REPOSITORY, DOC)),
+        ):
+            with self.subTest(record=which):
+                self.setUp()
+                self.failing_delete(ref)
+                error = self.failure(self.approve, EDITED)
+                self.assertEqual(error.status, "record-retained")
+                self.assertTrue(error.detail["remote_contains_commit"])
+                self.assertEqual(self.fx.origin_blob(), blob_of(EDITED))
+                unittest.mock.patch.stopall()
+                self.setUpEnvironment()
+                # The landing is a fact; the retained record is reconciled, not
+                # published a second time.
+                outcome = self.resume() if which == "pending" else self.approve(EDITED)
+                self.assertEqual(outcome["status"], "published")
+                self.assertEqual(outcome["resumed"], "already-landed")
+                self.assertEqual(len(self.calls()), 1)
+                self.assertIsNone(self.fx.pending())
+                self.assertIsNone(self.fx.applied())
+
+    def test_clearing_is_bound_to_the_value_this_run_read(self):
+        # A pending record replaced between the verification and the delete is
+        # somebody else's; the compare-and-swap leaves it alone.
+        self.die("settle_landed")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        run(["git", "update-ref", record["ref"],
+             self.helper_replacement()], self.fx.work)
+        info = approved.landing(self.fx.work, "master", record)
+        error = self.failure(
+            approved.settle_landed, self.fx.work, REPOSITORY, "master", DOC, record, info
+        )
+        self.assertEqual(error.status, "record-retained")
+        self.assertNotEqual(self.fx.pending(), record["commit"])
+
+    def helper_replacement(self):
+        return run(["git", "commit-tree", "HEAD^{tree}", "-m", "someone else's record"], self.fx.work)
+
     def test_a_different_disposition_cannot_be_approved_over_an_unresolved_record(self):
         self.die("run_publication_tool")
         other = EDITED.replace("- line 4\n", "- line 4, another disposition\n")

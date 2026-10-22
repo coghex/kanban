@@ -1054,7 +1054,7 @@ def publication_tool() -> dict:
     document is read from. A tool without either is reported, never worked
     around.
     """
-    path = shutil.which(TOOL)
+    path = shutil.which("docs-push")
     if path is None:
         return {
             "available": False, "reason": "tool-missing",

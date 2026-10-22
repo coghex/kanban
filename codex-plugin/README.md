@@ -227,6 +227,13 @@ against a simulated install. An edit to a `tools/` module therefore has to be
 copied into both bundles in the same change; the drift failure names the exact
 `cp` that repairs it.
 
+`skills/process-report/scripts/approved_document.py`, a fifth byte-identical copy
+(of `tools/approved_document.py`, issue #830), ships beside them: the
+document-write half of the publisher, which hands an approved document to the
+external `docs-push` instead of pushing it. No skill invokes it yet. The
+follow-up slice points the processing workflows at it and retires the
+publisher.
+
 Eligibility does not travel with the mechanism. For `coghex/kanban` it stays
 [agent-workflow-contract.md §7](../docs/agent-workflow-contract.md#7-document-publication-classification)
 as the publication branch itself carries it; for every other repository it is

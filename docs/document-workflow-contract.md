@@ -651,6 +651,24 @@ push frequency, so §5's one-artifact boundary is untouched: an approved
 publication is the same artifact's last step, never a licence to sweep in a
 second.
 
+**Under the approved-document helper (issue #830, taking over in slice C).**
+`tools/approved_document.py` is added beside the publisher in slice B and
+replaces its publication half in slice C; until then every declared asset still
+publishes through the publisher and this paragraph describes the mechanism that
+is waiting, not the one running. A publication through the helper carries the
+one named document and nothing else, for a stronger reason than the commit's
+shape: the helper builds no commit. It names exactly one path to `docs-push`,
+which builds a commit holding that path alone on `origin/<default>`, and lands
+the approved bytes with `--expect` rather than whatever the file holds by then.
+Because `docs-push` merges three ways, the blob that lands may legitimately
+differ from the blob that was approved when the default branch moved under the
+run; the result reports the **approved blob** and the **published blob**
+separately and does not require them equal. Whether the path may land directly
+is `docs-push`'s decision from its own configuration. The helper never reads
+`workflow.direct_publication_paths`, §7 of `docs/agent-workflow-contract.md`, or
+`workflow.coordination_paths`, and a refusal is an outcome it reports (§9.5),
+not a lane it routes around.
+
 ### 9.4 The mechanism lives in one tested module
 
 `tools/publish_coordination_doc.py` is the whole mechanism, and the declared
@@ -908,6 +926,97 @@ guard at all. The assets are held to extracting it for real rather than to
 mentioning the flag, because a binding that expanded to nothing is exactly the
 defect this rule exists to have caught.
 
+#### The approved-document helper (slice B of #775)
+
+`tools/approved_document.py` is the document-write protocol of
+`tools/publish_coordination_doc.py` made independent of the publication
+mechanism. It is added by issue #830 (slice B of #775: A → B → C → D), changes no
+asset, and leaves the publisher in place and working; slice C points the
+processing, drafting and note-problem assets at it and deletes the publisher,
+and slice D retires the §7 lane. It owns, and only owns:
+
+1. **Approved-content application.** The caller supplies the complete approved
+   document through a scratch path the helper mints (`--new-content-file`); it
+   never supplies a pre-edited file. The helper binds the content to the verified
+   repository (the write root's own `origin`, never the argument), the
+   repository-relative path, the baseline the caller's preflight observed
+   (`working_copy_blob`, passed back as `--expected-working-copy`) and the exact
+   approved blob, and replaces the document only while it still holds those
+   baseline bytes. The replacement is the publisher's capture-and-refuse
+   protocol and not a read followed by a write: an outside edit is preserved in
+   the object database and put back, a staged target is refused, and a write
+   that lost a race leaves the winner in place. The write root is the owning
+   repository's current isolated worktree; `docs-wip` is neither required nor
+   selected, and the helper never checks out, resets, switches or stages
+   anything.
+2. **Per-document serialization.** One lock per (repository, document), keyed by
+   the same digest as the publisher's, so the two exclude each other.
+3. **The pending and applied records**, in the publisher's own namespaces with
+   the same key: `refs/kanban/pending-publication/<key>` and
+   `refs/kanban/applied-locally/<key>`. The pending record is a parentless
+   commit whose tree holds the document at the approved blob and whose message
+   carries the repository, document, baseline, approved blob, the tip it was
+   rendered against and a fresh attempt identifier, so the approved bytes are
+   retained by object reachability and not by a name in metadata. It is written
+   before the document is replaced. The applied record is a blob reference
+   naming the exact content written. The helper reads both record forms: its
+   own, and the publisher's commit-shaped one, which it resumes by re-seating it
+   as its own under compare-and-swap.
+4. **The preflight** (`--check-pending`), which keeps the publisher's contract:
+   `status` is `clear` or `pending`; `publication_tip` is a freshly fetched tip;
+   `working_copy_blob`, `pending_kinds` and the `tracker_transaction` report are
+   present; and it stops a run that has a pending publication or an unresolved
+   tracker transaction before any further tracker mutation. A tracker module
+   that cannot be read, or a publication tool that is missing or lacks `--expect`
+   or `--keep`, fails the preflight closed with the records already read
+   attached, because learning that nothing can land the document after the first
+   irreversible tracker step is the failure the preflight exists to prevent.
+5. **The one call to `docs-push`**, from the write root, naming that one path:
+   `docs-push --expect <approved_blob> --keep -m <message> <document>`. The
+   commit message carries a trailer naming the repository, document, approved
+   blob and attempt. A missing tool, a tool lacking either flag, a refusal (a path
+   the tool's configuration lists as code), a conflict, or a file changed
+   between the write and `--expect` is an **`incomplete-publication`** outcome
+   carrying the tool's exact message. The helper never falls back to a raw
+   `git push` or another publisher, never retries by other means, and leaves the
+   approved content and its records in place.
+
+**Receipts decide landing, never output.** After the call the helper fetches
+`origin/<default>` and decides "published" from reachability alone: a commit
+carrying this attempt's trailer, touching only this document, lies in the history
+since the recorded tip; or the default branch already carries the approved blob
+at this path (the tool's "nothing to land"). A trailer for another attempt or
+another document, or the same bytes at another path, is not a landing. The
+published blob is the receipt commit's own blob for the document, not a later
+tip's, so a same-document advance after the push changes neither the verdict nor
+the blob. Misleading output in either direction decides nothing. Clearing the
+pending record requires the write root to still hold the published blob; when it
+does not, the record stays and the outcome is `landed-but-divergent`.
+
+**Recovery points.** An interruption (a) before application, (b) after
+application and before the tool, (c) after publication and before cleanup —
+including after a successful three-way merge — or (d) between a tracker
+checkpoint and its resolution, each resumes the recorded mutation through
+`docs-push`, or reconciles content that already landed, without writing twice,
+pushing twice or repeating a confirmed tracker mutation. `--resume` finishes the
+recorded mutation from its retained content, and re-running with the same
+content does the same. A record that is stale (its tip left the branch's
+history), changed (the document is neither the baseline nor the approved
+content), malformed or unverifiable stops with a specific report; the helper
+never ignores or deletes one to proceed, and a different disposition is refused
+until the recorded one is resolved.
+
+**Shipped as a unit.** The helper is a byte-identical copy in both bundles beside
+`tracker_transaction.py`, which it loads from beside itself, resolved from the
+installed bundle and never from the consuming repository or a personal path.
+`tools/test_approved_document.py` drives it against temporary repositories with a
+controlled `docs-push` first on `PATH` (`tools/fake_docs_push.py`); the fake
+implements the contract above and claims nothing about the owner's own git
+engine, whose behavioral coverage (`--get` and edit, three-way merge, the
+lost-push-race retry) belongs to its owner and is documented, not copied. No copy
+of `docs-push` ships in any bundle, and the helper reads neither the tool's
+configuration nor `~/.config/docs-push.json`.
+
 ### 9.5 What "published" means, and the three-state failure report
 
 A run may describe a document as published only when the module reports it, and
@@ -992,6 +1101,17 @@ never widened to a status, a write outcome, or a record on its own.
 still invoked, its result still inspected, and §9.6's transaction still resolved
 before the run closes. Silence is what a run says at the end, never a step it
 skips.
+
+**Under the approved-document helper (slice B of #775).** Two outcomes are
+reported where the publisher reported one. `published` carries the approved blob
+and the published blob separately, the receipt commit, how the landing was
+established (`receipt`, `already-present`, or the publisher's recorded commit),
+and the tool's result as information only. `incomplete-publication` is not a
+failure of the document and not a success of the publication: the approved
+content is applied, its records are kept, `remote_contains_commit` is `false` (or
+`null` when the branch could not be fetched to find out), and the tool's exact
+message is carried. Every failure short of those still carries §9.5's three
+states. The command line exits `0` only for `published`.
 
 ### 9.6 The tracker transaction
 
@@ -1240,6 +1360,23 @@ module.
 **It fails closed.** A record that cannot be created, read, or updated stops the
 run before its first irreversible action. There is no path on which an
 unreadable transaction reads as no transaction.
+
+**Local resolution under the approved-document helper (slice B of #775).**
+`tools/tracker_transaction.py` no longer loads the publisher, and so no longer
+asks whether a document has a direct-publication lane. `--resolve --source branch`
+is unchanged: it verifies the approved disposition and the artifact identity in
+the document reachable from a freshly fetched `origin/<default>`.
+`--resolve --source local` is permitted only for content the helper's exact
+applied record shows was applied and has not landed: the reference must name a
+blob, the working copy must still be that blob, and the branch must not already
+carry it. A hand edit permits nothing, and neither does the mere absence of an
+old lane. The checkpoint is a **local** one: the result reports `published:
+false` and, from the helper's pending record, `publication_obligation`. A
+successful local checkpoint resolves the tracker half only; it does not clear
+the publication obligation, which stays until a landing is verified on the
+branch, and the preflight keeps stopping the next disposition until it is. A
+missing or failing `docs-push` leaves the approved content and its record in
+place for exactly that reason.
 
 ## 10. The end of an arc: removing the processing apparatus
 

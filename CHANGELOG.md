@@ -15,6 +15,18 @@ created above it.
 
 ### Unreleased
 
+- Added `tools/approved_document.py`, the document-write half of the
+  coordination-document publisher made independent of its publication
+  mechanism, slice B of #775's consolidation (#830). It applies an approved
+  document only over the baseline the preflight observed, keeps the pending and
+  applied records and the `--check-pending` preflight, and hands the one named
+  path to the external `docs-push` (`--expect`, `--keep`), deciding landing from
+  a verified receipt on the freshly fetched default branch and never from the
+  tool's output. `tools/tracker_transaction.py` no longer loads the publisher:
+  local resolution is licensed only by the helper's applied record, reports
+  `published: false`, and leaves the publication obligation outstanding. Both
+  bundles ship the helper; no command invokes it yet, and the publisher is
+  unchanged until its retirement.
 - The canonical issue reviewer accepts a third delivery unit next to the pull
   request and the direct documentation landing: one reviewed commit in a named
   local repository, delivered through the target repository's own local-commit
