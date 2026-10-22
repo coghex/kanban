@@ -1001,7 +1001,10 @@ check then trust the record, re-verifying only that the named commit is still in
 the history of `origin/<default>` and still carries the published blob. A later
 edit that moves the document away from the landed bytes, however it arrives,
 cannot make a resume run `docs-push` again for a mutation already known to have
-landed. Evidence that is malformed, or names a revision that is gone or no longer
+landed. Evidence is also held to the publication it sits in: an already-present landing
+must name the approved blob, and a receipt must be this attempt's own marked
+commit changing the document alone. Evidence that is malformed, inconsistent with
+its record, or names a revision that is gone or no longer
 carries the content, stops with a specific report and keeps the record.
 
 **When no evidence was saved, history is the fallback.** An interruption before

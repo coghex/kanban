@@ -1066,6 +1066,57 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(outcome["landed_via"], "receipt")
         self.assertEqual(len(self.calls()), 1)
 
+    def test_evidence_inconsistent_with_its_publication_is_never_trusted(self):
+        # PR #836 round 7. Evidence must belong to the mutation it sits in: an
+        # already-present landing must name the approved blob, and a receipt
+        # must be this attempt's own marked commit for this document alone.
+        self.mode("refuse")
+        self.approve(EDITED)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        base = self.fx.origin_tip()
+        self.fx.upstream_edit(UPSTREAM_ELSEWHERE, message="a plain edit")
+        unmarked = self.fx.origin_tip()
+        cases = (
+            ("baseline passed off as a landing", {
+                "via": "already-present", "published_blob": record["baseline"],
+                "receipt_commit": None, "evidence_commit": base}),
+            ("another blob", {
+                "via": "already-present", "published_blob": blob_of(UPSTREAM_ELSEWHERE),
+                "receipt_commit": None, "evidence_commit": unmarked}),
+            ("already-present carrying a receipt", {
+                "via": "already-present", "published_blob": record["approved_blob"],
+                "receipt_commit": unmarked, "evidence_commit": unmarked}),
+            ("a receipt that is not the evidence commit", {
+                "via": "receipt", "published_blob": blob_of(UPSTREAM_ELSEWHERE),
+                "receipt_commit": base, "evidence_commit": unmarked}),
+            ("a receipt without this attempt's marker", {
+                "via": "receipt", "published_blob": blob_of(UPSTREAM_ELSEWHERE),
+                "receipt_commit": unmarked, "evidence_commit": unmarked}),
+        )
+        mode = "land"
+        for name, evidence in cases:
+            with self.subTest(case=name):
+                fields = {
+                    "version": 1, "repository": REPOSITORY, "document": DOC,
+                    "approved_blob": record["approved_blob"], "baseline": record["baseline"],
+                    "rendered_tip": record["rendered_tip"], "attempt": record["attempt"],
+                    "message": record["message"], "landing": evidence,
+                }
+                commit = approved.build_pending_commit(self.fx.work, DOC, fields)
+                run(["git", "update-ref", record["ref"], commit], self.fx.work)
+                calls = len(self.calls())
+                self.fx.write(self.fx.work, EDITED)
+                report = self.preflight()
+                self.assertEqual(report["record_fault"]["status"], "landing-evidence-unverifiable")
+                self.assertNotEqual(report.get("already_landed"), True)
+                self.mode(mode)
+                error = self.failure(self.resume)
+                self.assertEqual(error.status, "landing-evidence-unverifiable")
+                self.assertEqual(self.fx.pending(), commit)
+                self.assertEqual(self.fx.applied(), blob_of(EDITED))
+                self.assertEqual(len(self.calls()), calls)
+                self.assertEqual(self.fx.read(self.fx.work), EDITED)
+
     def test_a_receipt_landing_is_recorded_before_cleanup(self):
         self.die("settle_landed")
         evidence = approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"]

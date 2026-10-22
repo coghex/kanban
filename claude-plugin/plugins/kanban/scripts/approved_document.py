@@ -973,6 +973,18 @@ def new_pending_fields(
 # ------------------------------------------------------------------ landing --
 
 
+def receipt_paths(root: Path, commit: str) -> list[str]:
+    """The paths a commit changes, NUL-delimited and never Git's display form:
+    under the default core.quotePath a path with a non-ASCII byte or a quote
+    comes back quoted and escaped, and comparing that to the document's own
+    spelling rejects a valid receipt."""
+    listing = git(
+        ["diff-tree", "-z", "--no-commit-id", "--name-only", "-r", "--root", commit],
+        cwd=root,
+    ).stdout.decode("utf-8", errors="surrogateescape")
+    return [entry for entry in listing.split("\0") if entry]
+
+
 def find_receipt(root: Path, remote: str, pending: dict) -> str | None:
     """The commit on `remote`, since the recorded tip, that carries this
     attempt's marker, or None.
@@ -1003,15 +1015,7 @@ def find_receipt(root: Path, remote: str, pending: dict) -> str | None:
     if not matches:
         return None
     receipt = matches[-1]
-    # NUL-delimited, never Git's display form: under the default
-    # core.quotePath a path with a non-ASCII byte or a quote comes back quoted
-    # and escaped, and comparing that to the document's own spelling rejects a
-    # valid receipt.
-    listing = git(
-        ["diff-tree", "-z", "--no-commit-id", "--name-only", "-r", "--root", receipt],
-        cwd=root,
-    ).stdout.decode("utf-8", errors="surrogateescape")
-    touched = [entry for entry in listing.split("\0") if entry]
+    touched = receipt_paths(root, receipt)
     if touched != [document]:
         raise DocumentError(
             "receipt-unverifiable",
@@ -1159,19 +1163,45 @@ def verified_evidence(root: Path, remote: str, pending: dict) -> dict:
     evidence = pending["landing_evidence"]
     document = pending["document"]
     commit = evidence["evidence_commit"]
+
+    def unverifiable(why: str) -> DocumentError:
+        return DocumentError(
+            "landing-evidence-unverifiable",
+            f"the landing recorded for {document} cannot be trusted ({why}); the "
+            "record is kept",
+            pending_ref=pending["ref"],
+            evidence_commit=commit,
+        )
+
+    # Consistent with the publication it sits in: evidence for some other
+    # mutation, or for another attempt, is not evidence for this one.
+    if evidence["via"] == "already-present":
+        if evidence["published_blob"] != pending["approved_blob"]:
+            raise unverifiable(
+                f"it names {evidence['published_blob'][:12]} rather than the "
+                f"approved blob {pending['approved_blob'][:12]}"
+            )
+        if evidence.get("receipt_commit") is not None:
+            raise unverifiable("an already-present landing has no receipt")
+    else:
+        if evidence.get("receipt_commit") != commit:
+            raise unverifiable("its receipt is not the commit it names as evidence")
+        marker = git(["log", "-1", "--format=%B", commit], cwd=root, check=False)
+        if marker.returncode != 0 or receipt_line(pending) not in (
+            marker.stdout.decode(errors="replace").splitlines()
+        ):
+            raise unverifiable("the commit does not carry this attempt's marker")
+        if receipt_paths(root, commit) != [document]:
+            raise unverifiable(f"the commit does not change {document} alone")
     if (
         git(["cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, check=False).returncode
         != 0
         or not is_ancestor(root, commit, remote)
         or blob_at(root, commit, document) != evidence["published_blob"]
     ):
-        raise DocumentError(
-            "landing-evidence-unverifiable",
-            f"the landing recorded for {document} names {commit[:12]}, which is "
-            f"not a revision in the history of {remote} that carries the "
-            "published content, so it cannot be trusted; the record is kept",
-            pending_ref=pending["ref"],
-            evidence_commit=commit,
+        raise unverifiable(
+            f"{commit[:12]} is not a revision in the history of {remote} that "
+            "carries the published content"
         )
     return {
         "landed": True, "via": evidence["via"],
