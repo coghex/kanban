@@ -228,6 +228,13 @@ the branch that will keep working:
   which are packaged for other hosts, and do not open a pull request just to
   avoid the stop.
 
+When /solve lands documentation for an issue, unless the spec names its
+path, a verdict or evidence write-up goes under `docs/archive/`, because it
+records finished work and repositories hide that directory from search; design
+notes and contracts are updated where they live. That decides only where the
+file goes, not how it lands: it opens no landing this bundle does not ship, and
+the stop above still stands.
+
 When step 3 chose the worthy-of-review disposition, the issue's own
 no-pull-request requirement is one the reviewer would otherwise block on, so
 step 5 relays this workflow's standing directive with round 1. Its text is

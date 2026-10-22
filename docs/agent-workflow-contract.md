@@ -211,6 +211,18 @@ everything else.
   `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` when Grok, Kimi,
   or Google opened it; those markers are known origins, not unknown ones, and
   dual-mode review routes them to Codex only.
+- **Records:** a verdict or evidence write-up the solve family lands with
+  `docs-push` goes under `docs/archive/` unless the spec names its path
+  (issue #823), because it records finished work from the moment it is
+  written; design notes and contracts are updated where they live. This sets
+  the destination only: what may land with `docs-push`, and the Markdown-as-code
+  and fork-checkout exceptions, are unchanged. A repository using these
+  workflows hides `docs/archive/` from search so agents stop paying for it on
+  every search: in a Git repository with a root `.ignore` entry, which ripgrep
+  reads and Git does not; in a Pijul repository with `.rgignore`, never
+  `.ignore`, because Pijul reads `.ignore` too and `pijul add --recursive` would
+  then stop tracking new files under `docs/archive/`. A file there stays
+  readable by its path, and `rg --no-ignore` still reaches it.
 - **Failure semantics:** a session may pause with a trailing
   `KANBAN_NEEDS_INPUT: <question>` line and resumes once the user answers.
 - **Required authority:** the user's existing `gh auth login` (issue
@@ -3564,7 +3576,7 @@ The `coordination` documents are
 `docs/ui-bugs.md`, `docs/vision.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
-`docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
+`docs/archive/` and `docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -3650,6 +3662,7 @@ claude-plugin/ | pr-atomic | test-parsed;release-document
 codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
 docs/agent-workflow-contract.md | pr-atomic | test-parsed;release-document;implementation-coupled
+docs/archive/ | coordination | audit-report
 docs/bugs.md | pr-atomic | release-document
 docs/code-health-report.md | coordination | audit-report
 docs/coordination/ | coordination | coordination-note

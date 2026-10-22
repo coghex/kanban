@@ -1,0 +1,3 @@
+# Kanban: hidden from search (ripgrep and fd read this file; Git does not).
+# docs/archive/ holds finished records: read one by its path, or with rg --no-ignore.
+docs/archive/

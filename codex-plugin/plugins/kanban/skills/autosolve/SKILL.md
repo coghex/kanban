@@ -172,6 +172,10 @@ the issue:
 
   Documentation needs no separate landing request, but this landing reaches
   only those files: do not fold any other document in while doing this.
+  Unless the spec names its path, a verdict or evidence write-up goes under
+  `docs/archive/`, because it records finished work and repositories hide that
+  directory from search; design notes and contracts are updated where they
+  live. That decides only where the file goes, not how it lands.
 
   Close the issue only after `docs-push` reports the landed commit with no
   refusal and no conflict, quoting the landing commit and confirming each
