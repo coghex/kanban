@@ -1002,7 +1002,17 @@ the history of `origin/<default>` and still carries the published blob. A later
 edit that moves the document away from the landed bytes, however it arrives,
 cannot make a resume run `docs-push` again for a mutation already known to have
 landed. Evidence that is malformed, or names a revision that is gone or no longer
-carries the content, stops with a specific report and keeps the record. Clearing the
+carries the content, stops with a specific report and keeps the record.
+
+**When no evidence was saved, history is the fallback.** An interruption before
+the landing check, a failed fetch after the tool, or a failed evidence write
+leaves a record with no saved evidence. The helper then searches every commit
+reachable from `origin/<default>` and not from the recorded tip, at the
+document's path and with no history simplification, for the approved blob, and
+treats a hit as the landing; the saved record stays the fast path and history is
+consulted only without it. The search is bounded to what happened after the
+record was made, so an older revision that merely holds the same bytes is not a
+landing, and a history that cannot be read is undecided and never publishes. Clearing the
 pending record requires the write root to still hold the published blob; when it
 does not, the record stays and the outcome is `landed-but-divergent`.
 

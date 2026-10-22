@@ -1077,6 +1077,19 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
                         ["rev-parse", f"{revision}^{{commit}}"], cwd=root
                     ),
                 }
+    if tip_reachable:
+        # No saved evidence and nothing at the tips: the landing may still have
+        # happened in between and been moved away from since. Recover it from
+        # every commit reachable from `remote` and not from the recorded tip, at
+        # the document's path, with no history simplification. Bounded to what
+        # happened after the record was made, so an old revision that happens
+        # to hold the same bytes is not a landing.
+        seen = revision_carrying(root, remote, pending["rendered_tip"], document, approved)
+        if seen is not None:
+            return {
+                "landed": True, "via": "already-present", "published_blob": approved,
+                "receipt_commit": None, "evidence_commit": seen,
+            }
     if not tip_reachable:
         raise DocumentError(
             "pending-stale",
@@ -1087,6 +1100,51 @@ def landing(root: Path, branch: str, pending: dict) -> dict:
             rendered_tip=pending["rendered_tip"],
         )
     return {"landed": False, "via": None, "published_blob": None, "receipt_commit": None}
+
+
+def revision_carrying(
+    root: Path, remote: str, since: str, document: str, blob: str
+) -> str | None:
+    """The oldest commit in `since..remote` whose tree holds `blob` at `document`.
+
+    One `rev-list` and one `cat-file --batch-check`, so the cost does not grow
+    with the number of commits spawned. Anything unreadable raises: a landing
+    that cannot be searched for is undecided, and undecided never publishes.
+    """
+    if "\n" in document:
+        raise DocumentError(
+            "landing-unverifiable",
+            f"{document} has a newline in its name, so its history cannot be searched",
+        )
+    commits = git(["rev-list", f"{since}..{remote}"], cwd=root, check=False)
+    if commits.returncode != 0:
+        raise DocumentError(
+            "landing-unverifiable",
+            f"the history of {remote} since {since[:12]} could not be read, so "
+            f"whether {document} already landed cannot be decided",
+        )
+    listed = commits.stdout.decode().split()
+    if not listed:
+        return None
+    probed = git(
+        ["cat-file", "--batch-check=%(objectname)"],
+        cwd=root, check=False,
+        input_bytes="".join(f"{commit}:{document}\n" for commit in listed).encode(),
+    )
+    if probed.returncode != 0:
+        raise DocumentError(
+            "landing-unverifiable",
+            f"the revisions of {document} on {remote} could not be read, so "
+            "whether it already landed cannot be decided",
+        )
+    found = probed.stdout.decode().splitlines()
+    if len(found) != len(listed):
+        raise DocumentError(
+            "landing-unverifiable",
+            f"the revisions of {document} on {remote} were not all readable",
+        )
+    matches = [commit for commit, name in zip(listed, found) if name == blob]
+    return matches[-1] if matches else None
 
 
 def verified_evidence(root: Path, remote: str, pending: dict) -> dict:

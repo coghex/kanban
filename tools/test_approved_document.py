@@ -964,6 +964,108 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(self.calls(), [])
         self.assertIsNone(self.fx.pending())
 
+    def concurrent_publication(self, then=None):
+        """Somebody else lands the approved bytes while the run is handing them
+        to the tool, so the tool reports "nothing to land"."""
+        real = approved.run_publication_tool
+
+        def concurrent(*args, **kwargs):
+            self.fx.upstream_edit(EDITED, message="a concurrent publication")
+            result = real(*args, **kwargs)
+            if then is not None:
+                then()
+            return result
+
+        patcher = unittest.mock.patch.object(approved, "run_publication_tool", concurrent)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return patcher
+
+    def assert_recovered_without_the_tool(self, calls_before):
+        self.revert_document()
+        tip = self.fx.origin_tip()
+        outcome = self.resume()
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "already-present")
+        self.assertEqual(len(self.calls()), calls_before)
+        self.assertEqual(self.fx.origin_tip(), tip)
+        self.assertIsNone(self.fx.pending())
+
+    def test_a_landing_with_no_saved_evidence_is_recovered_from_history(self):
+        # PR #836 round 6. The run dies before it ever looks at the landing, so
+        # nothing was saved; the document then moves away from the landed bytes.
+        # Resume rediscovers the landing in the branch's history after the
+        # recorded tip and does not ask the tool again.
+        real = approved.run_publication_tool
+
+        def dying(*args, **kwargs):
+            self.fx.upstream_edit(EDITED, message="a concurrent publication")
+            raise SimulatedCrash("before the landing check")
+
+        with unittest.mock.patch.object(approved, "run_publication_tool", dying):
+            with self.assertRaises(SimulatedCrash):
+                self.approve(EDITED)
+        self.assertEqual(self.calls(), [])
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertIsNone(record["landing_evidence"])
+        self.revert_document()
+        # Read-only, and already right: the preflight reports the landing too.
+        self.assertTrue(self.preflight()["already_landed"])
+        outcome = self.resume()
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "already-present")
+        self.assertEqual(self.calls(), [])
+        self.assertIsNone(self.fx.pending())
+
+    def test_a_failed_post_tool_fetch_does_not_lose_a_noop_landing(self):
+        broken = {"on": False}
+        real = approved.git
+
+        def git(args, **kwargs):
+            if broken["on"] and args[:2] == ["fetch", "origin"]:
+                if kwargs.get("check", True):
+                    raise approved.DocumentError("git-failed", "git fetch failed: network down")
+                return subprocess.CompletedProcess(args, 1, b"", b"fatal: network down")
+            return real(args, **kwargs)
+
+        self.concurrent_publication(then=lambda: broken.update(on=True))
+        patcher = unittest.mock.patch.object(approved, "git", git)
+        patcher.start()
+        outcome = self.approve(EDITED)
+        patcher.stop()
+        self.assertEqual(outcome["status"], "incomplete-publication")
+        self.assertEqual(outcome["reason"], "landing-unverifiable")
+        self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"])
+        unittest.mock.patch.stopall()
+        self.setUpEnvironment()
+        self.assert_recovered_without_the_tool(1)
+
+    def test_a_failed_evidence_write_does_not_lose_a_noop_landing(self):
+        def failing(root, pending, info):
+            raise approved.DocumentError("pending-changed", "the write failed")
+
+        self.concurrent_publication()
+        with unittest.mock.patch.object(approved, "record_landing", failing):
+            outcome = self.approve(EDITED)
+        self.assertEqual(outcome["status"], "incomplete-publication")
+        self.assertEqual(outcome["reason"], "landing-unverifiable")
+        self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"])
+        unittest.mock.patch.stopall()
+        self.setUpEnvironment()
+        self.assert_recovered_without_the_tool(1)
+
+    def test_an_old_revision_holding_the_same_bytes_is_not_a_landing(self):
+        # Bounded to what happened after the record: bytes that existed on the
+        # branch before the run are not this run's landing.
+        self.fx.upstream_edit(EDITED)
+        self.fx.upstream_edit(NOTES.replace("- line 8\n", "- line 8, edited later\n"))
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        baseline = approved.working_blob(self.fx.work, DOC)
+        outcome = self.approve(EDITED, baseline=baseline)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "receipt")
+        self.assertEqual(len(self.calls()), 1)
+
     def test_a_receipt_landing_is_recorded_before_cleanup(self):
         self.die("settle_landed")
         evidence = approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"]
