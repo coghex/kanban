@@ -17,6 +17,7 @@ import threading
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -2228,6 +2229,94 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
     }
 
 
+# The label `drain_prs.HOLD_LABEL` reads, with the color and description it is
+# created with. Restated here rather than imported, for the reason the state
+# versions above are: this controller does not load the drainer. A test holds
+# the name equal.
+HOLD_LABEL = "merge:hold"
+HOLD_LABEL_COLOR = "FBCA04"
+HOLD_LABEL_DESCRIPTION = "Approved or not, the PR drainer must not merge this"
+
+
+def hold_label_exists(job: DrainerJob) -> bool:
+    """Whether the job's repository has the hold label, by exact name.
+
+    A lookup of that one label rather than a read of the repository's label
+    list: a list is bounded by a page size, and a repository whose labels
+    outgrew it would report an existing `merge:hold` missing, try to create it,
+    be told it already exists, and fail every install from then on. Only a
+    missing label answers "no"; any other failure is an error, never a guess.
+    """
+    proc = run_command(
+        [
+            "gh",
+            "api",
+            f"repos/{job.identity}/labels/{urllib.parse.quote(HOLD_LABEL, safe='')}",
+        ],
+        check=False,
+    )
+    detail = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    if proc.returncode != 0:
+        if "404" in detail or "Not Found" in detail:
+            return False
+        raise ServiceError(
+            f"Could not look up the {HOLD_LABEL!r} label in {job.identity}: "
+            f"{detail.strip() or 'unknown error'}"
+        )
+    try:
+        document = json.loads(proc.stdout)
+        return isinstance(document, dict) and (
+            str(document.get("name", "")).casefold() == HOLD_LABEL.casefold()
+        )
+    except json.JSONDecodeError as exc:
+        raise ServiceError(
+            f"Could not read the {HOLD_LABEL!r} label of {job.identity}: "
+            f"{proc.stdout!r}"
+        ) from exc
+
+
+def ensure_hold_label(job: DrainerJob) -> dict[str, Any]:
+    """Make sure the job's target repository has the label that holds a pull
+    request out of the drainer.
+
+    The one GitHub write `install` performs. Created when missing, left alone
+    when present, and a creation that lost a race to someone else's counts as
+    success once it is looked up again -- the same shape as
+    `approve_issues.ensure_verdict_labels`, but by exact name rather than from
+    a bounded list. When the label still cannot be
+    confirmed the install fails naming it, rather than reporting an install
+    whose `merge:hold` would silently do nothing.
+
+    Scoped to `job.identity`, the repository the job drains, and never to the
+    checkout the scripts were installed from.
+    """
+    if hold_label_exists(job):
+        return {"label": HOLD_LABEL, "created": False}
+    proc = run_command(
+        [
+            "gh",
+            "label",
+            "create",
+            HOLD_LABEL,
+            "--repo",
+            job.identity,
+            "--color",
+            HOLD_LABEL_COLOR,
+            "--description",
+            HOLD_LABEL_DESCRIPTION,
+        ],
+        check=False,
+    )
+    if proc.returncode != 0:
+        if not hold_label_exists(job):
+            detail = (proc.stderr or proc.stdout or "").strip() or "unknown error"
+            raise ServiceError(
+                f"Could not create the {HOLD_LABEL!r} label in {job.identity}: "
+                f"{detail}"
+            )
+    return {"label": HOLD_LABEL, "created": proc.returncode == 0}
+
+
 def install_job(job: DrainerJob) -> dict[str, Any]:
     # One critical section over the whole install, rather than one per document
     # write. Writing the definition outside the record's lock is what let two
@@ -3471,7 +3560,16 @@ def main() -> int:
             return run_service(job, args.repo)
         require_requested_identity(job, args.repo)
         if args.command == "install":
-            value = install_job(job)
+            # After the job, so every refusal `install_job` owns -- a running
+            # drainer, a stale invocation, a relocated installation -- is
+            # raised before anything is written to GitHub, and outside its
+            # installation lock, which a `gh` call must not hold. A label that
+            # cannot be confirmed still fails the install rather than letting
+            # it report success; re-running it is the repair. `start`
+            # refreshes the definition through `install_job` without this:
+            # starting a drainer never waits on GitHub for a label.
+            installed = install_job(job)
+            value = {**installed, "hold_label": ensure_hold_label(job)}
         elif args.command == "uninstall":
             value = uninstall_job(job)
         elif args.command == "start":

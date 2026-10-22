@@ -47,6 +47,10 @@ KANBAN_MANAGED_ASSET = "kanban-managed-asset:pr-drainer/drain_prs.py"
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
+# "Approved or not, do not merge." Read live on every gate, never cached in the
+# drain state, so removing it needs no restart and no state reset. Its name is
+# deliberately not configurable: `install` provisions exactly this label.
+HOLD_LABEL = "merge:hold"
 # `workflow.coordination_paths`, resolved for this repository in main().
 # Case-sensitive, repository-relative declarations whose content coordinates
 # the pipeline rather than building it, so a default-branch advance touching
@@ -1171,6 +1175,20 @@ def has_label(pr: dict[str, Any], label: str) -> bool:
     return any(item["name"] == label for item in pr.get("labels", []))
 
 
+def is_held(pr: dict[str, Any]) -> bool:
+    """Whether the pull request carries the hold label.
+
+    Compared case-insensitively, unlike the verdict labels, because GitHub
+    treats a repository's label names that way: an installation that finds an
+    existing `Merge:Hold` and so creates nothing has to be held by it too, or
+    the label it accepted would not hold anything.
+    """
+    return any(
+        str(item.get("name", "")).casefold() == HOLD_LABEL.casefold()
+        for item in pr.get("labels", [])
+    )
+
+
 def get_open_approved_prs(
     ctx: RepoContext,
     *,
@@ -1196,6 +1214,12 @@ def get_open_approved_prs(
     for pr in prs:
         labels = {item["name"] for item in pr.get("labels", [])}
         if APPROVE_LABEL not in labels or CHANGES_LABEL in labels:
+            continue
+        if is_held(pr):
+            # Before the draft readying below: a held pull request is left
+            # exactly as the repository has it, and never becomes a candidate,
+            # so it cannot own the active lane either.
+            log(f"PR #{pr['number']}: carries {HOLD_LABEL}; leaving it alone")
             continue
         if pr.get("isDraft"):
             number = pr["number"]
@@ -2998,6 +3022,8 @@ def audit_merged_pr(
         problems.append(f"{APPROVE_LABEL!r} label missing")
     if has_label(audited, CHANGES_LABEL):
         problems.append(f"{CHANGES_LABEL!r} label present")
+    if is_held(audited):
+        problems.append(f"{HOLD_LABEL!r} label present")
     for kind, name in check_names.items():
         state = configured_check_state(audited, name)
         item = latest_check(audited, name) if name is not None else None
@@ -3617,6 +3643,17 @@ def recover_stale_approval(
                 # A label removed without a new commit is a deliberate revocation,
                 # not a stale review that the drain queue should restore.
                 forget_pr(state, number)
+            continue
+
+        if is_held(pr):
+            # A held pull request is not the drainer's to rereview, restore or
+            # carry forward, and it must not spend the one recovery turn a
+            # cycle owns. Nothing is forgotten: the entry waits for the hold
+            # to be lifted, and is judged then exactly as it would have been.
+            log(
+                f"PR #{number}: head changed from {approved_head[:12]} to "
+                f"{current_head[:12]} but it carries {HOLD_LABEL}; leaving it alone"
+            )
             continue
 
         if has_label(pr, APPROVE_LABEL):
@@ -5668,6 +5705,13 @@ def describe_check_gates(
     )
 
 
+def describe_hold(number: int) -> str:
+    return (
+        f"PR #{number} is held by {HOLD_LABEL}; the drainer leaves it alone "
+        "until the label is removed."
+    )
+
+
 def gate_regression(
     ctx: RepoContext, pr: dict[str, Any], gates: GateConfig
 ) -> tuple[str, str, str] | None:
@@ -5700,6 +5744,17 @@ def gate_regression(
             "not_approved",
             f"PR #{number} lost {APPROVE_LABEL} before the merge.",
             "approval changed before merge",
+        )
+    # A hold applied while this candidate was being prepared still stops the
+    # merge: both merge boundaries ask this question immediately before they
+    # land anything. Reported as not_eligible, which is a skip, never a raise,
+    # so it costs no failure cooldown that would outlast the label.
+    if is_held(pr):
+        return (
+            "not_eligible",
+            f"PR #{number} is held by {HOLD_LABEL}; it was labelled before "
+            "the merge.",
+            f"{HOLD_LABEL} applied before merge",
         )
     # Read fresh, immediately before the merge, for the same reason the labels
     # above are: a canonical rejection published while this candidate was being
@@ -5901,9 +5956,18 @@ def request_base_update(
     the ordinary behind-base path and the fallbacks from a merge past a
     coordination-only advance end here, so a candidate that did not merge is
     always left with an update in flight rather than stranded.
+
+    The hold is read from the snapshot every caller hands in, and refused here
+    rather than only at the callers that read it first: the fallback from a
+    rejected merge past a base advance asks with a snapshot taken after the
+    rejection, which can carry a hold the one before it did not.
     """
     number = pr["number"]
     head = pr["headRefOid"]
+    if is_held(pr):
+        log(f"PR #{number}: carries {HOLD_LABEL}; not updating its branch")
+        set_outcome(report, "not_eligible", describe_hold(number))
+        return False
     entry = state["prs"].get(str(number))
     pending = entry.get("branch_update_attempt") if isinstance(entry, dict) else None
     if isinstance(pending, dict):
@@ -6037,6 +6101,15 @@ def process_pr(
         set_outcome(
             report, "changes_requested", describe_blocking_marker(number, blocking)
         )
+        return False
+
+    # After every review verdict, so the more actionable reason still wins, and
+    # before every mutation below: a held pull request gets no conflict
+    # incident, no branch update, no CI rerun and no merge. A skip, not a
+    # DrainError, so the queue records no failure and no cooldown.
+    if is_held(pr):
+        log(f"PR #{number}: carries {HOLD_LABEL}; skipping")
+        set_outcome(report, "not_eligible", describe_hold(number))
         return False
 
     mergeable = pr.get("mergeable")
@@ -7135,6 +7208,14 @@ def prepare_single_pr(
         set_outcome(
             report, "not_approved", f"PR #{number} is not labelled {APPROVE_LABEL}."
         )
+        return False
+    if is_held(pr):
+        # Before the draft readying below, and after the verdicts above: a
+        # closed, changes-requested or unapproved pull request keeps its own
+        # reason, and the hold is reported only for one that would otherwise
+        # proceed to drafting or merge work.
+        log(f"PR #{number}: carries {HOLD_LABEL}; leaving it alone")
+        set_outcome(report, "not_eligible", describe_hold(number))
         return False
 
     if pr.get("isDraft"):

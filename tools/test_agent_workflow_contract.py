@@ -2762,9 +2762,15 @@ class AgentWorkflowContractTests(unittest.TestCase):
             {"launchctl", "systemctl"},
             SERVICE_MANAGER_BACKEND_PATH,
         )
-        for relative_path in ("tools/drain_prs_service.py", "tools/install_drainer.py"):
+        # The controller also spawns `gh`, for the one label write its `install`
+        # performs (issue #774); the installer reaches it only through that
+        # controller step, so it still spawns git alone.
+        for relative_path, commands in (
+            ("tools/drain_prs_service.py", {"git", "gh"}),
+            ("tools/install_drainer.py", {"git"}),
+        ):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertEqual(discovered_tool_commands(content), {"git"}, relative_path)
+            self.assertEqual(discovered_tool_commands(content), commands, relative_path)
         # Either Python quote style, so a tool written with single quotes is
         # held to the same standard as the ones already here.
         self.assertEqual(
