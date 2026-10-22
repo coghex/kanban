@@ -208,7 +208,7 @@ class PluginLayoutTests(unittest.TestCase):
     def test_the_plugin_manifest_declares_version_1_5_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.10.3")
+        self.assertEqual(document["version"], "1.10.5")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -389,8 +389,8 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
         self.assertNotIn(GROK_ORIGIN, text)
-        self.assertIn("does not package /push-docs", text)
-        self.assertNotIn("land it\n  with /push-docs", text)
+        self.assertIn("it ships no documentation\n  landing workflow", text)
+        self.assertIn("do not call a landing workflow\n  packaged for another host", text)
         self.assertIn("Do\n  not reclaim the issue", text)
 
     def test_autosolve_never_invokes_claude(self):

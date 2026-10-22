@@ -194,7 +194,6 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
@@ -235,7 +234,6 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/commands/triage.md",
-    "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
@@ -407,17 +405,6 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
         "find",
         "head",
     },
-}
-
-# Issue #410's documentation-landing pair, pinned the same way. Both brands'
-# fences resolve the repository root with `git` and then invoke the worked
-# repository's own tools/docs_land.sh by path — a repository tool rather than
-# an external command, which is why nothing further is discovered. The Codex
-# skill needs no find/head lookup because the helper ships with the
-# repository being worked, not with the bundle.
-PUSH_DOCS_SURFACE_EXPECTED_COMMANDS = {
-    "claude-plugin/plugins/kanban/commands/push-docs.md": {"git"},
-    "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md": {"git"},
 }
 
 # Issue #430's backlog audit, pinned the same way and for a sharper reason: it
@@ -704,44 +691,6 @@ DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
 # tools/<subpackage>/fake_cli.py that is an ordinary module.
 TOOLS_DIR = REPO_ROOT / "tools"
 TOOL_SURFACE_EXCLUDED_PATHS = {"fake_cli.py"}
-
-# The repository's shell helpers (issue #410): tools/ modules that are shell
-# scripts rather than Python, so the discovered .py walk above never scans
-# them. Enumerated like the plugin surfaces, with what the extractor recovers
-# from each pinned below so the scan cannot silently shrink to nothing.
-TOOL_SHELL_SURFACE_FILES = [
-    "tools/docs_land.sh",
-]
-
-TOOL_SHELL_SURFACE_EXPECTED_COMMANDS = {
-    "tools/docs_land.sh": {
-        "awk", "dirname", "git", "grep", "mktemp", "python3", "sed", "tr",
-    },
-}
-
-# Shell reserved words and builtins are not external dependencies; every
-# other recovered name must carry an `executable` manifest row.
-SHELL_RESERVED_AND_BUILTINS = {
-    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
-    "until", "do", "done", "in", "break", "continue", "return", "exit",
-    "shift", "trap", "set", "cd", "echo", "printf", "read", "local", "exec",
-    "eval", "true", "false", "wait", "export", "unset",
-}
-
-# A shell function defined in the script itself, whose invocations are not
-# external commands.
-SHELL_FUNCTION_DEF_RE = re.compile(
-    r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", re.MULTILINE
-)
-
-# Heredoc bodies in a raw script are input, not commands — including the
-# unquoted-delimiter form the markdown extractor deliberately ignores,
-# because packaged assets never use it while this script does.
-SHELL_HEREDOC_BODY_RE = re.compile(
-    r"(<<-?\s*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)[^\n]*\n)"
-    r".*?^[ \t]*(?P=tag)[ \t]*$\n?",
-    re.DOTALL | re.MULTILINE,
-)
 
 MANIFEST_ROW_RE = re.compile(
     r"^(?P<id>[\w-]+)\s*\|\s*(?P<kind>[\w-]+)\s*\|\s*(?P<token>[^|]+?)\s*\|"
@@ -1341,35 +1290,6 @@ SYSTEMD_ARTIFACTS = (
 SERVICE_MANAGER_ARTIFACTS = LAUNCHD_ARTIFACTS + SYSTEMD_ARTIFACTS
 
 
-def discovered_shell_script_commands(content):
-    """Every external command a raw tools/ shell script invokes, recognized
-    with the same leading-word and subshell/pipe machinery as the packaged
-    workflows' bash fences, after dropping comment lines, heredoc bodies,
-    reserved words and builtins, and the script's own function names."""
-    body = SHELL_HEREDOC_BODY_RE.sub(lambda match: match.group(1), content)
-    lines = [
-        line for line in body.splitlines()
-        if not line.lstrip().startswith("#")
-    ]
-    scannable = "\n".join(lines)
-    names = {
-        match.group(1)
-        for match in SUBSHELL_OR_PIPE_COMMAND_RE.finditer(scannable)
-    }
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or ASSIGNMENT_RE.match(stripped):
-            continue
-        leading = LEADING_COMMAND_RE.match(stripped)
-        if leading:
-            names.add(leading.group(1))
-    return (
-        names
-        - SHELL_RESERVED_AND_BUILTINS
-        - set(SHELL_FUNCTION_DEF_RE.findall(content))
-    )
-
-
 def tool_surface_files(tools_dir=TOOLS_DIR):
     """Every eligible module of the tools/ surface, discovered by walking it."""
     return sorted(
@@ -1474,7 +1394,7 @@ ART_POLICY_CONTROL_ASSETS = (
 #
 # The fragments are distinctive to the art policy rather than bare anchor words.
 # `texture` also appears in an unrelated example invocation in design-epic, and
-# `placeholder` in note-problem, process-design-doc, triage, and push-docs, in
+# `placeholder` in note-problem, process-design-doc, and triage, in
 # both brands; a tuple keyed on either single word would make the negative
 # control fail against assets that owe this policy nothing.
 ART_POLICY_SOLVE_RULES = (
@@ -2206,63 +2126,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
 
-    def test_every_tool_shell_script_command_is_documented(self):
-        # The tools/ walk above scans Python modules only, so a shell helper
-        # reaches the reconciliation solely by being enumerated — and what
-        # the extractor recovers from each is pinned, so the scan cannot
-        # pass by discovering nothing.
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
-        }
-        for relative_path in TOOL_SHELL_SURFACE_FILES:
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            found = discovered_shell_script_commands(content)
-            self.assertEqual(
-                found,
-                TOOL_SHELL_SURFACE_EXPECTED_COMMANDS[relative_path],
-                relative_path,
-            )
-            for name in sorted(found):
-                self.assertIn(
-                    name,
-                    executable_tokens,
-                    undocumented_command_message(relative_path, name),
-                )
-
-    def test_push_docs_asset_command_discovery_is_not_vacuous(self):
-        # The two documentation-landing assets reach the completeness loops
-        # above by being listed, and a loop over an asset the extractor
-        # recovers nothing from reports no undocumented command for the same
-        # reason a loop over nothing does. Pin what each actually invokes so
-        # a rewrite that stops resolving the repository root fails here.
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
-        }
-        for relative_path, expected in sorted(
-            PUSH_DOCS_SURFACE_EXPECTED_COMMANDS.items()
-        ):
-            self.assertTrue(
-                relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES
-                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_COPILOT_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by any plugin surface list",
-            )
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            found = discovered_commands_for_plugin_file(relative_path, content)
-            self.assertEqual(found, expected, relative_path)
-            for name in found:
-                self.assertIn(
-                    name,
-                    executable_tokens,
-                    undocumented_command_message(relative_path, name),
-                )
+    def test_tools_holds_no_shell_helper(self):
+        # The tools/ walk above scans Python modules only, and the last shell
+        # helper was retired in issue #829 along with the extractor that
+        # scanned it. A shell script added under tools/ would reach no
+        # reconciliation, so it fails here until one is built for it.
+        self.assertEqual(sorted(TOOLS_DIR.rglob("*.sh")), [])
 
     def test_backlog_review_asset_command_discovery_is_not_vacuous(self):
-        # The counterpart of the push-docs pin above for the one vendored
-        # workflow that mutates a tracker. Requirement 5 of issue #430 is that
+        # The pin for the one vendored workflow that mutates a tracker.
+        # Requirement 5 of issue #430 is that
         # no `gh` call in either rendered file omits `-R "$REPO"`; that rule is
         # only meaningful while `gh` is really discoverable in the asset, so
         # what each file invokes is pinned exactly rather than merely checked
@@ -3604,33 +3477,47 @@ class RecurringTimerInventoryTests(unittest.TestCase):
 
 
 class IssueGateInstructionParityTests(unittest.TestCase):
-    """The packaged workflow assets name the gate's models; the backend picks
-    them. PR #629 moved the `issue_gate` efforts and left four assets telling
-    agents a route the backend no longer takes.
+    """The packaged workflow assets describe the gate's route without naming a
+    model; the backend picks it from the roster. PR #629 moved the
+    `issue_gate` efforts and left four assets telling agents a route the
+    backend no longer takes, and #827 moved the Claude cell again -- so the
+    assets now say "the roster's `issue_gate` assignment" and name no model,
+    persona or effort for the next change to strand.
 
     Nothing executes these strings, so no other gate catches the drift -- and
     they are the program an agent follows, which is exactly why CLAUDE.md holds
-    a bundle asset to a regression assertion like any other code. The
-    expectation is RESOLVED from the roster rather than spelled here, so the
-    next assignment change fails this instead of shipping stale instructions.
+    a bundle asset to a regression assertion like any other code. The routing
+    itself is the part worth holding: who reviews which origin, and where each
+    dissent goes, is `approve_issues.py`'s `rereview_reviewers` and the
+    origin-to-opposite-brand rule, and it is what these assertions pin.
     """
 
     # Every asset that states the canonical gate route, and the negative
     # control beneath it: assets that delegate reviewer selection without
     # naming a model owe nothing here.
-    NAMING_ASSETS = (
+    REVIEW_ASSETS = (
         "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
         "claude-plugin/plugins/kanban/commands/issue-review.md",
+    )
+    REREVIEW_ASSETS = (
         "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
         "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     )
+    NAMING_ASSETS = REVIEW_ASSETS + REREVIEW_ASSETS
     DELEGATING_ASSETS = (
         "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
         "claude-plugin/plugins/kanban/commands/pr-review.md",
     )
 
-    def gate_displays(self):
-        # The tracked reader itself, not a second spelling of its values.
+    CODEX_CELL = "the roster's Codex `issue_gate` assignment"
+    CLAUDE_CELL = "the roster's Claude `issue_gate` assignment"
+
+    def read(self, asset):
+        return (REPO_ROOT / asset).read_text(encoding="utf-8")
+
+    def retired_and_current_names(self):
+        # The tracked reader itself, not a second spelling of its values, plus
+        # the personas the backend retired.
         import sys
 
         if str(REPO_ROOT / "tools") not in sys.path:
@@ -3638,42 +3525,50 @@ class IssueGateInstructionParityTests(unittest.TestCase):
         import kanban_models
 
         roster = kanban_models.DEFAULT_ROSTER
-        return {
-            provider: roster.assignment_for("issue_gate", provider).display
-            for provider in ("codex", "claude")
+        names = {
+            "Claude Fable 5.1",
+            "Claude Opus 5",
+            "Claude Fable 5",
+            "GPT-6-Astra",
+            "GPT-5.6-Sol",
+            "GPT-5.6-Terra",
         }
+        for provider in ("codex", "claude"):
+            assignment = roster.assignment_for("issue_gate", provider)
+            names |= {assignment.model, assignment.display}
+        return names
 
-    def test_every_naming_asset_states_the_resolved_gate_route(self):
-        displays = self.gate_displays()
-        # "GPT-6-Astra high" / "Fable 5.1 high" -> the prose spells the persona
-        # and effort, so assert on the display the roster actually resolves.
-        codex_display = displays["codex"]
-        claude_display = displays["claude"].replace("Fable", "Claude Fable")
-        for asset in self.NAMING_ASSETS:
-            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
+    def test_the_review_assets_route_each_origin_through_the_roster(self):
+        for asset in self.REVIEW_ASSETS:
+            text = self.read(asset)
             with self.subTest(asset=asset):
-                self.assertIn(codex_display, text)
-                self.assertIn(claude_display, text)
+                self.assertIn(f"`issue-origin:claude` to {self.CODEX_CELL}", text)
+                self.assertIn(f"`issue-origin:codex` to {self.CLAUDE_CELL}", text)
+                # The third arm of the route is unchanged and still stated.
+                self.assertIn("unmarked legacy issues to independent reviews by both", text)
 
-    def test_no_naming_asset_states_a_route_the_backend_does_not_take(self):
-        displays = self.gate_displays()
-        stale = {
-            f"GPT-6-Astra {effort}"
-            for effort in ("minimal", "low", "medium", "high", "xhigh")
-        } - {displays["codex"]}
-        stale |= {
-            f"Claude Fable 5.1 {effort}"
-            for effort in ("low", "medium", "high", "xhigh")
-        } - {displays["claude"].replace("Fable", "Claude Fable")}
+    def test_the_rereview_assets_route_each_dissent_through_the_roster(self):
+        for asset in self.REREVIEW_ASSETS:
+            text = self.read(asset)
+            with self.subTest(asset=asset):
+                self.assertIn(f"Codex dissent routes to {self.CLAUDE_CELL}", text)
+                self.assertIn(f"Claude dissent routes to {self.CODEX_CELL}", text)
+                self.assertIn(
+                    "dissent from both routes to the Codex assignment", text
+                )
+
+    def test_no_naming_asset_names_a_model_persona_or_effort(self):
+        names = self.retired_and_current_names()
         for asset in self.NAMING_ASSETS:
-            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
-            for wording in sorted(stale):
-                with self.subTest(asset=asset, wording=wording):
-                    self.assertNotIn(wording, text)
+            text = self.read(asset)
+            for name in sorted(names):
+                with self.subTest(asset=asset, name=name):
+                    self.assertNotIn(name, text)
 
     def test_the_delegating_assets_name_no_gate_model_at_all(self):
         # The negative control: a rule that matched everything could pass
         # while asserting nothing.
+        names = self.retired_and_current_names()
         for asset in self.DELEGATING_ASSETS:
             path = REPO_ROOT / asset
             with self.subTest(asset=asset):
@@ -3681,7 +3576,13 @@ class IssueGateInstructionParityTests(unittest.TestCase):
                 # control silently, which is the one thing a negative control
                 # must never do.
                 self.assertTrue(path.exists(), f"{asset} is gone; retarget this control")
-                self.assertNotIn("GPT-6-Astra", path.read_text(encoding="utf-8"))
+                text = path.read_text(encoding="utf-8")
+                for name in sorted(names):
+                    self.assertNotIn(name, text)
+                # And they do not carry the roster-routing wording either, so
+                # the positive assertions above are not satisfied by a phrase
+                # every asset happens to contain.
+                self.assertNotIn("`issue_gate` assignment", text)
 
 
 if __name__ == "__main__":

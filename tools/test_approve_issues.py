@@ -376,8 +376,8 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertEqual(module.MODEL_ROSTER_ERROR, None)
         self.assertEqual(module.CODEX_REVIEWER.model, "gpt-6-astra")
         self.assertEqual(module.CODEX_REVIEWER.effort, "high")
-        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-fable-5-1")
-        self.assertEqual(module.CLAUDE_REVIEWER.effort, "high")
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5-5")
+        self.assertEqual(module.CLAUDE_REVIEWER.effort, "xhigh")
 
     def test_a_roster_file_moves_the_model_and_effort_the_cli_is_given(self):
         self.write_roster(
@@ -387,8 +387,8 @@ class RosterBackedIssueGateTests(unittest.TestCase):
                 '[roles.issue_gate.codex]\nmodel = "gpt-6-sol"\neffort = "low"',
             )
             .replace(
-                '[roles.issue_gate.claude]\nmodel = "claude-fable-5-1"\neffort = "high"',
-                '[roles.issue_gate.claude]\nmodel = "claude-opus-5-5"\neffort = "medium"',
+                '[roles.issue_gate.claude]\nmodel = "claude-opus-5-5"\neffort = "xhigh"',
+                '[roles.issue_gate.claude]\nmodel = "claude-fable-5"\neffort = "medium"',
             )
         )
         module = self.backend()
@@ -398,7 +398,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="low"', codex_argv)
 
         claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
-        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-fable-5")
         self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "medium")
 
     def test_the_environment_beats_the_file_for_model_and_effort_alike(self):
@@ -420,7 +420,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
         self.assertIn('model_reasoning_effort="high"', argv)
         # The claude model was left to the file; only its effort was overridden.
-        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-fable-5-1")
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5-5")
         self.assertEqual(module.CLAUDE_REVIEWER.effort, "medium")
 
     def test_the_published_marker_carries_the_resolved_assignment(self):
@@ -542,7 +542,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertEqual(module.OPERATING_MODE, "single-agent")
         self.assertEqual(module.LOADED_PROVIDERS, ("claude",))
         self.assertEqual(sorted(module.ISSUE_GATE_ASSIGNMENTS), ["claude"])
-        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-fable-5-1")
+        self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-opus-5-5")
         # The unloaded brand's constants stay at the never-a-model sentinel,
         # which nothing routes to and no spawn can reach.
         self.assertEqual(
@@ -800,7 +800,7 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
     # The assignment this change replaced, as a marker published before it
     # actually spells it, and the retained legacy routes beside it.
     REPLACED = {"codex": "gpt-5.6-sol", "claude": "claude-opus-5"}
-    UPGRADED = {"codex": "gpt-6-astra", "claude": "claude-fable-5-1"}
+    UPGRADED = {"codex": "gpt-6-astra", "claude": "claude-opus-5-5"}
     RETAINED = {"codex": ("gpt-5.6-terra", "gpt-5.5"), "claude": ("claude-fable-5",)}
 
     ORDINARY = {
@@ -828,12 +828,12 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
         )
         self.assertEqual(
             (module.CLAUDE_REVIEWER.model, module.CLAUDE_REVIEWER.effort),
-            ("claude-fable-5-1", "high"),
+            ("claude-opus-5-5", "xhigh"),
         )
-        # The persona is not roster-derived and keeps its own override, so it
-        # is pinned separately from the assignment beside it.
-        self.assertEqual(module.CODEX_REVIEWER.display_name, "GPT-6-Astra")
-        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Claude Fable 5.1")
+        # The persona is the roster cell's own label (#827), pinned beside the
+        # assignment it names.
+        self.assertEqual(module.CODEX_REVIEWER.display_name, "GPT-6-Astra high")
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Opus 5.5 xhigh")
 
     def test_the_default_launch_payloads_carry_the_upgraded_models(self):
         # The cell reaching the process, not just the constant naming it.
@@ -844,9 +844,9 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
 
         claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
         self.assertEqual(
-            claude_argv[claude_argv.index("--model") + 1], "claude-fable-5-1"
+            claude_argv[claude_argv.index("--model") + 1], "claude-opus-5-5"
         )
-        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "high")
+        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "xhigh")
 
     def test_a_replaced_default_marker_goes_stale_only_outside_its_window(self):
         # PR #626 replaced #614's requirement-5 boundary. The retired
@@ -866,7 +866,7 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
                 "recorded_at": "2026-09-06T00:00:00Z",
                 "assignments": {
                     "codex": "gpt-6-astra@high",
-                    "claude": "claude-fable-5-1@high",
+                    "claude": "claude-opus-5-5@xhigh",
                 },
             },
         ]
@@ -1068,34 +1068,41 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
 
     def test_every_retired_persona_is_still_a_name_the_backend_parses(self):
         module = self.backend()
+        # The roster's current label leads; every retired spelling follows it.
         self.assertEqual(
             module.reviewer_display_names("codex"),
-            ["GPT-6-Astra", "GPT-5.6-Sol", "GPT-5.6-Terra"],
+            ["GPT-6-Astra high", "GPT-6-Astra", "GPT-5.6-Sol", "GPT-5.6-Terra"],
         )
         self.assertEqual(
             module.reviewer_display_names("claude"),
-            ["Claude Fable 5.1", "Claude Opus 5", "Claude Fable 5"],
+            ["Opus 5.5 xhigh", "Claude Fable 5.1", "Claude Opus 5", "Claude Fable 5"],
         )
 
     def test_an_operator_persona_leads_without_displacing_a_retired_one(self):
         module = self.backend(APPROVE_ISSUES_CLAUDE_DISPLAY_NAME="Team Reviewer")
         self.assertEqual(
             module.reviewer_display_names("claude"),
-            ["Team Reviewer", "Claude Fable 5.1", "Claude Opus 5", "Claude Fable 5"],
+            [
+                "Team Reviewer",
+                "Opus 5.5 xhigh",
+                "Claude Fable 5.1",
+                "Claude Opus 5",
+                "Claude Fable 5",
+            ],
         )
 
     def test_the_prompt_and_published_output_name_the_resolved_assignment(self):
-        # The persona carries its own override and is deliberately not
-        # roster-derived, so it can name something other than what ran. The
-        # resolved model and effort are therefore stated beside it rather than
-        # through it, in both surfaces a reviewer's identity reaches.
+        # The persona carries its own override, so it can name something other
+        # than what ran. The resolved model and effort are therefore stated
+        # beside it rather than through it, in both surfaces a reviewer's
+        # identity reaches.
         module = self.backend(APPROVE_ISSUES_CLAUDE_DISPLAY_NAME="Team Reviewer")
         reviewer = module.CLAUDE_REVIEWER
         self.assertEqual(reviewer.display_name, "Team Reviewer")
 
         prompt = module.review_prompt(reviewer, {"issue": {}}, mode="initial")
         self.assertIn(
-            "You are Team Reviewer, running on `claude-fable-5-1` at `high` "
+            "You are Team Reviewer, running on `claude-opus-5-5` at `xhigh` "
             "reasoning effort,",
             prompt,
         )
@@ -1127,13 +1134,224 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
             trigger=None,
         )
         self.assertIn(
-            "by Team Reviewer (`claude-fable-5-1` at `high`).",
+            "by Team Reviewer (`claude-opus-5-5` at `xhigh`).",
             comment,
         )
         # The summary line keeps the exact shape reviewer_display_names parses
         # back out, which is what a later rereview reads the verdict from.
         self.assertIn("- **Team Reviewer — APPROVE:**", comment)
-        self.assertIn("models=claude-fable-5-1@high", comment)
+        self.assertIn("models=claude-opus-5-5@xhigh", comment)
+
+
+class RosterDisplayNameTests(RosterBackedIssueGateTests):
+    """Issue #827: a reviewer signs with its `issue_gate` cell's `display`.
+
+    The name used to be a literal in this file, so a roster that assigned a
+    different model still produced a comment signed by the retired persona.
+    Every case re-imports the backend under an isolated configuration root,
+    for the reason the base class gives.
+    """
+
+    CODEX_LABEL = "Roster Codex Label"
+    CLAUDE_LABEL = "Roster Claude Label"
+    ORDINARY = {
+        "id": 1,
+        "body": "Clarification",
+        "user": {"login": "owner"},
+        "author_association": "OWNER",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "html_url": "https://example.invalid/c1",
+    }
+
+    def write_labelled_roster(self):
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
+            .replace(
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"\n'
+                'display = "GPT-6-Astra high"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"\n'
+                f'display = "{self.CODEX_LABEL}"',
+            )
+            .replace(
+                '[roles.issue_gate.claude]\nmodel = "claude-opus-5-5"\neffort = "xhigh"\n'
+                'display = "Opus 5.5 xhigh"',
+                '[roles.issue_gate.claude]\nmodel = "claude-opus-5-5"\neffort = "xhigh"\n'
+                f'display = "{self.CLAUDE_LABEL}"',
+            )
+        )
+
+    def dual_changes_record(self, module, codex_name, claude_name):
+        # No `verdicts=` field, and two reviewers, so neither the encoded
+        # verdicts nor the single-review aggregate fallback can recover a
+        # verdict: only the summary headings can, which is the path a display
+        # name that stopped parsing would break.
+        body = (
+            "### Reviewer summaries\n"
+            f"- **{codex_name} — CHANGES REQUESTED:** Scope needs a decision.\n"
+            f"- **{claude_name} — APPROVE:** The issue is otherwise ready.\n\n"
+            "<!-- issue-review:v2 spec=" + "a" * 64 + " origin=legacy "
+            "reviewers=codex+claude "
+            "models=gpt-6-astra@high+claude-opus-5-5@xhigh "
+            "base=" + "b" * 40 + " verdict=CHANGES_REQUESTED -->"
+        )
+        record = module.latest_review_record([{**self.ORDINARY, "id": 4, "body": body}])
+        self.assertIsNotNone(record)
+        return record
+
+    def render(self, module, reviewer):
+        return module.render_review_comment(
+            ctx=module.RepoContext(
+                path=self.root, repo_slug="coghex/kanban", default_branch="master"
+            ),
+            issue={"number": 7},
+            origin="codex",
+            reviewers=[reviewer],
+            reviews=[
+                {
+                    "reviewer": reviewer,
+                    "verdict": "APPROVE",
+                    "summary": "Ready.",
+                    "corrections": [],
+                    "spec_additions": [],
+                    "supporting_context": [],
+                    "open_decisions": [],
+                    "recommended_disposition": [],
+                }
+            ],
+            verdict="APPROVE",
+            spec_sha="c" * 64,
+            base_sha="d" * 40,
+            mode="initial",
+            parent_spec=None,
+            trigger=None,
+        )
+
+    def test_with_no_override_the_display_name_is_the_rosters(self):
+        self.write_labelled_roster()
+        module = self.backend()
+        self.assertEqual(module.CODEX_REVIEWER.display_name, self.CODEX_LABEL)
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, self.CLAUDE_LABEL)
+
+    def test_the_roster_label_reaches_the_prompt_and_the_published_comment(self):
+        self.write_labelled_roster()
+        module = self.backend()
+        reviewer = module.CLAUDE_REVIEWER
+        prompt = module.review_prompt(reviewer, {"issue": {}}, mode="initial")
+        self.assertIn(
+            f"You are {self.CLAUDE_LABEL}, running on `claude-opus-5-5` at `xhigh`",
+            prompt,
+        )
+        comment = self.render(module, reviewer)
+        self.assertIn(f"by {self.CLAUDE_LABEL} (`claude-opus-5-5` at `xhigh`).", comment)
+        self.assertIn(f"- **{self.CLAUDE_LABEL} — APPROVE:**", comment)
+
+    def test_the_environment_override_still_wins_over_the_roster(self):
+        self.write_labelled_roster()
+        module = self.backend(
+            APPROVE_ISSUES_CODEX_DISPLAY_NAME="Team Codex",
+            APPROVE_ISSUES_CLAUDE_DISPLAY_NAME="Team Claude",
+        )
+        self.assertEqual(module.CODEX_REVIEWER.display_name, "Team Codex")
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Team Claude")
+        reviewer = module.CLAUDE_REVIEWER
+        prompt = module.review_prompt(reviewer, {"issue": {}}, mode="initial")
+        self.assertIn("You are Team Claude, running on", prompt)
+        self.assertNotIn(self.CLAUDE_LABEL, prompt)
+        comment = self.render(module, reviewer)
+        self.assertIn("by Team Claude (`claude-opus-5-5` at `xhigh`).", comment)
+        self.assertNotIn(self.CLAUDE_LABEL, comment)
+
+    def test_an_override_replaces_the_roster_label_for_one_provider_only(self):
+        self.write_labelled_roster()
+        module = self.backend(APPROVE_ISSUES_CODEX_DISPLAY_NAME="Team Codex")
+        self.assertEqual(module.CODEX_REVIEWER.display_name, "Team Codex")
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, self.CLAUDE_LABEL)
+
+    def test_the_current_roster_label_and_every_historical_one_resolve_to_one_key(self):
+        self.write_labelled_roster()
+        # The override changes what this run signs with; it must not retire the
+        # roster's own label, which is what a run without it signed.
+        for environment in (
+            {},
+            {
+                "APPROVE_ISSUES_CODEX_DISPLAY_NAME": "Team Codex",
+                "APPROVE_ISSUES_CLAUDE_DISPLAY_NAME": "Team Claude",
+            },
+        ):
+            module = self.backend(**environment)
+            codex_names = [
+                self.CODEX_LABEL,
+                *module.HISTORICAL_REVIEWER_DISPLAY_NAMES["codex"],
+            ]
+            claude_names = [
+                self.CLAUDE_LABEL,
+                *module.HISTORICAL_REVIEWER_DISPLAY_NAMES["claude"],
+            ]
+            if environment:
+                codex_names.append("Team Codex")
+                claude_names.append("Team Claude")
+            for codex_name in codex_names:
+                for claude_name in claude_names:
+                    with self.subTest(
+                        environment=bool(environment),
+                        codex=codex_name,
+                        claude=claude_name,
+                    ):
+                        record = self.dual_changes_record(
+                            module, codex_name, claude_name
+                        )
+                        self.assertEqual(
+                            module.review_verdicts(*record),
+                            {"codex": "CHANGES_REQUESTED", "claude": "APPROVE"},
+                        )
+                        # Codex dissent hands the rereview to Claude.
+                        self.assertEqual(
+                            module.rereview_reviewers(*record),
+                            ([module.CLAUDE_REVIEWER], "codex"),
+                        )
+
+    def test_the_historical_names_are_all_retained(self):
+        module = self.backend()
+        self.assertEqual(
+            module.HISTORICAL_REVIEWER_DISPLAY_NAMES,
+            {
+                "codex": ("GPT-6-Astra", "GPT-5.6-Sol", "GPT-5.6-Terra"),
+                "claude": ("Claude Fable 5.1", "Claude Opus 5", "Claude Fable 5"),
+            },
+        )
+
+    def test_an_absent_roster_signs_with_the_compiled_labels(self):
+        module = self.backend()
+        self.assertIsNone(module.MODEL_ROSTER_ERROR)
+        self.assertEqual(module.CODEX_REVIEWER.display_name, "GPT-6-Astra high")
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Opus 5.5 xhigh")
+
+    def test_an_unusable_roster_signs_with_the_unresolved_sentinel(self):
+        self.write_roster("this is not toml = [")
+        module = self.backend()
+        self.assertIsNotNone(module.MODEL_ROSTER_ERROR)
+        sentinel = module.UNRESOLVED_ASSIGNMENT_VALUE
+        self.assertEqual(module.CODEX_REVIEWER.display_name, sentinel)
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, sentinel)
+        # An explicit override is still honoured: it names a persona, not a
+        # model, and the refusal to review stands regardless.
+        module = self.backend(APPROVE_ISSUES_CLAUDE_DISPLAY_NAME="Team Claude")
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Team Claude")
+        self.assertEqual(module.CODEX_REVIEWER.display_name, sentinel)
+
+    def test_an_unloaded_provider_signs_with_the_unresolved_sentinel(self):
+        self.write_roster(
+            MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                'agents = ["codex", "claude"]', 'agents = ["claude"]'
+            )
+        )
+        module = self.backend()
+        self.assertIsNone(module.MODEL_ROSTER_ERROR)
+        self.assertEqual(module.CLAUDE_REVIEWER.display_name, "Opus 5.5 xhigh")
+        self.assertEqual(
+            module.CODEX_REVIEWER.display_name, module.UNRESOLVED_ASSIGNMENT_VALUE
+        )
 
 
 class ReviewerLedgerTests(RosterBackedIssueGateTests):
@@ -1152,7 +1370,10 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
     """
 
     SOL_ERA = {"codex": "gpt-5.6-sol@xhigh", "claude": "claude-opus-5@xhigh"}
-    ASTRA_ERA = {"codex": "gpt-6-astra@high", "claude": "claude-fable-5-1@high"}
+    # The assignment in force now: the era keeps its name from the Codex half,
+    # which has not moved, while the Claude half moved from Fable 5.1 at high to
+    # Opus 5.5 at xhigh (#827).
+    ASTRA_ERA = {"codex": "gpt-6-astra@high", "claude": "claude-opus-5-5@xhigh"}
 
     def route(self, module, key):
         return {
@@ -1234,7 +1455,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             )
         ]
         current = module.reviewer_models(reviewers)
-        self.assertEqual(current, "gpt-6-astra@high+claude-fable-5-1@high")
+        self.assertEqual(current, "gpt-6-astra@high+claude-opus-5-5@xhigh")
         self.assertTrue(
             module.marker_models_accepted(
                 current, "2026-11-01T00:00:00Z", reviewers, entries=behind
@@ -1254,7 +1475,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
         reviewers = self.route(module, "codex+claude")
         self.assertEqual(
             module.reviewer_models(reviewers),
-            "gpt-6-astra@high+claude-fable-5-1@high",
+            "gpt-6-astra@high+claude-opus-5-5@high",
         )
         # The effort those reviews actually ran at.
         self.assertTrue(
@@ -4654,7 +4875,9 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
             with self.assertRaises(approve_issues.ApproveError) as caught:
                 approve_issues.review_one(ctx, 9, legacy_policy="dual")
             self.assertIn("stopped on a denial", str(caught.exception))
-            self.assertIn("Claude", str(caught.exception))
+            self.assertIn(
+                approve_issues.CLAUDE_REVIEWER.display_name, str(caught.exception)
+            )
             self.assertEqual(approve_issues.model_invocation_count(), 2)
         launched = [item["argv"][0] for item in self.invocations()]
         self.assertEqual(launched, ["exec", "-p"], "codex then claude, no third")

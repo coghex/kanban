@@ -11,7 +11,7 @@ directly — `/design-epic`, `/process-design-doc`, `/draft-report`,
 `/note-problem`, and `/process-report` — and since issues #393, #410, #427,
 #430, #462, #511, #544, #575, and #576 the `/triage` roadmap workflow, its
 `/retriage` refresh,
-the `/push-docs` documentation-landing workflow, the `/backlog-review` backlog
+the `/backlog-review` backlog
 audit, the `/drain-prs` drainer
 control surface, the `/fix` approved-pull-request workflow, the
 `/finalize` manual merge fallback, the `/janitor` pipeline
@@ -102,11 +102,11 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all twenty-four workflow names should be
+`kanban@kanban` should be listed, and all twenty-three workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
 `/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
 `/design-epic`, `/process-design-doc`, `/draft-report`, `/note-problem`,
-`/process-report`, `/triage`, `/retriage`, `/push-docs`, `/backlog-review`,
+`/process-report`, `/triage`, `/retriage`, `/backlog-review`,
 `/drain-prs`, `/fix`, `/finalize`, `/janitor`, and `/autosolve`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
@@ -118,14 +118,14 @@ those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `/repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other nineteen are drafting, readiness-gate, document, roadmap,
-documentation-landing, backlog-audit, drainer-control, approved-pull-request,
+#127). The other eighteen are drafting, readiness-gate, document, roadmap,
+backlog-audit, drainer-control, approved-pull-request,
 manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
 workflows a user or the review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`/repair` is not part of either declared surface. Only those nineteen are
+`/repair` is not part of either declared surface. Only those eighteen are
 excluded from the Haskell invocation-parity pinning in
 `tools/test_claude_plugin.py`, which covers exactly the names Kanban's own
 code spawns.
@@ -148,7 +148,6 @@ code spawns.
 | `commands/note-problem.md` | `/note-problem` | Appends **exactly one** verified observation to an existing findings report: preserve the user's wording as a claim, investigate only that claim, classify the result, and record evidence and handoff context. Stops for approval before touching the report, applies no disposition, and creates no tracker item. Paired with the Codex `$note-problem` skill. |
 | `commands/process-report.md` | `/process-report` | Processes **exactly one** finding per invocation from an existing findings report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. The report file is the durable cursor, so a fresh session resumes in the right place. |
 | `commands/triage.md` | `/triage` | Orders the repository's open issues into a dependency-aware roadmap — prerequisite-barrier blocks, a priority-ordered Anytime queue, and a tracker list — verifying approval readiness through the canonical backend's one-shot reconciliation. Never claims, edits, or creates an issue itself. Paired with the Codex `$triage` skill. |
-| `commands/push-docs.md` | `/push-docs` | Lands user-approved documentation from the docs-wip worktree straight onto master through the tracked `tools/docs_land.sh`, which gates every path against the §7 publication classification. Named paths land exactly; with no arguments it presents the helper's inventory and lands only the approved selection. Never lands unprompted, never bypasses a refusal. Paired with the Codex `$push-docs` skill. |
 | `commands/retriage.md` | `/retriage` | Refreshes a roadmap `/triage` already produced — minimal stable edits that keep its three sections, dependency-barrier blank lines, and marker vocabulary, with every approval marker recomputed through the canonical backend rather than carried forward. Renders no format of its own; reads `/triage`'s **Output Format** and **Approval Readiness** instead. Never claims, edits, or creates an issue itself. Paired with the Codex `$retriage` skill. |
 | `commands/backlog-review.md` | `/backlog-review` | Audits the open issue backlog oldest-first — re-verifies each issue's premise against the current code and proposes exactly one disposition per issue (Valid / Update / Obsolete / Duplicate / Needs decision) with `file:line`, repro, or resolving-PR evidence. Skips in-flight issues, resolves the repository once and passes `-R "$REPO"` on every `gh` call, and **stops** before editing, closing, labelling, or commenting on anything until the user says which to apply. Paired with the Codex `$backlog-review` skill. |
 | `commands/drain-prs.md` | `/drain-prs` | Controls and recovers this repository's service-managed approved-PR drainer through its installed controller — `status`, `install`, `start`, `stop`, `restart`, `logs`, `incident`, `ack`, and `recover`. Resolves the controller from `KANBAN_DRAINER_INSTALL_DIR`, the XDG data root, then `~/Library/Application Support` rather than a hardcoded path, and passes both `--path "$ROOT"` and `--repo "$REPO"` on every invocation. Resolves the repository identity through the remote the shared Kanban configuration's `remote_name` names, so a fork checkout whose board is pointed at upstream asserts the upstream identity the controller expects. Makes no GitHub call of its own, creates no second watcher, and runs only on an explicit request. Paired with the Codex `$drain-prs` skill. |
@@ -336,11 +335,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the twenty-four packaged workflows,
+- the commands directory contains exactly the twenty-three packaged workflows,
   and the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  nineteen user-invoked commands;
+  eighteen user-invoked commands;
 - the Codex-only document-workflow set is empty, so no counterpart is withheld
   from this bundle;
 - no packaged manifest sets model/effort/permission-mode/working-directory
@@ -371,7 +370,7 @@ not a comment block — so a fix landing in one copy only fails there, which is 
 the issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (all twenty-four commands under
+surface (all twenty-three commands under
 `claude-plugin/plugins/kanban/commands/`)
 and
 all seven bundled Python assets — the review coordinator and its
@@ -424,6 +423,18 @@ every cross-brand pair — the surface that makes a report or design document
 portable between the brands. It also holds `/note-problem` on the publishing
 side of §9 rather than the novel-document side: it writes no checked box, but
 what it appends to is a report that may already be classified `coordination`.
+
+## Migration note: the retired documentation-landing workflow
+
+`/push-docs` and the `docs_land.sh` and `docs_land_paths.py` helpers
+behind it were retired (issue #829). Documentation lands with the owner's
+`docs-push` tool, which every workflow that writes documentation already calls.
+Retiring the workflow deletes no worktree, branch, pending record or unpublished
+document. Content left in a `docs-wip` worktree lands with named-path
+`docs-push <paths>` run from that worktree. `docs-push` refuses a path its
+configuration lists as code, and such a path goes through a pull request.
+Nothing batches or drains the worktree any more. See the migration note in
+[docs/workflow-setup.md](../docs/workflow-setup.md#migration-note-recovering-documentation-left-in-a-docs-wip-worktree).
 
 ## Project-scoped locations
 

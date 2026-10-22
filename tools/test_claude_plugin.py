@@ -23,16 +23,16 @@ design pair /design-epic and /process-design-doc, transposed from the
 post-#239 tracked Codex skills; issue #328 completed the report side with
 /draft-report and /note-problem; and issues #393, #410, #427, #430, #462, and
 #511 vendored the rendered /triage roadmap, its /retriage refresh, the
-/push-docs documentation-landing workflow, the /backlog-review backlog audit,
+/backlog-review backlog audit,
 the /drain-prs drainer control surface, the
 /fix approved-pull-request workflow, the /finalize manual merge fallback, the
 /janitor pipeline housekeeping audit, and -- issue #576, the eighth and last of
 that arc -- the /autosolve autonomous solve-and-review loop. /project-review and
 /auto-project-review were removed again when the guide replaced them.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-four); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-three); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own dashboard used to spawn by name (the five
-above; it spawns none now, and the set stays as the packaged partition). The drafting, document, roadmap, documentation-landing,
+above; it spawns none now, and the set stays as the packaged partition). The drafting, document, roadmap,
 backlog-audit, drainer-control, approved-pull-request,
 manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
 workflows
@@ -166,13 +166,6 @@ CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 # tools/test_reconcile_approvals.py beside /triage's.
 ROADMAP_COMMAND_NAMES = {"triage", "retriage"}
 
-# The documentation-landing workflow vendored by issue #410. Rendered from
-# tools/command_sources/push-docs.md exactly the way the roadmap workflow
-# above is, and like it user-invoked and excluded from Haskell name parity.
-# Its behavioral assertions live in tools/test_docs_land.py beside the
-# tools/docs_land.sh helper both brands' renderings invoke.
-PUBLICATION_COMMAND_NAMES = {"push-docs"}
-
 # The backlog audit vendored by issue #430, slice VEND-3. Rendered from
 # tools/command_sources/backlog-review.md the way the two sets above are, and
 # like them user-invoked and excluded from Haskell name parity. It is its own
@@ -248,7 +241,6 @@ EXPECTED_COMMAND_NAMES = (
     | DRAFTING_COMMAND_NAMES
     | DOCUMENT_COMMAND_NAMES
     | ROADMAP_COMMAND_NAMES
-    | PUBLICATION_COMMAND_NAMES
     | BACKLOG_COMMAND_NAMES
     | DRAINER_COMMAND_NAMES
     | PULL_REQUEST_FIX_COMMAND_NAMES
@@ -396,7 +388,6 @@ class CommandDiscoveryTests(unittest.TestCase):
             DRAFTING_COMMAND_NAMES
             | DOCUMENT_COMMAND_NAMES
             | ROADMAP_COMMAND_NAMES
-            | PUBLICATION_COMMAND_NAMES
             | BACKLOG_COMMAND_NAMES
             | DRAINER_COMMAND_NAMES
             | PULL_REQUEST_FIX_COMMAND_NAMES
@@ -408,17 +399,11 @@ class CommandDiscoveryTests(unittest.TestCase):
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(
-            PUBLICATION_COMMAND_NAMES
-            & (DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES | ROADMAP_COMMAND_NAMES),
-            set(),
-        )
-        self.assertEqual(
             BACKLOG_COMMAND_NAMES
             & (
                 DRAFTING_COMMAND_NAMES
                 | DOCUMENT_COMMAND_NAMES
                 | ROADMAP_COMMAND_NAMES
-                | PUBLICATION_COMMAND_NAMES
             ),
             set(),
         )
@@ -428,7 +413,6 @@ class CommandDiscoveryTests(unittest.TestCase):
                 DRAFTING_COMMAND_NAMES
                 | DOCUMENT_COMMAND_NAMES
                 | ROADMAP_COMMAND_NAMES
-                | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
             ),
             set(),
@@ -439,7 +423,6 @@ class CommandDiscoveryTests(unittest.TestCase):
                 DRAFTING_COMMAND_NAMES
                 | DOCUMENT_COMMAND_NAMES
                 | ROADMAP_COMMAND_NAMES
-                | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
                 | DRAINER_COMMAND_NAMES
                 | PULL_REQUEST_FIX_COMMAND_NAMES
@@ -452,7 +435,6 @@ class CommandDiscoveryTests(unittest.TestCase):
                 DRAFTING_COMMAND_NAMES
                 | DOCUMENT_COMMAND_NAMES
                 | ROADMAP_COMMAND_NAMES
-                | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
                 | DRAINER_COMMAND_NAMES
                 | PULL_REQUEST_FIX_COMMAND_NAMES
@@ -472,7 +454,6 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | DRAFTING_COMMAND_NAMES
                 | DOCUMENT_COMMAND_NAMES
                 | ROADMAP_COMMAND_NAMES
-                | PUBLICATION_COMMAND_NAMES
                 | BACKLOG_COMMAND_NAMES
                 | DRAINER_COMMAND_NAMES
                 | PULL_REQUEST_FIX_COMMAND_NAMES

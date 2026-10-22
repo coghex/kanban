@@ -281,16 +281,16 @@ DEFAULT_ROSTER = ModelRoster(
             "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
         ),
         ("issue_review", "claude"): Assignment(
-            "claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"
+            "claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"
         ),
         ("issue_revise", "claude"): Assignment(
-            "claude-fable-5-1", "high", "Fable 5.1 high"
+            "claude-opus-5-5", "high", "Opus 5.5 high"
         ),
         ("issue_gate", "codex"): Assignment(
             "gpt-6-astra", "high", "GPT-6-Astra high"
         ),
         ("issue_gate", "claude"): Assignment(
-            "claude-fable-5-1", "high", "Fable 5.1 high"
+            "claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"
         ),
         ("drain_rereview", "codex"): Assignment(
             "gpt-6-sol", "medium", "GPT-6-Sol medium"
