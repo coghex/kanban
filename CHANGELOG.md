@@ -28,6 +28,16 @@ created above it.
   installation to provision it. `docs/pr-drainer.md`,
   `docs/agent-workflow-contract.md` §2.4 and the drain-prs skill say so.
   Bundles: Claude 1.80.0, Codex 1.79.0.
+- The canonical issue reviewer accepts a third delivery unit next to the pull
+  request and the direct documentation landing: one reviewed commit in a named
+  local repository, delivered through the target repository's own local-commit
+  lane (#826). An issue qualifies only when its spec names the local repository
+  and the lane, names the lane's gates (isolated checkout and branch,
+  opposite-brand review of the exact commit, recorded test evidence, named merge
+  authorization), and the target repository's `CLAUDE.md` or `AGENTS.md`
+  confirms them; any other issue keeps the one-pull-request contract.
+  `docs/drafting-workflow-contract.md` §3.4 lists the unit. Reinstall the
+  packaged backend with `tools/install_issue_review.py` to pick it up.
 - Retired the `/push-docs` documentation-landing workflow and the
   `docs_land.sh` and `docs_land_paths.py` helpers behind it, slice A
   of #775's consolidation (#829). Documentation lands with `docs-push`; content
