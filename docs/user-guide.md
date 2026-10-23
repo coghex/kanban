@@ -293,7 +293,7 @@ The board does none of this. Kanban only shows what GitHub reports, so a card
 moves between columns when a skill, a script or a person changes the issue, the
 labels or the pull request, and the board picks that up on its next refresh.
 
-The workflows that review, solve and repair work are skills you run in your own
+The workflows that review, solve and revise work are skills you run in your own
 Codex or Claude session; they need a working installation and login for that
 provider plus the Kanban-owned workflow assets, which you install with
 `python3 tools/setup_workflows.py`. See [workflow setup](workflow-setup.md) for

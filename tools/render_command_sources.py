@@ -101,9 +101,10 @@ changing. `triage` — VEND-1, the first real rendering — renders into the Cla
 and Codex bundle directories and is therefore shipped, named by both bundles'
 manifests and discovered by both providers. The external `solve` — EXT-2 —
 and the external `autosolve` — EXT-3 — render into the Grok, Kimi, Google, and
-Claude-on-Copilot bundles and neither of those two, whose own `solve` stays hand-edited and whose
-own `autosolve` is the separate entry above it. Two entries may therefore share
-a name, and are told apart by their source path, never by that name.
+Claude-on-Copilot bundles and neither of those two, whose own `solve` and
+`autosolve` are the separate entries above them, rendered from their own
+sources. Two entries may therefore share a name, and are told apart by their
+source path, never by that name.
 """
 
 from __future__ import annotations
@@ -466,6 +467,109 @@ COMMAND_SOURCES = (
     ),
     CommandSource(
         name="solve",
+        source="tools/command_sources/solve.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical Claude and Codex solve. Issue #837 migrated this pair "
+            "from two hand-edited copies to one authored source, byte-identical "
+            "to both tracked files at the default-branch base it was migrated "
+            "from, so no rendered byte moved. Its per-brand text -- the argument "
+            "binding and the installed-helper resolution -- is brand blocks. The "
+            "external solve below shares the name and is told apart by its source "
+            "path."
+        ),
+    ),
+    CommandSource(
+        name="pr-review",
+        source="tools/command_sources/pr-review.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical pull-request review. Issue #837 migrated this pair "
+            "from two hand-edited copies to one authored source, byte-identical "
+            "to both tracked files at the default-branch base it was migrated "
+            "from, so no rendered byte moved. Its per-brand text is brand blocks, "
+            "and the workflows it names go through the {{cmd:}} token."
+        ),
+    ),
+    CommandSource(
+        name="pr-rereview",
+        source="tools/command_sources/pr-rereview.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical pull-request rereview. Issue #837 migrated this pair "
+            "from two hand-edited copies to one authored source, byte-identical "
+            "to both tracked files at the default-branch base it was migrated "
+            "from, so no rendered byte moved. Its per-brand text is brand blocks, "
+            "and the workflows it names go through the {{cmd:}} token."
+        ),
+    ),
+    CommandSource(
+        name="pr-revise",
+        source="tools/command_sources/pr-revise.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical pull-request revision after a changes-requested "
+            "review. Issue #837 migrated this pair from two hand-edited copies to "
+            "one authored source, byte-identical to both tracked files at the "
+            "default-branch base it was migrated from, so no rendered byte moved. "
+            "Its per-brand text is brand blocks, and the workflows it names go "
+            "through the {{cmd:}} token."
+        ),
+    ),
+    CommandSource(
+        name="issue",
+        source="tools/command_sources/issue.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical single-issue drafting workflow. Issue #837 migrated "
+            "this pair from two hand-edited copies to one authored source, "
+            "byte-identical to both tracked files at the default-branch base it "
+            "was migrated from, so no rendered byte moved. Its per-brand text is "
+            "brand blocks, and the workflows it names go through the {{cmd:}} "
+            "token."
+        ),
+    ),
+    CommandSource(
+        name="autoissue",
+        source="tools/command_sources/autoissue.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical draft-then-review issue workflow. Issue #837 migrated "
+            "this pair from two hand-edited copies to one authored source, "
+            "byte-identical to both tracked files at the default-branch base it "
+            "was migrated from, so no rendered byte moved. Its per-brand text is "
+            "brand blocks, and the workflows it names go through the {{cmd:}} "
+            "token."
+        ),
+    ),
+    CommandSource(
+        name="issue-review",
+        source="tools/command_sources/issue-review.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical opposite-agent issue review. Issue #837 migrated this "
+            "pair from two hand-edited copies to one authored source, "
+            "byte-identical to both tracked files at the default-branch base it "
+            "was migrated from, so no rendered byte moved. Its per-brand text is "
+            "brand blocks, and the workflows it names go through the {{cmd:}} "
+            "token."
+        ),
+    ),
+    CommandSource(
+        name="issue-rereview",
+        source="tools/command_sources/issue-rereview.md",
+        outputs=BUNDLE_OUTPUTS,
+        note=(
+            "The canonical issue repair-and-rereview loop. Issue #837 migrated "
+            "this pair from two hand-edited copies to one authored source, "
+            "byte-identical to both tracked files at the default-branch base it "
+            "was migrated from, so no rendered byte moved. Its per-brand text is "
+            "brand blocks, and the workflows it names go through the {{cmd:}} "
+            "token."
+        ),
+    ),
+    CommandSource(
+        name="solve",
         source="tools/command_sources/external/solve.md",
         outputs=EXTERNAL_OUTPUTS,
         note=(
@@ -474,7 +578,8 @@ COMMAND_SOURCES = (
             "bundles rather than the Claude and Codex pair: grok, kimi, "
             "google and, since issue #722, claude-copilot each ship a solve "
             "that opens a pull request Codex reviews. "
-            "The Claude and Codex solve stay hand-edited, so this source lives "
+            "The Claude and Codex solve are the separate entry above, rendered "
+            "from tools/command_sources/solve.md, so this source lives "
             "under external/ and renders into neither of their bundles. Its "
             "per-brand text is of three kinds: {{brand:...}} tokens for the "
             "brand's name, plugin-root variable, marketplace and origin marker; "
