@@ -148,6 +148,25 @@ def git_out(args, *, cwd: Path, input_bytes: bytes | None = None) -> str:
     return git(args, cwd=cwd, input_bytes=input_bytes).stdout.decode().strip()
 
 
+def ref_oid(root: Path, spec: str) -> str:
+    """The object `spec` names, or the empty string when it is *verifiably*
+    absent. A command that failed, or that said anything on stderr, is not
+    absence: an unreadable reference raises, so that an outstanding record can
+    never read as clear because the read broke."""
+    proc = git(["rev-parse", "--verify", "--quiet", spec], cwd=root, check=False)
+    out = proc.stdout.decode().strip()
+    if proc.returncode == 0 and out:
+        return out
+    if proc.returncode == 1 and not out and not proc.stderr.strip():
+        return ""
+    raise DocumentError(
+        "ref-unreadable",
+        f"{spec} could not be read ({(proc.stderr or proc.stdout).decode(errors='replace').strip() or proc.returncode}); "
+        "it is not treated as absent",
+        ref=spec,
+    )
+
+
 # ---------------------------------------------------------------- identity --
 
 
@@ -202,6 +221,23 @@ def verify_owner(root: Path, declared: str) -> str:
 # -------------------------------------------------------------------- lock --
 
 
+def check_canonical(document: str) -> None:
+    """One spelling per document. `./docs/a.md`, `docs//a.md` and `docs/a.md`
+    name one file and would otherwise key three locks and three records; the
+    helper and the tracker each refuse every spelling but the canonical one."""
+    parts = document.split("/")
+    if (
+        not document
+        or document.endswith("/")
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise DocumentError(
+            "document-name-unsupported",
+            f"{document!r} is not the canonical repository-relative spelling of a "
+            "file (no leading, repeated or trailing separators, no . or .. parts)",
+        )
+
+
 def _key(repository: str, document: str) -> str:
     """A ref-safe name for one (repository, document) pair, and a distinct one
     for every pair.
@@ -214,6 +250,7 @@ def _key(repository: str, document: str) -> str:
     the repository and document in clear for `git for-each-ref` to show, and a
     pending record's commit names the document in its tree.
     """
+    check_canonical(document)
     return hashlib.sha256(f"{repository}\0{document}".encode()).hexdigest()[:40]
 
 
@@ -238,12 +275,7 @@ def read_applied(root: Path, repository: str, document: str) -> str | None:
     module wrote the last time it recorded a write. It says nothing about
     whether that disposition was ever landed anywhere.
     """
-    out = git(
-        ["rev-parse", "--verify", "--quiet", applied_ref(repository, document)],
-        cwd=root,
-        check=False,
-    ).stdout.decode().strip()
-    return out or None
+    return ref_oid(root, applied_ref(repository, document)) or None
 
 
 def record_applied(root: Path, repository: str, document: str, blob: str) -> bool:
@@ -310,8 +342,7 @@ def owner_token(repository: str = "", document: str = "") -> str:
 
 
 def read_lock_owner(root: Path, ref: str) -> dict | None:
-    proc = git(["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False)
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if not ref_oid(root, ref):
         return None
     subject = git_out(["log", "-1", "--format=%s", ref], cwd=root)
     try:
@@ -383,9 +414,7 @@ def clear_stale_lock(root: Path, ref: str) -> dict:
     cannot be checked from here, is refused: clearing either would produce two
     simultaneous publishers, which is the thing the lock exists to prevent.
     """
-    observed = git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    observed = ref_oid(root, ref)
     holder = read_lock_owner(root, ref)
     if holder is None or not observed:
         return {"status": "no-lock", "lock_ref": ref}
@@ -425,13 +454,7 @@ def blob_at(root: Path, revision: str, document: str) -> str | None:
     """The document's blob at `revision`, or None when it is absent there. An
     absent path is not an empty baseline: it only means the revision does not
     carry the document yet."""
-    proc = git(
-        ["rev-parse", "--verify", "--quiet", f"{revision}:{document}"],
-        cwd=root,
-        check=False,
-    )
-    out = proc.stdout.decode().strip()
-    return out or None
+    return ref_oid(root, f"{revision}:{document}") or None
 
 
 def working_blob(root: Path, document: str) -> str | None:
@@ -441,36 +464,63 @@ def working_blob(root: Path, document: str) -> str | None:
     return git_out(["hash-object", "--", str(target)], cwd=root)
 
 
-def staged_blob(root: Path, document: str) -> str | None:
-    """The document's index entry in the write root, or None when unindexed."""
-    proc = git(["rev-parse", "--verify", "--quiet", f":{document}"], cwd=root, check=False)
-    out = proc.stdout.decode().strip()
-    return out or None
+def index_entries(root: Path, document: str) -> list:
+    """The document's index entries as (mode, object, stage): none when it is
+    unindexed, more than one (or a non-zero stage) when it is unmerged."""
+    listing = git(
+        ["ls-files", "-s", "-z", "--", f":(literal){document}"], cwd=root
+    ).stdout.decode("utf-8", errors="surrogateescape")
+    entries = []
+    for entry in listing.split("\0"):
+        meta, _, _ = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) == 3:
+            entries.append(tuple(fields))
+    return entries
 
 
-def head_blob(root: Path, document: str) -> str | None:
-    return blob_at(root, "HEAD", document)
+def head_entry(root: Path, document: str):
+    """(mode, object) of the document at HEAD, or None when HEAD lacks it."""
+    listing = git(
+        ["ls-tree", "-z", "HEAD", "--", f":(literal){document}"], cwd=root
+    ).stdout.decode("utf-8", errors="surrogateescape")
+    for entry in listing.split("\0"):
+        meta, _, _ = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) == 3:
+            return fields[0], fields[2]
+    return None
 
+
+def index_differs(root: Path, document: str) -> bool:
+    """Whether the index holds *any* change to the document: another blob, a
+    mode-only change, a deletion, or an unresolved entry."""
+    entries, head = index_entries(root, document), head_entry(root, document)
+    if not entries:
+        return head is not None
+    if len(entries) == 1 and entries[0][2] == "0" and head is not None:
+        return (entries[0][0], entries[0][1]) != head
+    return True
 
 
 def require_unstaged(root: Path, document: str) -> None:
     """Refuse a document with a staged change in the write root.
 
     The end state this module promises is that the document path is left
-    unstaged, so the index entry must already match the write root's HEAD.
-    Hashing only the working file misses an index-only edit — `git apply
-    --cached` leaves the file itself untouched — and publishing over one would
-    both carry somebody's unapproved staged work forward and break the single
-    defined state reconciliation depends on.
+    unstaged, so the index entry must already match HEAD in blob *and* mode and
+    must not be unmerged. Hashing only the working file misses an index-only edit
+    — `git apply --cached` leaves the file itself untouched, and `update-index
+    --chmod` changes nothing but a mode — and publishing over one would both
+    carry somebody's unapproved staged work forward and break the single defined
+    state reconciliation depends on.
     """
-    staged, head = staged_blob(root, document), head_blob(root, document)
-    if staged != head:
+    if index_differs(root, document):
         raise DocumentError(
             "document-staged",
             f"{document} has a staged change in the write root; publication needs "
             "the document unstaged so its end state is defined",
-            staged_blob=staged,
-            head_blob=head,
+            staged_entries=[list(entry) for entry in index_entries(root, document)],
+            head_entry=head_entry(root, document),
         )
 
 
@@ -543,9 +593,7 @@ def remote_ref(branch: str) -> str:
 
 def read_ref(root: Path, ref: str) -> str:
     """The object a reference names, or the empty string when it is absent."""
-    return git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    return ref_oid(root, ref)
 
 
 def default_message(document: str) -> str:
@@ -555,6 +603,7 @@ def default_message(document: str) -> str:
 def check_supported_name(document: str) -> None:
     """Refuse a path this module cannot track, before anything is recorded or
     touched rather than halfway through a recovery."""
+    check_canonical(document)
     parts = PurePosixPath(document).parts
     if (
         not document
@@ -2010,7 +2059,8 @@ def delete_ref(root: Path, ref: str, expected: str) -> bool:
 
 
 def settle_landed(
-    root: Path, owner: str, branch: str, document: str, pending: dict, info: dict
+    root: Path, owner: str, branch: str, document: str, pending: dict, info: dict,
+    operator_quiescent: bool = False,
 ) -> dict:
     """Clean up a publication that is verified to have landed, but only from a
     write root that still holds what was published, with nothing unresolved.
@@ -2029,17 +2079,18 @@ def settle_landed(
             "record is kept",
             pending_ref=pending["ref"],
         )
-    if child_state(pending["handoff"]) in ("live", "unknown"):
+    children = child_state(pending["handoff"])
+    # The operator's confirmation covers an identity that was never recorded; it
+    # never overrides a child known to be live.
+    if children == "live" or (children == "unknown" and not operator_quiescent):
         raise DocumentError(
             "tool-child-not-quiescent",
-            f"{document} landed, but the tool's child process is not known to have "
-            "exited; the record is kept",
+            f"{document} landed, but the tool's child process is {children}; the "
+            "record is kept",
             pending_ref=pending["ref"],
         )
     state, blob = file_state(root / document)
-    if state != "file" or blob != published or staged_blob(root, document) != head_blob(
-        root, document
-    ):
+    if state != "file" or blob != published or index_differs(root, document):
         raise DocumentError(
             "landed-but-divergent",
             f"{document} reached {branch}, but the write root no longer holds the "
@@ -2133,7 +2184,9 @@ def publish_recorded(
     recognize that it already landed."""
     pending, info = confirm_landing(root, branch, pending)
     if info["landed"]:
-        cleared = settle_landed(root, owner, branch, document, pending, info)
+        cleared = settle_landed(
+            root, owner, branch, document, pending, info, operator_quiescent
+        )
         return published_outcome(
             root, owner, branch, document, pending, info, cleared,
             resumed=resumed or "already-landed", tool=None,
@@ -2187,7 +2240,9 @@ def publish_recorded(
         )
     if not info["landed"]:
         return tool_incomplete(root, owner, branch, pending, tool)
-    cleared = settle_landed(root, owner, branch, document, pending, info)
+    cleared = settle_landed(
+            root, owner, branch, document, pending, info, operator_quiescent
+        )
     return published_outcome(
         root, owner, branch, document, pending, info, cleared,
         resumed=resumed, tool=tool,
@@ -2228,7 +2283,9 @@ def resume_pending(
             pending_commit=pending["commit"],
         )
     if info["landed"]:
-        cleared = settle_landed(root, owner, branch, document, pending, info)
+        cleared = settle_landed(
+            root, owner, branch, document, pending, info, operator_quiescent
+        )
         return published_outcome(
             root, owner, branch, document, pending, info, cleared,
             resumed="already-landed", tool=None,
@@ -2584,8 +2641,9 @@ def orphan_captures(root: Path, document: str, record: dict | None) -> list[str]
     return found
 
 
-def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
-    """Whether an earlier approved mutation of this document is outstanding —
+def preflight_once(root: Path, repository: str, branch: str, document: str) -> dict:
+    """One evaluation of `check_pending`'s question — whether an earlier approved
+    mutation of this document is outstanding —
     its publication, its tracker mutations, or both.
 
     Callers mutate the tracker before they publish, so this has to be askable
@@ -2726,6 +2784,64 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
             "this document should start",
             **{k: v for k, v in outcome.items() if k != "status"},
             tool_reason=tool["reason"],
+        )
+    return outcome
+
+
+def preflight_snapshot(resolved: Path, owner: str, document: str, module) -> tuple:
+    """The records a preflight's answer depends on, read fail-closed."""
+    try:
+        working = file_state(resolved / document)
+    except DocumentError as error:
+        working = ("unreadable", error.message)
+    return (
+        ref_oid(resolved, lock_ref(owner, document)),
+        ref_oid(resolved, pending_ref(owner, document)),
+        ref_oid(resolved, applied_ref(owner, document)),
+        module.ref_value(resolved, module.transaction_ref(owner, document)),
+        working,
+    )
+
+
+def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
+    """Whether an earlier approved mutation of this document is outstanding —
+    its publication, its tracker mutations, or both — answered from a stable
+    snapshot.
+
+    A preflight that raced another run could report `clear` over a publication
+    that finished while it was fetching. So the lock and the records are read
+    before and after, a held lock is reported (`pending`, kind `lock`) rather
+    than ignored, and a snapshot that moved is re-read; one that will not settle
+    is a refusal, not an answer. The mutating entry point revalidates under the
+    document lock either way.
+    """
+    resolved = resolve_write_root(root)
+    owner = verify_owner(resolved, repository)
+    check_supported_name(document)
+    module = tracker_transaction_module()
+    for _ in range(3):
+        before = preflight_snapshot(resolved, owner, document, module)
+        outcome = preflight_once(resolved, repository, branch, document)
+        after = preflight_snapshot(resolved, owner, document, module)
+        if before == after:
+            break
+    else:
+        raise DocumentError(
+            "preflight-changed",
+            f"the records for {document} kept changing while the preflight read "
+            "them, so no answer is given; run it again when no other run is active",
+            pending_ref=pending_ref(owner, document),
+        )
+    if after[0]:
+        outcome["pending_kinds"] = list(outcome["pending_kinds"]) + ["lock"]
+        outcome["status"] = "pending"
+        outcome["lock"] = {
+            "ref": lock_ref(owner, document), "owner": read_lock_owner(resolved, lock_ref(owner, document)),
+        }
+        outcome.setdefault(
+            "resolution",
+            "another run holds this document's lock (or one died holding it); "
+            "wait for it, or clear a provably abandoned lock with --clear-stale-lock",
         )
     return outcome
 

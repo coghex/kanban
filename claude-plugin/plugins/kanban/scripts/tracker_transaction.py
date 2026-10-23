@@ -300,11 +300,44 @@ def verify_owner(root: Path, declared: str) -> str:
     return actual
 
 
+def ref_value(root: Path, spec: str) -> str:
+    """The object `spec` names, or "" when it is verifiably absent. A failed read
+    is not absence, and an outstanding record must never read as clear because
+    the read broke."""
+    proc = git(["rev-parse", "--verify", "--quiet", spec], cwd=root, check=False)
+    out = proc.stdout.decode().strip()
+    if proc.returncode == 0 and out:
+        return out
+    if proc.returncode == 1 and not out and not proc.stderr.strip():
+        return ""
+    raise TransactionError(
+        "ref-unreadable",
+        f"{spec} could not be read ({(proc.stderr or proc.stdout).decode(errors='replace').strip() or proc.returncode}); "
+        "it is not treated as absent",
+        ref=spec,
+    )
+
+
+def check_canonical(document: str) -> None:
+    """One spelling per document, exactly as the approved-document helper holds
+    it, so both modules key a document identically."""
+    if (
+        not document
+        or document.endswith("/")
+        or any(part in ("", ".", "..") for part in document.split("/"))
+    ):
+        raise TransactionError(
+            "document-name-unsupported",
+            f"{document!r} is not the canonical repository-relative spelling of a file",
+        )
+
+
 def record_key(repository: str, document: str) -> str:
     """A ref-safe name for one (repository, document) pair, and a distinct one
     for every pair. A digest rather than a path substitution, so `docs/a-b.md`
     and `docs/a/b.md` cannot share one record — the payload carries both values
     in clear for a human to read back."""
+    check_canonical(document)
     return hashlib.sha256(f"{repository}\0{document}".encode()).hexdigest()[:40]
 
 
@@ -488,9 +521,7 @@ def read_record(
     the transition overwrite whatever happened in between, which is the one
     thing a compare-and-swap exists to refuse.
     """
-    observed = git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    observed = ref_value(root, ref)
     if not observed:
         return None, ""
     proc = git(
@@ -1386,9 +1417,7 @@ def recorded_publication_landed(root: Path, record: dict, branch: str):
     undecided landing may not license a local resolution.
     """
     ref = pending_publication_ref(record["repository"], record["document"])
-    recorded = git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    recorded = ref_value(root, ref)
     if not recorded:
         return False, None
     try:
@@ -1453,9 +1482,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     git(["fetch", "origin", branch], cwd=root)
     document = record["document"]
     applied = applied_ref(record["repository"], document)
-    recorded = git(
-        ["rev-parse", "--verify", "--quiet", applied], cwd=root, check=False
-    ).stdout.decode().strip()
+    recorded = ref_value(root, applied)
     if not recorded:
         return False, (
             f"the approved-document helper never applied a disposition to "
@@ -1488,11 +1515,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     # through its second. So the content's blob is looked for at the document's
     # path in every reachable commit, and a history that cannot be read
     # refuses rather than guesses.
-    pending_exists = git(
-        ["rev-parse", "--verify", "--quiet",
-         pending_publication_ref(record["repository"], document)],
-        cwd=root, check=False,
-    ).stdout.decode().strip()
+    pending_exists = ref_value(root, pending_publication_ref(record["repository"], document))
     if pending_exists:
         # A pending attempt has its own recorded interval and one validator, the
         # helper's: a second, weaker heuristic here would only disagree with it.
@@ -1550,9 +1573,7 @@ def publication_obligation(root: Path, record: dict) -> dict:
     cleared only by a landing that is verified on the branch.
     """
     ref = pending_publication_ref(record["repository"], record["document"])
-    recorded = git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    recorded = ref_value(root, ref)
     return {
         "published": False,
         "publication_obligation": "outstanding" if recorded else "none-recorded",

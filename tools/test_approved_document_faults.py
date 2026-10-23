@@ -896,6 +896,168 @@ class ReviewRegressions(FaultFixture):
                 self.assertEqual(self.calls(), [])
 
 
+class ReworkRoundTwo(FaultFixture):
+    """Reproduced by the second rereview of the reworked branch (PR #836)."""
+
+    def test_every_alias_spelling_of_a_document_is_refused_not_keyed_apart(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["status"], "incomplete-publication")
+        for alias in ("./docs/notes.md", "docs//notes.md", "docs/./notes.md", "docs/notes.md/", "docs/../docs/notes.md"):
+            with self.subTest(alias=alias):
+                code, report, _ = self.child([], "--branch", "master", "--check-pending", document=alias)
+                self.assertEqual((code, report["status"]), (1, "document-name-unsupported"))
+                with self.assertRaises(approved.DocumentError):
+                    approved._key(REPOSITORY, alias)
+                with self.assertRaises(tracker.TransactionError):
+                    tracker.record_key(REPOSITORY, alias)
+                code, started, _ = self.start([], document=alias, baseline=blob_of(NOTES))
+                self.assertEqual(started["status"], "document-name-unsupported")
+        # The canonical spelling still sees the outstanding publication.
+        self.assertEqual(self.check_child()[1]["status"], "pending")
+
+    def test_a_failed_ref_read_is_not_a_clear_preflight(self):
+        self.helper_record()
+        real = approved.git
+
+        def broken(args, **kwargs):
+            if args[:3] == ["rev-parse", "--verify", "--quiet"] and args[3].startswith(
+                "refs/kanban/pending-publication/"
+            ):
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: unable to read: I/O error")
+            return real(args, **kwargs)
+
+        with unittest.mock.patch.object(approved, "git", broken):
+            with self.assertRaises(approved.DocumentError) as caught:
+                approved.check_pending(self.fx.work, REPOSITORY, "master", DOC)
+        self.assertEqual(caught.exception.status, "ref-unreadable")
+        self.assertIsNotNone(self.fx.pending())
+
+    def test_a_failed_tracker_ref_read_is_outstanding_not_absent(self):
+        ref = tracker.transaction_ref(REPOSITORY, DOC)
+        tracker.action_acquire(self.fx.work, ref, REPOSITORY, DOC, base.tracker_plan(), self.fx.origin_tip())
+        real = tracker.git
+
+        def broken(args, **kwargs):
+            if args[:3] == ["rev-parse", "--verify", "--quiet"] and args[3] == ref:
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: I/O error")
+            return real(args, **kwargs)
+
+        with unittest.mock.patch.object(tracker, "git", broken):
+            report = tracker.check(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(report["status"], "outstanding")
+        self.assertFalse(report["record_readable"])
+
+    def test_operator_quiescence_settles_a_publication_that_already_landed(self):
+        # The tool was spawned and its identity never recorded, and it then
+        # published and exited: the landing is a fact, and the operator's
+        # confirmation lets the record settle.
+        self.crash([self.fault("process_identity.before", "T-17.spawned")])
+        deadline = time.monotonic() + 30
+        while not self.calls() and time.monotonic() < deadline:
+            time.sleep(0.05)  # only to reap the orphaned child
+        while self.fx.origin_blob() != blob_of(EDITED) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.check_child()[1]["already_landed"], True)
+        self.assertEqual(self.clear_lock("--operator-quiescent")["status"], "cleared")
+        code, blocked, _ = self.resume_child(clear_lock=False)
+        self.assertEqual(blocked["status"], "tool-child-not-quiescent")
+        code, outcome, _ = self.resume_child((), "--operator-quiescent", clear_lock=False)
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(len(self.calls()), 1)
+        self.assertIsNone(self.fx.pending())
+
+    def clear_lock(self, *extra):
+        return self.child([], "--branch", "master", "--clear-stale-lock", *extra)[1]
+
+    def test_a_known_live_child_is_never_overridden_by_the_operator(self):
+        self.crash([self.fault("settle_landed.before", "T-17.live")])
+        approved.clear_stale_lock(self.fx.work, approved.lock_ref(REPOSITORY, DOC))
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        live = dict(record["handoff"], state="running", child={
+            "pid": os.getpid(), "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push"],
+        })
+        self.reseed(record, handoff=live)
+        identity = {"start": "Fri Oct 23 10:00:00 2026", "args": "docs-push"}
+        with unittest.mock.patch.object(approved, "process_identity", lambda pid: identity):
+            with self.assertRaises(approved.DocumentError) as caught:
+                self.resume(operator_quiescent=True)
+        self.assertEqual(caught.exception.status, "tool-child-not-quiescent")
+        self.assertIsNotNone(self.fx.pending())
+
+    def resume(self, root=None, document=DOC, operator_quiescent=False):
+        return approved.apply_and_publish(
+            repository=REPOSITORY, branch="master", root=root or self.fx.work,
+            document=document, content=None, operator_quiescent=operator_quiescent,
+        )
+
+    def test_a_held_lock_is_reported_not_ignored(self):
+        approved.acquire_lock(
+            self.fx.work, approved.lock_ref(REPOSITORY, DOC), self.fx.origin_tip(), REPOSITORY, DOC
+        )
+        report = approved.check_pending(self.fx.work, REPOSITORY, "master", DOC)
+        self.assertEqual(report["status"], "pending")
+        self.assertIn("lock", report["pending_kinds"])
+        self.assertEqual(report["lock"]["owner"]["pid"], os.getpid())
+
+    def test_a_preflight_that_raced_a_publication_does_not_say_clear(self):
+        real = approved.fresh_tip
+        raced = []
+
+        def racing(root, branch):
+            if not raced:
+                raced.append(1)
+                self.helper_record()
+            return real(root, branch)
+
+        with unittest.mock.patch.object(approved, "fresh_tip", racing):
+            report = approved.check_pending(self.fx.work, REPOSITORY, "master", DOC)
+        self.assertEqual(report["status"], "pending")
+        self.assertIn("publication", report["pending_kinds"])
+
+    def test_a_snapshot_that_never_settles_is_a_refusal(self):
+        real = approved.fresh_tip
+        flips = [0]
+
+        def churning(root, branch):
+            flips[0] += 1
+            run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC),
+                 approved._preserve(root, f"churn {flips[0]}\n".encode())], root)
+            return real(root, branch)
+
+        with unittest.mock.patch.object(approved, "fresh_tip", churning):
+            with self.assertRaises(approved.DocumentError) as caught:
+                approved.check_pending(self.fx.work, REPOSITORY, "master", DOC)
+        self.assertEqual(caught.exception.status, "preflight-changed")
+
+    def stage_mode(self, mode):
+        """Stage a mode-only change: the index keeps HEAD's blob. (A plain
+        `update-index --chmod` would also restage the working file's content.)"""
+        run(["git", "update-index", "--cacheinfo", f"{mode},{blob_of(NOTES)},{DOC}"], self.fx.work)
+
+    def test_a_mode_only_staged_change_refuses_application_resume_and_settlement(self):
+        self.stage_mode("100755")
+        error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "document-staged")
+        self.assertIsNone(self.fx.pending())
+        self.stage_mode("100644")
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["status"], "incomplete-publication")
+        self.mode("land")
+        self.stage_mode("100755")
+        calls = len(self.calls())
+        self.assertEqual(self.failure(self.resume).status, "document-staged")
+        self.assertEqual(len(self.calls()), calls)
+        self.stage_mode("100644")
+        self.assertEqual(self.resume()["status"], "published")
+
+    def test_a_mode_only_staged_change_after_the_landing_is_divergent(self):
+        self.crash([self.fault("settle_landed.before", "T-23.mode")])
+        self.stage_mode("100755")
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "landed-but-divergent")
+        self.assertIsNotNone(self.fx.pending())
+
+
 class NegativeControls(FaultFixture):
     """Each guard must fail its test when removed: the tests have teeth."""
 

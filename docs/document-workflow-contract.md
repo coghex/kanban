@@ -959,7 +959,11 @@ and every `T-NN` row of that design is a named regression in
    current isolated worktree; `docs-wip` is neither required nor selected, and
    the helper never checks out, resets, switches or stages anything.
 2. **Per-document serialization.** One lock per (repository, document), keyed by
-   the publisher's own digest, so the two exclude each other. A lock whose owner
+   the publisher's own digest, so the two exclude each other. A document has one
+   canonical spelling (no `./`, repeated or trailing separators, no `..`), and the
+   helper and the tracker each refuse every other, so an alias can never key a
+   second lock and record. A reference that cannot be read is an error, never
+   absence, in both modules. A lock whose owner
    is dead is cleared only when the tool's child is also known to have exited.
 3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
    parentless version-2 commit: the repository, branch, path, attempt id, write
@@ -984,8 +988,10 @@ and every `T-NN` row of that design is a named regression in
    `working_copy_blob`, `pending_kinds` and the `tracker_transaction` report are
    present; and it stops a run that has a pending publication or an unresolved
    tracker transaction before any further tracker mutation. It adds the capture,
-   handoff and evidence state, reports unknown as null and never as false, and
-   fails closed (with the records already read attached) on an unreadable
+   handoff and evidence state, reports unknown as null and never as false, answers
+   from a stable snapshot (a held lock is reported as kind `lock`; records that
+   moved while it read are read again, and a snapshot that will not settle is a
+   refusal), and fails closed (with the records already read attached) on an unreadable
    tracker module or a publication tool that is missing or lacks `--expect` or
    `--keep`.
 5. **The one call to `docs-push`**, from the write root, naming that one path:
