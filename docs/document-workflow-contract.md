@@ -964,7 +964,11 @@ and every `T-NN` row of that design is a named regression in
    helper and the tracker each refuse every other — and, in the helper, every
    spelling the filesystem would resolve to a different one (case or Unicode
    form) — so an alias can never key a second lock and record. A reference that cannot be read is an error, never
-   absence, in both modules. A lock whose owner
+   absence, in both modules; a standalone applied record that the document has
+   since diverged from is a stop (`applied-diverged`), not a predecessor to
+   replace. The tracker applies the same filesystem-spelling rule at every entry
+   point, and the lock-clearing command never overrides a tool child known to be
+   live, with or without `--operator-quiescent`. A lock whose owner
    is dead is cleared only when the tool's child is also known to have exited.
 3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
    parentless version-2 commit: the repository, branch, path, attempt id, write
@@ -1027,7 +1031,8 @@ publishes. The document's path is walked through each commit's trees, so an
 absent path is proved absent from a tree that was read, and an unreadable tree
 is unknown; an ancestry check that errors is unknown, never "no". An automatic
 retry classifies landing again after the child is known gone and the gate is
-satisfied, and only that later negative authorizes the call. The tool's output decides nothing, and "historically landed" is
+satisfied, and only that later negative authorizes the call, after the document and the
+index are checked once more immediately before the spawn. The tool's output decides nothing, and "historically landed" is
 reported apart from the current branch blob.
 
 **An automatic retry is gated on a rule.** After a handoff that did not land, a

@@ -1111,6 +1111,26 @@ def validate_applied(root: Path, owner: str, document: str) -> str | None:
     return recorded
 
 
+def require_applied_matches_document(root: Path, document: str, applied: str | None) -> None:
+    """A standalone applied record (no intent) describes the working copy it was
+    written for. When the document has since diverged from it, the record is the
+    only evidence of what was applied there and it is not replaced merely because
+    it is a valid blob: the divergence is reported, and stays, until the operator
+    reconciles it explicitly."""
+    if applied is None:
+        return
+    state, blob = file_state(root / document)
+    if state != "file" or blob != applied:
+        raise DocumentError(
+            "applied-diverged",
+            f"the applied record for {document} names {applied[:12]}, but the "
+            f"document is now {(blob or state)[:12]}; the record is kept, and "
+            "nothing is approved over it, until the divergence is reconciled "
+            "(remove the record by hand once it is accounted for)",
+            applied_object=applied, working_blob=blob,
+        )
+
+
 def record_applied_content(root: Path, owner: str, pending: dict) -> str:
     """Record the applied bytes, under compare-and-swap against what was read.
     A different valid predecessor is replaced only when the intent roots it."""
@@ -2323,6 +2343,17 @@ def publish_recorded(
                 root, owner, branch, document, pending, info, cleared,
                 resumed=resumed or "already-landed", tool=None,
             )
+    # Immediately before the call, again: the gate and the fresh history read
+    # above can be slow, and the document or the index may have moved meanwhile.
+    require_unstaged(root, document)
+    state, blob = file_state(root / document)
+    if state != "file" or blob != pending["approved_blob"]:
+        raise DocumentError(
+            "document-not-applied",
+            f"{document} no longer holds the approved content, so it is not handed "
+            "to the tool",
+            working_blob=blob,
+        )
     base = pending["message"] or default_message(document)
     tool, pending = run_publication_tool(
         root, pending, f"{base}\n\n{receipt_line(pending)}"
@@ -2552,7 +2583,9 @@ def locked_sequence(
     check_supported_name(document)
     confine(root, document)
     pending = read_pending(root, owner, document)
-    validate_applied(root, owner, document)
+    applied = validate_applied(root, owner, document)
+    if pending is None:
+        require_applied_matches_document(root, document, applied)
     if content is None:
         if pending is None:
             raise DocumentError(
@@ -2663,20 +2696,23 @@ def apply_and_publish(
         raise error
 
 
-def clear_stale_lock_checked(root: Path, repository: str, document: str) -> dict:
+def clear_stale_lock_checked(
+    root: Path, repository: str, document: str, operator_quiescent: bool = False
+) -> dict:
     """`clear_stale_lock`, refused while the tool's child may still be running: a
-    dead helper alone does not prove its publication child has stopped."""
+    dead helper alone does not prove its publication child has stopped. A child
+    known to be live is never overridden, an unreadable intent refuses rather than
+    reading as none, and the operator's confirmation covers only an identity that
+    was never recorded."""
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
-    try:
-        pending = read_pending(resolved, owner, document)
-    except DocumentError:
-        pending = None
-    if pending is not None and child_state(pending["handoff"]) in ("live", "unknown"):
+    pending = read_pending(resolved, owner, document)
+    children = "none" if pending is None else child_state(pending["handoff"])
+    if children == "live" or (children == "unknown" and not operator_quiescent):
         raise DocumentError(
             "lock-child-not-quiescent",
-            "the tool's child process is not known to have exited, so the lock "
-            "stays; establish quiescence first",
+            f"the tool's child process is {children}, so the lock stays; "
+            "establish quiescence first",
             pending_ref=pending["ref"],
         )
     return clear_stale_lock(resolved, lock_ref(owner, document))
@@ -2772,7 +2808,16 @@ def preflight_once(root: Path, repository: str, branch: str, document: str) -> d
     record, fault = None, None
     try:
         record = read_pending(resolved, owner, document)
-        validate_applied(resolved, owner, document)
+        applied = validate_applied(resolved, owner, document)
+        if record is None:
+            require_applied_matches_document(resolved, document, applied)
+        elif applied not in (None, record["approved_blob"], record["payloads"].get("predecessor")):
+            raise DocumentError(
+                "applied-conflict",
+                f"the applied record names {applied[:12]}, which is neither this "
+                "attempt's content nor its rooted predecessor",
+                applied_object=applied,
+            )
     except DocumentError as error:
         fault = error
     working = None
@@ -3014,12 +3059,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
             return 0 if outcome["status"] == "clear" else 1
         if args.clear_stale_lock:
-            if args.operator_quiescent:
-                root = resolve_write_root(args.root)
-                owner = verify_owner(root, args.repo)
-                outcome = clear_stale_lock(root, lock_ref(owner, args.path))
-            else:
-                outcome = clear_stale_lock_checked(args.root, args.repo, args.path)
+            outcome = clear_stale_lock_checked(
+                args.root, args.repo, args.path, args.operator_quiescent
+            )
         elif args.abandon_intent:
             root = resolve_write_root(args.root)
             outcome = abandon_intent(root, verify_owner(root, args.repo), args.path)

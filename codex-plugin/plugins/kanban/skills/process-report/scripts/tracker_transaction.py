@@ -84,6 +84,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 NAMESPACE = "refs/kanban/tracker-transaction"
@@ -330,6 +331,40 @@ def check_canonical(document: str) -> None:
             "document-name-unsupported",
             f"{document!r} is not the canonical repository-relative spelling of a file",
         )
+
+
+def actual_spelling(root: Path, document: str) -> None:
+    """Refuse a spelling the filesystem would resolve to a different one — the
+    approved-document helper's own rule, held here too so a direct call cannot
+    open a second transaction for a file that already has one under another
+    spelling (`Docs/notes.md` and `docs/notes.md` on a case-insensitive
+    filesystem). Each existing component must be spelled as the directory stores
+    it."""
+    current = root
+    for part in Path(document).parts:
+        try:
+            names = os.listdir(current)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise TransactionError(
+                "document-path-unsafe", f"{current} could not be listed ({error})"
+            ) from error
+        if part not in names:
+            folded = unicodedata.normalize("NFC", part).casefold()
+            twins = [
+                name for name in names
+                if unicodedata.normalize("NFC", name).casefold() == folded
+            ]
+            if twins:
+                raise TransactionError(
+                    "document-name-unsupported",
+                    f"{document!r} is spelled {part!r} where the filesystem stores "
+                    f"{twins[0]!r}: one file must have one spelling, so it is not "
+                    "keyed under both",
+                )
+            return
+        current = current / part
 
 
 def record_key(repository: str, document: str) -> str:
@@ -1217,6 +1252,8 @@ def require_step(record: dict, index: int, expected: str) -> dict:
 
 
 def action_acquire(root, ref, repository, document, plan, publication_tip) -> dict:
+    check_canonical(document)
+    actual_spelling(Path(root), document)
     record = validate_plan(plan, repository, document, publication_tip)
     commit = write_record(root, ref, record, "")
     return {"status": "acquired"} | transaction_report(record, ref, commit)
@@ -1890,6 +1927,8 @@ def check(root: Path, repository: str, document: str) -> dict:
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
+    check_canonical(document)
+    actual_spelling(resolved, document)
     ref = transaction_ref(owner, document)
     report = observed_report(resolved, ref, repository=owner, document=document)
     # `acquired` is False only for a record that is genuinely absent and
@@ -1975,6 +2014,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = resolve_write_root(args.root)
         owner = verify_owner(root, args.repo)
+        check_canonical(args.path)
+        actual_spelling(root, args.path)
         ref = transaction_ref(owner, args.path)
 
         if args.check:

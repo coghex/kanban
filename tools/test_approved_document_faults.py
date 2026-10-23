@@ -1169,6 +1169,124 @@ class ReworkRoundThree(FaultFixture):
         self.assertEqual((self.fx.pending(), len(self.calls())), (commit, calls))
 
 
+class ReworkRoundFour(FaultFixture):
+    """Reproduced by the fourth rereview of the reworked branch (PR #836)."""
+
+    def test_the_tracker_refuses_a_filesystem_alias_at_every_entry_point(self):
+        ref = tracker.transaction_ref(REPOSITORY, DOC)
+        tracker.action_acquire(
+            self.fx.work, ref, REPOSITORY, DOC, base.tracker_plan(), self.fx.origin_tip()
+        )
+        self.assertEqual(tracker.check(self.fx.work, REPOSITORY, DOC)["status"], "outstanding")
+        for alias in ("Docs/notes.md", "docs/NOTES.md"):
+            with self.subTest(alias=alias):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    tracker.check(self.fx.work, REPOSITORY, alias)
+                self.assertEqual(caught.exception.status, "document-name-unsupported")
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    tracker.action_acquire(
+                        self.fx.work, tracker.transaction_ref(REPOSITORY, alias), REPOSITORY,
+                        alias, base.tracker_plan(), self.fx.origin_tip(),
+                    )
+                self.assertEqual(caught.exception.status, "document-name-unsupported")
+                buffer = __import__("io").StringIO()
+                with __import__("contextlib").redirect_stdout(buffer):
+                    code = tracker.main(["--repo", REPOSITORY, "--root", str(self.fx.work),
+                                         "--path", alias, "--check"])
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(buffer.getvalue())["status"], "document-name-unsupported")
+
+    def legacy_applied_only(self):
+        outcome = base.publisher.publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=EDITED.encode(), message="legacy",
+            expected_working_copy=blob_of(NOTES),
+        )
+        self.assertEqual(outcome["status"], "not-published")
+        self.assertEqual(self.fx.applied(), blob_of(EDITED))
+
+    def test_a_standalone_applied_record_that_the_document_has_outgrown_stops(self):
+        self.legacy_applied_only()
+        grown = EDITED + "\n- written by hand after the disposition\n"
+        self.fx.write(self.fx.work, grown)
+        report = self.check_child()[1]
+        self.assertEqual(report["status"], "pending")
+        self.assertEqual(report["record_fault"]["status"], "applied-diverged")
+        code, stop, _ = self.start([], "# anything\n", baseline=blob_of(grown))
+        self.assertEqual(stop["status"], "applied-diverged")
+        self.assertEqual(self.fx.applied(), blob_of(EDITED))
+        self.assertIsNone(self.fx.pending())
+        self.assertEqual(self.fx.read(self.fx.work), grown)
+        run(["git", "gc", "-q", "--prune=now"], self.fx.work)
+        run(["git", "cat-file", "-e", blob_of(EDITED)], self.fx.work)
+
+    def test_a_standalone_applied_record_matching_the_document_is_a_predecessor(self):
+        self.legacy_applied_only()
+        self.assertEqual(self.check_child()[1]["status"], "clear")
+        second = EDITED.replace("- line 5\n", "- line 5, second\n")
+        code, outcome, _ = self.start([], second, baseline=blob_of(EDITED))
+        self.assertEqual((code, outcome["status"]), (0, "published"))
+
+    def test_the_document_is_rechecked_after_the_gate_and_the_fresh_history_read(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        self.mode("land")
+        real = approved.retry_gate
+
+        def staging(repository, branch):
+            result = real(repository, branch)
+            run(["git", "update-index", "--cacheinfo", f"100755,{blob_of(NOTES)},{DOC}"], self.fx.work)
+            return result
+
+        calls = len(self.calls())
+        with unittest.mock.patch.object(approved, "retry_gate", staging):
+            error = self.failure(self.resume)
+        self.assertEqual(error.status, "document-staged")
+        self.assertEqual(len(self.calls()), calls)
+        self.assertIsNotNone(self.fx.pending())
+
+    def test_the_operator_never_overrides_a_live_child_on_any_lock_path(self):
+        self.mode("refuse")
+        self.start([])
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        live = dict(record["handoff"], state="running", child={
+            "pid": os.getpid(), "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push"],
+        })
+        self.reseed(record, handoff=live)
+        lock = approved.lock_ref(REPOSITORY, DOC)
+        dead = json.dumps({"host": approved.socket.gethostname(), "pid": 2**22 + 99,
+                           "repository": REPOSITORY, "document": DOC},
+                          sort_keys=True, separators=(",", ":"))
+        run(["git", "update-ref", lock, run(["git", "commit-tree", "HEAD^{tree}", "-m", dead], self.fx.work)], self.fx.work)
+        identity = {"start": "Fri Oct 23 10:00:00 2026", "args": "docs-push"}
+        with unittest.mock.patch.object(approved, "process_identity", lambda pid: identity):
+            for flag in ((), ("--operator-quiescent",)):
+                with self.subTest(flags=flag):
+                    buffer = __import__("io").StringIO()
+                    with __import__("contextlib").redirect_stdout(buffer):
+                        code = approved.main(["--repo", REPOSITORY, "--root", str(self.fx.work),
+                                              "--path", DOC, "--branch", "master",
+                                              "--clear-stale-lock", *flag])
+                    self.assertEqual(code, 1)
+                    self.assertEqual(json.loads(buffer.getvalue())["status"], "lock-child-not-quiescent")
+                    self.assertIsNotNone(self.fx.ref(lock))
+
+    def test_an_unreadable_intent_does_not_clear_a_lock(self):
+        self.helper_record()
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.reseed(record, handoff={"state": "nonsense"})
+        lock = approved.lock_ref(REPOSITORY, DOC)
+        dead = json.dumps({"host": approved.socket.gethostname(), "pid": 2**22 + 98,
+                           "repository": REPOSITORY, "document": DOC},
+                          sort_keys=True, separators=(",", ":"))
+        run(["git", "update-ref", lock, run(["git", "commit-tree", "HEAD^{tree}", "-m", dead], self.fx.work)], self.fx.work)
+        for flag in ((), ("--operator-quiescent",)):
+            with self.subTest(flags=flag):
+                code, stop, _ = self.child([], "--branch", "master", "--clear-stale-lock", *flag)
+                self.assertEqual((code, stop["status"]), (1, "pending-malformed"))
+                self.assertIsNotNone(self.fx.ref(lock))
+
+
 class NegativeControls(FaultFixture):
     """Each guard must fail its test when removed: the tests have teeth."""
 
