@@ -966,7 +966,10 @@ and every `T-NN` row of that design is a named regression in
    form) — so an alias can never key a second lock and record. A reference that cannot be read is an error, never
    absence, in both modules; a standalone applied record that the document has
    since diverged from is a stop (`applied-diverged`), not a predecessor to
-   replace. The tracker applies the same filesystem-spelling rule at every entry
+   replace. An applied record that contradicts a recorded intent (neither its
+   approved blob nor the predecessor it rooted) is found before any capture
+   recovery, migration, evidence persistence or application, and stops it
+   (`applied-conflict`). The tracker applies the same filesystem-spelling rule at every entry
    point, and the lock-clearing command never overrides a tool child known to be
    live, with or without `--operator-quiescent`. A lock whose owner
    is dead is cleared only when the tool's child is also known to have exited.
@@ -1006,7 +1009,14 @@ and every `T-NN` row of that design is a named regression in
    pid, operating-system start time and exact argv; quiescence means that exact
    identity no longer exists (a reused pid with another start time is not the
    child; a missing identity, a changed argv or a failed inspection is
-   unknown). A missing tool, a tool lacking either flag, a refusal, a conflict, or
+   unknown). The tool is started as the leader of its own process group; the
+   capability probe, the marker and then the last check of the index entry and
+   the document's bytes all precede the spawn, in that order, and a refused
+   check takes the marker back. A tool that times out is stopped with its whole
+   group, and a handoff is marked finished only when nothing it started is known
+   to be running: a group member left alive or an output pipe still held open
+   leaves the handoff unresolved (child state unknown) until the operator
+   confirms quiescence. A missing tool, a tool lacking either flag, a refusal, a conflict, or
    a file changed between the write and `--expect` is an
    **`incomplete-publication`** outcome carrying the tool's exact message and the
    next safe action. The helper never falls back to a raw `git push` or another
@@ -1413,7 +1423,8 @@ applied record shows was applied and has not landed: the reference must name a
 blob, the working copy must still be that blob, and landing must be a verified
 *no*. For a pending attempt that verdict is the helper's own landing validator
 (the same interval, receipts and saved evidence), and an unresolved capture, a
-tool child not known to have exited, or any unreadable evidence refuses. For a
+tool child not known to have exited, a pending attempt recorded for another
+branch than the one asked about, or any unreadable evidence refuses. For a
 legacy applied-only record, which has no recorded tip, the tracker searches the
 branch's complete reachable history for the applied blob and any occurrence
 refuses — deliberately broader than a pending attempt's interval, and never used
