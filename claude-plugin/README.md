@@ -379,9 +379,10 @@ the issue-vs-pull-request number guard went eight days Codex-side only.
 surface (all twenty-two commands under
 `claude-plugin/plugins/kanban/commands/`)
 and
-all seven bundled Python assets — the review coordinator and its
+all eight bundled Python assets — the review coordinator and its
 model-roster reader, `/solve`'s trusted-comment helper, the three
-document-workflow modules, and the janitor census — against the same manifest in
+document-workflow modules, the janitor census, and the head-bound approval
+helper `/fix` and `/finalize` both run — against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
 that the Codex plugin and Kanban's Haskell source are reconciled against,
 including the user-scoped backend install path the drafting, issue-review, and

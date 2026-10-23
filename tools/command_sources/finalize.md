@@ -96,85 +96,44 @@ zero one, and anything carrying a second token, and it runs before the first
 
 Run this exactly as written. It refuses on stderr and leaves `$HEAD` empty
 unless every condition below holds, and every later step is guarded on `$HEAD`.
+Approval is decided by the bundled head-bound approval helper under its
+`finalize` policy; this fence then makes the readiness checks and refuses
+unless they were made against the very head the helper approved.
 
 ```bash
-VIEWER="$(gh api user --jq .login)"
-PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRefName,baseRefName,labels,reviewDecision,mergeable,mergeStateStatus,closingIssuesReferences)"
-PR_COMMENTS="$(mktemp)"
-gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100" > "$PR_COMMENTS"
+HEAD=""
+<!-- brand:claude -->
+APPROVAL_HELPER="${CLAUDE_PLUGIN_ROOT}/scripts/pr_head_approval.py"
+<!-- brand:codex -->
+APPROVAL_HELPER="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/finalize/scripts/pr_head_approval.py' 2>/dev/null | head -n1)"
+<!-- /brand -->
+APPROVAL="$(python3 "$APPROVAL_HELPER" --policy finalize --repo "$REPO" --pr "$PR")"
+APPROVAL_STATUS=$?
+PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,headRefOid,baseRefName,mergeable,mergeStateStatus)"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
 DEFAULT_BRANCH="$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)"
-HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" "$DEFAULT_BRANCH" <<'PY'
+HEAD="$(python3 - "$PR" "$APPROVAL_STATUS" "$APPROVAL" "$PR_STATE" "$PR_CHECKS" "$DEFAULT_BRANCH" <<'PY'
 import json
-import os
 import re
 import sys
-import tomllib
-from pathlib import Path
 
-V1_RE = re.compile(
-    r"<!--\s*pr-review:v1\s+reviewer=(?P<reviewers>claude|codex)\s+"
-    r"head=(?P<head>[0-9a-f]{40})\s+"
-    r"verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED)\s*-->",
-    re.IGNORECASE,
-)
-# The coordinator joins both lists with commas, so a dual-reviewer marker is
-# the ordinary shape rather than an exception, and `models=` is one token.
-V2_RE = re.compile(
-    r"<!--\s*pr-review:v2\s+"
-    r"reviewers=(?P<reviewers>(?:claude|codex)(?:,(?:claude|codex))*)\s+"
-    r"models=\S+\s+"
-    r"head=(?P<head>[0-9a-f]{40})\s+"
-    r"verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED)\s*-->",
-    re.IGNORECASE,
-)
-# Case-insensitive like the two parsers above, and for the same reason they
-# are: a marker this gate cannot parse must be detected in every spelling it
-# could be written in. A case-sensitive opening test would skip a malformed
-# `<!-- PR-REVIEW:V2 ... -->` and let an older APPROVE win, which is the
-# fail-open the malformed-marker rule exists to close.
-MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
-# The origin markers, character for character as `origin_from_body` in the
-# bundled coordinator spells them. A different spacing is not one of these
-# markers there and is not one here. Grok, Kimi, and Google are known
-# origins Codex reviews; none is a spawned provider and none ever appears in
-# `reviewers=`.
-ORIGIN_MARKERS = {
-    "claude": "<!-- pr-origin:claude -->",
-    "codex": "<!-- pr-origin:codex -->",
-    "grok": "<!-- pr-origin:grok -->",
-    "kimi": "<!-- pr-origin:kimi -->",
-    "google": "<!-- pr-origin:google -->",
-}
-UNKNOWN_ORIGIN_REVIEWERS = {"claude", "codex"}
-EXTERNAL_ORIGIN_REVIEWERS = {
-    "grok": {"codex"},
-    "kimi": {"codex"},
-    "google": {"codex"},
-}
-
-repo = sys.argv[1].strip()
-viewer = sys.argv[2].strip()
-try:
-    state = json.loads(sys.argv[3])
-    # The comment feed arrives as a file rather than as an argument. It is the
-    # one input here that grows without bound -- pagination exists precisely
-    # because a pull request can carry more comments than one page holds -- and
-    # a long enough feed passed on argv exceeds the system argument limit, so
-    # the validator would fail to start on exactly the pull requests the paging
-    # is there to support.
-    pages = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
-except (OSError, ValueError):
-    state = None
-    pages = None
+number = sys.argv[1].strip()
+status = sys.argv[2].strip()
 checks_text = sys.argv[5].strip()
 default_branch = sys.argv[6].strip()
-number = state.get("number") if isinstance(state, dict) else None
-subject = "PR #" + str(number) if number is not None else "the named pull request"
+try:
+    approval = json.loads(sys.argv[3])
+except ValueError:
+    approval = None
+try:
+    state = json.loads(sys.argv[4])
+except ValueError:
+    state = None
+subject = "PR #" + number
 
 
-def refuse(detail, approval):
-    if approval:
+def refuse(detail, approval_refusal):
+    if approval_refusal:
         headline = (
             "Refusing to finalize — " + subject + " lacks a current "
             "opposite-brand approval. Run {{cmd:pr-review}} or "
@@ -189,203 +148,35 @@ def refuse(detail, approval):
     raise SystemExit(1)
 
 
-if not isinstance(state, dict) or not isinstance(pages, list):
-    refuse("the pull request or its comment feed could not be read", True)
-# Fail closed on the identity too: an unresolved login would make every
-# ownership comparison below vacuously true.
-if not viewer:
-    refuse("the authenticated GitHub login could not be resolved", True)
-
-# Which labels decide this is configuration, never a fixed string: the global
-# [workflow] table, overridden by [repositories."owner/name".workflow]. Exactly
-# the resolution the bundled coordinator, the drainer and the board all make,
-# so a repository that renamed its verdict labels is read the same way here as
-# everywhere else. An unreadable or absent file keeps the documented defaults.
-approval_label = "reviewed:approve"
-changes_label = "reviewed:changes"
-blocked_labels = {"blocked"}
-approval_mode = "label"
-xdg = os.environ.get("XDG_CONFIG_HOME")
-config_path = (Path(xdg) if xdg else Path.home() / ".config") / "kanban" / "config.toml"
-document = {}
-if config_path.is_file():
-    try:
-        with config_path.open("rb") as handle:
-            document = tomllib.load(handle)
-    except (tomllib.TOMLDecodeError, OSError):
-        document = {}
-
-
-def apply_workflow(table):
-    global approval_label, changes_label, blocked_labels, approval_mode
-    if not isinstance(table, dict):
-        return
-    workflow = table.get("workflow")
-    if not isinstance(workflow, dict):
-        return
-    if isinstance(workflow.get("approval_label"), str) and workflow["approval_label"]:
-        approval_label = workflow["approval_label"]
-    named = workflow.get("changes_requested_label")
-    if isinstance(named, str) and named:
-        changes_label = named
-    blocking = workflow.get("blocked_labels")
-    if isinstance(blocking, list) and all(isinstance(one, str) for one in blocking):
-        blocked_labels = set(blocking)
-    mode = workflow.get("approval_mode")
-    if mode in ("label", "review", "either"):
-        approval_mode = mode
-
-
-apply_workflow(document)
-repositories = document.get("repositories")
-if isinstance(repositories, dict):
-    # The override key is the canonical ASCII-lowercased owner/name, folded the
-    # one way Kanban.Config folds it rather than with Unicode lowering.
-    ascii_lower = str.maketrans(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
-    )
-    apply_workflow(repositories.get(repo.translate(ascii_lower)))
-
-# hasLabel folds case on both sides, so the comparison here does too.
-labels = {
-    str(item.get("name") or "").casefold()
-    for item in state.get("labels") or []
-    if isinstance(item, dict)
-}
-by_label = approval_label.casefold() in labels
-by_review = str(state.get("reviewDecision") or "").upper() == "APPROVED"
-approved = {
-    "label": by_label,
-    "review": by_review,
-    "either": by_label or by_review,
-}[approval_mode]
-if not approved:
+# Success is BOTH a zero exit status AND an `approved` that is exactly true.
+# Nonempty output, a refusal object, missing or malformed output, and a failed
+# helper are each a refusal: the helper prints a JSON object on a refusal too,
+# and its `head` there is a diagnostic, never authority.
+if status != "0" or not isinstance(approval, dict) or approval.get("approved") is not True:
+    reason = approval.get("reason") if isinstance(approval, dict) else None
     refuse(
-        "this repository approves by " + approval_mode + " and the pull request "
-        "is not approved that way",
+        reason
+        if isinstance(reason, str) and reason
+        else "the approval helper failed or returned no usable result",
         True,
     )
-if changes_label.casefold() in labels:
-    refuse(changes_label + " is attached", True)
-# hasProblemLabel treats a blocking label exactly as it treats the
-# changes-requested one, and a blocking label is a decision a human made.
-blocking = sorted(one for one in blocked_labels if one.casefold() in labels)
-if blocking:
-    refuse("a blocking label is attached: " + ", ".join(blocking), True)
+approved_head = approval.get("head")
+if not isinstance(approved_head, str) or re.match(r"\A[0-9a-f]{40}\Z", approved_head) is None:
+    refuse("the approval helper named no usable head", True)
+if not isinstance(state, dict):
+    refuse("the pull request could not be read", False)
 
+# One value, two readings: the approval was evaluated at the head the helper
+# read, and every check below is made against the head this fence read. They
+# must be the same commit, or an approval of one head would clear the
+# readiness of another.
 head = str(state.get("headRefOid") or "").lower()
-if re.match(r"\A[0-9a-f]{40}\Z", head) is None:
-    refuse("the pull request's current head could not be read", True)
-
-# The whole feed, oldest page first, flattened before it is ordered: a bounded
-# view can leave the newest marker outside it, and an older marker would then
-# speak for a head nobody reviewed.
-comments = []
-for page in pages:
-    if not isinstance(page, list):
-        refuse("the comment feed could not be read", True)
-    comments.extend(item for item in page if isinstance(item, dict))
-ordered = sorted(
-    comments,
-    key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)),
-    reverse=True,
-)
-
-chosen = None
-for comment in ordered:
-    author = comment.get("user") or {}
-    login = str(author.get("login") or "") if isinstance(author, dict) else ""
-    if login.lower() != viewer.lower():
-        continue
-    body = str(comment.get("body") or "")
-    # Every marker in the comment, not the first one that parses. A comment
-    # opening with a current-head APPROVE and going on to a CHANGES_REQUESTED
-    # or a malformed one would otherwise be read as the approval alone, and
-    # the malformed test would never run because a valid match had been found.
-    openings = len(MARKER_OPENING_RE.findall(body))
-    if openings == 0:
-        continue
-    found = list(V2_RE.finditer(body)) + list(V1_RE.finditer(body))
-    if len(found) != openings:
-        refuse("a review marker you published is malformed", True)
-    if len(found) != 1:
-        refuse(
-            "the newest comment you published carries "
-            + str(len(found))
-            + " review markers, and only one can be the verdict",
-            True,
-        )
-    chosen = found[0]
-    break
-
-if chosen is None:
-    refuse("no review marker published by " + viewer + " is in the feed", True)
-
-# Whose brand reviewed has to be read off the pull request, not assumed: an
-# approval published by the same brand that wrote the code is a self-review,
-# and the marker alone cannot tell you that. These are exactly the rules
-# `origin_from_body` applies in the bundled coordinator -- one marker, of one
-# kind, as the final non-whitespace content of the body.
-body_text = str(state.get("body") or "")
-stripped = body_text.rstrip()
-counts = {brand: body_text.count(marker) for brand, marker in ORIGIN_MARKERS.items()}
-present = [brand for brand, count in counts.items() if count]
-# Spelled without a greater-than comparison on purpose: one surrounded by
-# spaces in a fenced block reads as a shell redirect into the working tree to
-# the packaged-asset hygiene scan, which does not know this block is Python.
-# Mixed kinds, however many, are "both" in the existing refusal text; "more
-# than once" of one kind is "not zero or one".
-if len(present) not in (0, 1):
-    refuse("the pull request body carries both pr-origin markers", True)
-if any(count not in (0, 1) for count in counts.values()):
-    refuse("the pull request body carries a duplicate pr-origin marker", True)
-origin = present[0] if present else None
-if origin is not None and not stripped.endswith(ORIGIN_MARKERS[origin]):
-    refuse("the pr-origin marker is not the body's final content", True)
-
-reviewers = {
-    part.strip().lower()
-    for part in chosen.group("reviewers").split(",")
-    if part.strip()
-}
-if origin is None:
-    # No declared origin is the dual route the coordinator takes: with no
-    # brand to be opposite of, only a review carrying BOTH spawned providers
-    # is known to be independent of whoever wrote the code. None of Grok,
-    # Kimi, or Google is in that set: they are not reviewer brands.
-    if reviewers != UNKNOWN_ORIGIN_REVIEWERS:
-        refuse(
-            "this pull request declares no origin, so only a dual-brand review "
-            "is known to be independent; the newest marker names "
-            + ",".join(sorted(reviewers)),
-            True,
-        )
-elif origin in reviewers:
+if head != approved_head:
     refuse(
-        "the newest marker names this pull request's own brand ("
-        + origin
-        + ") as a reviewer, which is a self-review",
-        True,
-    )
-elif origin in EXTERNAL_ORIGIN_REVIEWERS and reviewers != EXTERNAL_ORIGIN_REVIEWERS[origin]:
-    refuse(
-        "a "
-        + origin
-        + "-origin pull request is reviewed by Codex only; the newest "
-        "marker names " + ",".join(sorted(reviewers)),
-        True,
-    )
-
-verdict = chosen.group("verdict").upper()
-marker_head = chosen.group("head").lower()
-if verdict != "APPROVE":
-    refuse("the newest marker you published reads verdict=" + verdict, True)
-if marker_head != head:
-    refuse(
-        "the newest marker you published names head "
-        + marker_head
-        + ", not the current head "
-        + head,
+        "the approval was evaluated at head "
+        + approved_head
+        + ", not the pull request's current head "
+        + (head or "unreadable"),
         True,
     )
 
@@ -454,55 +245,62 @@ if unfinished:
 sys.stdout.write(head + "\n")
 PY
 )"
-rm -f "$PR_COMMENTS"
 ```
 
 What that gate requires, and why each part is what it is:
 
+- **Approval from the helper, under the `finalize` policy, by exit status AND
+  result.** The helper reads the authenticated login, the pull request, and the
+  complete paginated comment feed itself, prints one JSON object on approval and
+  on every refusal, and exits 0 only on approval. This gate accepts it only when
+  the status is 0 AND `approved` is exactly `true`: nonempty output, a refusal
+  object, missing or malformed output, and a failed helper each leave `$HEAD`
+  empty, and the refusal it reports is the helper's own `reason`. `$HEAD` is
+  cleared before every run, so a refused second run can never inherit the first
+  run's head. The helper's input, result, and exit-status contract is the module
+  docstring of `tools/pr_head_approval.py`, which this command bundles and which
+  owns everything about the evidence; this command keeps the merge-specific
+  checks below.
 - **The authenticated login, resolved fail-closed.** Only a marker *you*
   published counts, so an unresolved login refuses rather than accepting every
   marker in the feed. Logins are compared case-insensitively; GitHub does not
   preserve case in a way that may decide this.
-- **The complete comment feed, read from a file.** A pull request's `comments` field returns a
+- **The complete comment feed.** A pull request's `comments` field returns a
   bounded window, so on a long pull request the newest marker can fall outside
-  it and an older verdict wins. The paginated issue-comments endpoint is read
-  whole and
-  flattened, then ordered newest-first by `created_at` with the comment id
-  breaking ties, so the marker chosen is the globally newest one and the choice
-  does not depend on the order GitHub happened to return. It goes through a
-  temporary file rather than an argument because it is the one input that grows
-  without bound: a feed long enough to need the paging exceeds the system
-  argument limit, and the gate would then fail to start on exactly the pull
-  requests the paging is there to support. Argument-free `mktemp` is portable
-  across BSD/macOS and GNU/Linux and puts that file OUTSIDE the checkout, and
-  the `rm` is not optional — CLAUDE.md forbids leaving a scratch file in the
-  tree, and `tools/drain_prs.py` would otherwise have to relocate it before a
-  fast-forward.
+  it and an older verdict wins. The helper reads the paginated issue-comments
+  endpoint whole and flattens it, then orders it newest-first by `created_at`
+  with the comment id breaking ties, so the marker chosen is the globally newest
+  one and the choice does not depend on the order GitHub happened to return. The
+  feed reaches the helper's own process, never an argument: a feed long enough
+  to need the paging exceeds the system argument limit.
 - **The marker the coordinator publishes today.** That is
   `<!-- pr-review:v2 reviewers=… models=… head=… verdict=… -->`, and both of
   its list fields are comma-joined, so `reviewers=claude,codex` is an ordinary
   dual-reviewer marker and not a malformed one. The older
   `<!-- pr-review:v1 reviewer=… head=… verdict=… -->` spelling is still honoured
-  for pull requests reviewed before the change. A gate that read v1 alone would
-  refuse every pull request reviewed today, which is what the personal copy this
-  command was vendored from did.
+  for pull requests reviewed before the change.
 - **`head=` equal to the pull request's current `headRefOid`.** An approval names
   a commit, not a branch. `.github/workflows/review-gate.yml`'s
   `dismiss-stale-approval` job already removes `reviewed:approve` when a push
   touches a file the pull request owns, but a marker whose head no longer matches
   is stale whatever the label says, so the head comparison decides and not the
   label alone.
+- **The approved head and the head this gate reads are one value.** The helper
+  evaluates the approval at the head it read, and the readiness checks here read
+  the pull request again. The gate refuses unless the `headRefOid` it read equals
+  the helper's approved `head`, so `$HEAD` is set only when the helper approved
+  AND every readiness check passed against that same commit, on each of the two
+  gate runs.
 - **A malformed or duplicated marker refuses.** Every `pr-review:v` opening in
   the chosen comment has to parse, and exactly one has to be there. Taking the
   first marker that parsed would read a comment opening with a current-head
-  `APPROVE` and going on to a `CHANGES_REQUESTED` as the approval alone, and
-  would never reach the malformed test at all, because a valid match had
-  already been found. The coordinator publishes exactly one marker per comment,
-  so anything else is a comment this gate cannot safely read.
+  `APPROVE` and going on to a `CHANGES_REQUESTED` as the approval alone. The
+  coordinator publishes exactly one marker per comment, so anything else is a
+  comment this gate cannot safely read.
 - **A reviewer set that does not exclude the pull request's own brand.** The
   approval this workflow acts on is an *opposite-brand* approval, and the marker
   alone cannot say whether it is one: it names who reviewed, not who wrote. So
-  the origin is read off the pull request body by exactly the rules
+  the helper reads the origin off the pull request body by exactly the rules
   the bundled coordinator's `origin_from_body` applies — one marker, of one
   kind, as the body's final non-whitespace content — and a marker whose
   `reviewers=` names that same brand is refused as a self-review. Both markers
@@ -511,18 +309,24 @@ What that gate requires, and why each part is what it is:
   coordinator's unknown-origin route, which reviews with both brands; there
   being no declared brand to be opposite of, only a marker naming both is known
   to be independent of whoever wrote the code, and a single-brand marker on such
-  a pull request refuses.
+  a pull request refuses. A grok, kimi, or google origin is a known origin that
+  Codex reviews, so only a Codex-only marker is accepted there.
+- **Native reviews never substitute.** GitHub's own review approval is not read
+  here at all. Whichever mode the repository approves by, a current-head
+  canonical marker is required as well as that mode's label or `reviewDecision`
+  signal.
 - **The repository's own verdict labels, under its own approval mode.** The
   approval label, the changes-requested label, the blocking labels and the
   approval mode are configuration — the global `[workflow]` table, overridden by
-  `[repositories."<owner>/<name>".workflow]` — so the gate resolves them the way
-  the bundled coordinator, the drainer and the board all do, and compares them
+  `[repositories."<owner>/<name>".workflow]` — so the helper resolves them the
+  way the bundled coordinator, the drainer and the board all do, and compares them
   with case folded on both sides as `hasLabel` does. A repository that renamed
   `reviewed:approve` would otherwise have every one of its approvals refused,
   and one configured for `review` approval would look unapproved with a
   perfectly good approval on it. A blocking label refuses for the same reason
   the changes-requested label does: `hasProblemLabel` treats the two alike, and
-  a blocking label is a decision a human made.
+  a blocking label is a decision a human made. An unreadable or absent
+  configuration file keeps the documented defaults.
 - **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
   `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
   clearance, and merging on either is how an unresolved conflict lands.

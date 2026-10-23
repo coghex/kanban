@@ -43,6 +43,25 @@ created above it.
   Bundles: Claude 1.85.0, Codex 1.84.0, Grok 1.11.7, Kimi 1.10.7, Google 1.8.7,
   Claude-on-Copilot 1.0.6.
 
+- `fix` and `finalize` now check head-bound approval with one bundled script
+  instead of two separate derivations (#842). `tools/pr_head_approval.py`
+  evaluates a pull request's approval for one caller policy and prints one JSON
+  object (`approved`, the evaluated `head`, the head the evidence names, the
+  mode, the origin, a `reason` and the evidence path outcomes), exiting 0 only
+  on approval; the workflows accept it only on exit 0 AND `approved` exactly
+  true AND, in `fix`, a `head` equal to the head the run recorded, and in
+  `finalize`, to the head its own readiness read returned. The policies stay
+  different: `fix` accepts independently valid native-review evidence under
+  `review` and `either` and requires its own brand's origin, while `finalize`
+  requires a current canonical marker under every mode, reads no native reviews
+  and keeps its absent-origin and external-origin rules. A byte-identical copy
+  ships in the Claude bundle and beside each caller in the Codex bundle. The
+  approval parser regexes are gone from `finalize`, `fix`'s approval derivation
+  is replaced by the helper call, and `fix` now has executable approval guards
+  in front of its push and its rereview handoff. `docs/agent-workflow-contract.md`
+  §§2.9, 2.10 and 4 describe the helper. The coordinator is unchanged.
+  Bundles: Claude 1.86.0, Codex 1.85.0.
+
 - Corrected the text of the pull-request workflows after the board stopped
   spawning them (#839). `pr-revise` no longer waits for, polls or diagnoses the
   pull request's checks: the canonical rereview follows the push at once, and

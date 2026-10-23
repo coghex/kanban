@@ -183,10 +183,20 @@ REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
 # scripts `gh` against this exact list: a field dropped from the asset would
 # leave the gate deciding without it, and a field dropped here would leave the
 # harness answering a question the asset never asked.
-PR_VIEW_FIELDS = (
-    "number,url,body,headRefOid,headRefName,baseRefName,labels,reviewDecision,"
-    "mergeable,mergeStateStatus,closingIssuesReferences"
-)
+PR_VIEW_FIELDS = "number,headRefOid,baseRefName,mergeable,mergeStateStatus"
+
+# The fields the bundled approval helper reads the same pull request with. The
+# gate makes two reads of it -- the helper's, for the approval, and its own, for
+# the readiness checks -- and the harness scripts each, so a test can make them
+# disagree.
+HELPER_PR_FIELDS = "number,body,headRefOid,labels,reviewDecision"
+
+# Where each rendering finds the helper it runs, and the copy it finds: the
+# Claude command reads its plugin root, the Codex skill searches the plugin
+# cache, so the harness lays out both and each rendering drives its own bundle's
+# copy.
+CLAUDE_HELPER = "claude-plugin/plugins/kanban/scripts/pr_head_approval.py"
+CODEX_HELPER = "codex-plugin/plugins/kanban/skills/finalize/scripts/pr_head_approval.py"
 
 # The origin markers, character for character as the bundled coordinator's
 # `origin_from_body` spells them, and as the gate has to.
@@ -198,10 +208,11 @@ ORIGIN_MARKERS = {
     "google": "<!-- pr-origin:google -->",
 }
 
-# The paginated issue-comment endpoint, embedding the resolved repository the
-# way `tools/drain_prs.py` does. `gh pr view --json comments` returns a bounded
+# The paginated issue-comment endpoint, which the bundled approval helper reads
+# (the workflow itself no longer does), embedding the resolved repository the way
+# `tools/drain_prs.py` does. `gh pr view --json comments` returns a bounded
 # window, so on a long pull request the newest marker can fall outside it.
-COMMENT_FEED = 'repos/$REPO/issues/$PR/comments?per_page=100'
+COMMENT_FEED_PATH = "repos/{repo}/issues/{pr}/comments?per_page=100"
 
 # Every `gh` call the workflow makes, by the leading words that identify each,
 # split by whether the call addresses a repository. Counted as well as listed:
@@ -209,7 +220,6 @@ COMMENT_FEED = 'repos/$REPO/issues/$PR/comments?per_page=100'
 # any.
 REPOSITORY_SCOPED_CALLS = (
     'pr view "$PR" -R "$REPO" --json ' + PR_VIEW_FIELDS,
-    'api --paginate --slurp "' + COMMENT_FEED + '"',
     'pr checks "$PR" -R "$REPO" --json name,state,bucket',
     'repo view "$REPO" --json defaultBranchRef',
     'pr merge "$PR" -R "$REPO" --admin --merge --match-head-commit',
@@ -220,10 +230,11 @@ REPOSITORY_SCOPED_CALLS = (
     'issue view "${ISSUE:-0}" -R "$REPO" --json number,state',
     'issue close "$OPEN_ISSUE" -R "$REPO"',
 )
-# The one call that names no repository, because the endpoint has none. It is
-# an enumerated exception rather than a pattern: a second unscoped call added
-# later fails the count below rather than inheriting this allowance.
-GLOBAL_CALLS = ('api user --jq .login',)
+# The workflow makes no call that names no repository. The one such call this
+# gate depends on, the authenticated-user lookup (that endpoint has none), is the
+# bundled approval helper's, and `test_pr_head_approval.py` pins it there; a
+# global call added to the workflow later fails the count below.
+GLOBAL_CALLS: tuple[str, ...] = ()
 DECLARED_GH_CALL_COUNT = len(REPOSITORY_SCOPED_CALLS) + len(GLOBAL_CALLS)
 
 # The claims the personal copy carried that this repository no longer supports,
@@ -322,11 +333,14 @@ REPLACEMENT_TEXT = {
 }
 
 CLAUDE_ONLY_LINES = (
+    'APPROVAL_HELPER="${CLAUDE_PLUGIN_ROOT}/scripts/pr_head_approval.py"',
     'PR="$ARGUMENTS"',
     "`$ARGUMENTS` is what Claude Code substitutes before the session reads this file.",
 )
 
 CODEX_ONLY_LINES = (
+    'APPROVAL_HELPER="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '
+    "'*/kanban/*/skills/finalize/scripts/pr_head_approval.py' 2>/dev/null | head -n1)\"",
     'PR="<the pull request number the user named>"',
     "Codex substitutes no argument placeholder, so take the number from the prompt.",
 )
@@ -573,13 +587,59 @@ class Harness:
             (self.config_home / "kanban" / "config.toml").write_text(
                 config, encoding="utf-8"
             )
+        # The two renderings find the bundled approval helper differently, so
+        # the harness lays out both and each rendering runs its own bundle's
+        # copy: the Claude command reads `${CLAUDE_PLUGIN_ROOT}/scripts`, and
+        # the Codex skill searches the plugin cache under `$CODEX_HOME`.
+        self.claude_plugin_root = root / "claude-plugin-root"
+        (self.claude_plugin_root / "scripts").mkdir(parents=True)
+        shutil.copy(
+            REPO_ROOT / CLAUDE_HELPER,
+            self.claude_plugin_root / "scripts" / "pr_head_approval.py",
+        )
+        self.codex_home = root / "codex-home"
+        cache = (
+            self.codex_home
+            / "plugins"
+            / "cache"
+            / "market"
+            / "kanban"
+            / "1.0.0"
+            / "skills"
+            / "finalize"
+            / "scripts"
+        )
+        cache.mkdir(parents=True)
+        shutil.copy(REPO_ROOT / CODEX_HELPER, cache / "pr_head_approval.py")
+
+    def stub_helper(self, stdout: str, exit_code: int = 0) -> None:
+        """Replace the bundled helper, in both layouts, with a program that
+        prints `stdout` and exits `exit_code`.
+
+        For the controls that prove the gate's success test is the helper's
+        exit status AND its result, never merely having received output: the
+        real helper cannot be made to print a refusal object with a zero status,
+        or to exit zero with malformed text.
+        """
+        source = (
+            "import sys\n"
+            f"sys.stdout.write({stdout!r})\n"
+            f"sys.exit({exit_code})\n"
+        )
+        for target in (
+            self.claude_plugin_root / "scripts" / "pr_head_approval.py",
+            *self.codex_home.rglob("pr_head_approval.py"),
+        ):
+            target.write_text(source, encoding="utf-8")
 
     def script_github(
         self,
         *,
         viewer: str = VIEWER,
         states: list[dict] | None = None,
+        readiness_states: list[dict] | None = None,
         pages: list | None = None,
+        page_runs: list | None = None,
         checks: list | None = None,
         default_branch: str = BASE_BRANCH,
         merged: str = "2026-08-02T00:00:00Z",
@@ -599,18 +659,32 @@ class Harness:
                 () if linked_issue is None else ((REPO_SLUG, linked_issue),)
             )
         self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
-        for state in states if states is not None else [pull_request_state()]:
+        runs = states if states is not None else [pull_request_state()]
+        # The gate reads the pull request twice per run: the approval helper
+        # reads it for the approval, and the gate reads it again for the
+        # readiness checks. They are scripted separately, one response per gate
+        # run each, so a scenario can make the two disagree.
+        for state in runs:
+            self.fake.script("gh", base + [HELPER_PR_FIELDS], stdout=json.dumps(state))
+        for state in readiness_states if readiness_states is not None else runs:
             self.fake.script("gh", base + [PR_VIEW_FIELDS], stdout=json.dumps(state))
-        self.fake.script(
-            "gh",
-            [
-                "api",
-                "--paginate",
-                "--slurp",
-                f"repos/{REPO_SLUG}/issues/{PR_NUMBER}/comments?per_page=100",
-            ],
-            stdout=json.dumps(pages if pages is not None else APPROVED_PAGES),
-        )
+        # One comment feed per gate run, so a scenario can withdraw the
+        # approval between the two runs while the head never moves.
+        for run_pages in (
+            page_runs
+            if page_runs is not None
+            else [pages if pages is not None else APPROVED_PAGES]
+        ):
+            self.fake.script(
+                "gh",
+                [
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    COMMENT_FEED_PATH.format(repo=REPO_SLUG, pr=PR_NUMBER),
+                ],
+                stdout=json.dumps(run_pages),
+            )
         self.fake.script(
             "gh",
             ["pr", "checks", PR_NUMBER, "-R", REPO_SLUG, "--json", "name,state,bucket"],
@@ -700,7 +774,7 @@ class Harness:
             )
         self.fake.script("git", ["-C"], stdout="")
 
-    def run(self, script: str) -> subprocess.CompletedProcess:
+    def run(self, script: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
         env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": str(self.root / "home"),
@@ -708,11 +782,14 @@ class Harness:
             "REPO": REPO_SLUG,
             "ROOT": CHECKOUT_ROOT,
             "XDG_CONFIG_HOME": str(self.config_home),
+            "CLAUDE_PLUGIN_ROOT": str(self.claude_plugin_root),
+            "CODEX_HOME": str(self.codex_home),
         }
         env.update(self.fake.environ_overrides())
         return subprocess.run(
             ["sh", "-c", script],
             env=env,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -726,7 +803,7 @@ class Harness:
 
 
 def gate_fence(relative_path: str) -> str:
-    return fence_containing(read(relative_path), "VIEWER=")
+    return fence_containing(read(relative_path), "APPROVAL_HELPER=")
 
 
 def target_fence(relative_path: str) -> str:
@@ -799,9 +876,24 @@ class RegistrationTests(unittest.TestCase):
         for relative_path, text in rendered.items():
             self.assertEqual(text, read(relative_path), relative_path)
 
-    def test_no_auxiliary_asset_ships_beside_either_rendering(self):
-        found = sorted(path.name for path in (REPO_ROOT / CODEX_SKILL_DIR).iterdir())
-        self.assertEqual(found, ["SKILL.md"])
+    def test_exactly_the_helper_ships_beside_the_codex_rendering(self):
+        # The skill directory carries its rendering and the one bundled helper
+        # its gate runs, byte-identical to the tracked source, and nothing else:
+        # an unlisted file beside a skill is an asset no test is reading.
+        root = REPO_ROOT / CODEX_SKILL_DIR
+        found = sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+        )
+        self.assertEqual(found, ["SKILL.md", "scripts/pr_head_approval.py"])
+
+    def test_the_claude_bundle_ships_the_helper_its_command_runs(self):
+        self.assertTrue((REPO_ROOT / CLAUDE_HELPER).is_file())
+        self.assertEqual(
+            (REPO_ROOT / CLAUDE_HELPER).read_bytes(),
+            (REPO_ROOT / "tools/pr_head_approval.py").read_bytes(),
+        )
 
     def test_no_literal_sigil_survives_in_either_rendering(self):
         # Requirement 3, as the review's correction scopes it: the source uses
@@ -813,9 +905,24 @@ class RegistrationTests(unittest.TestCase):
             other = "codex" if brand == "claude" else "claude"
             with self.subTest(asset=relative_path):
                 self.assertNotIn("{{cmd:", text)
+                # Token-aware, the way the renderer reads a sigil: the Codex
+                # rendering names `skills/finalize/scripts/...` as a path, and
+                # that is no invocation of the Claude command `/finalize`.
+                own = {
+                    match.group(1)
+                    for match in renderer.LITERAL_INVOCATION_PATTERNS[
+                        renderer.SIGILS[brand]
+                    ].finditer(text)
+                }
+                foreign = {
+                    match.group(1)
+                    for match in renderer.LITERAL_INVOCATION_PATTERNS[
+                        renderer.SIGILS[other]
+                    ].finditer(text)
+                }
                 for name in REFERENCED_WORKFLOWS:
-                    self.assertIn(renderer.SIGILS[brand] + name, text)
-                    self.assertNotIn(renderer.SIGILS[other] + name, text)
+                    self.assertIn(name, own)
+                    self.assertNotIn(name, foreign)
 
     def parses_under(self, shell: str, script_text: str) -> int:
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
@@ -961,8 +1068,6 @@ class RepositoryScopeTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             for call in gh_invocations(content):
-                if call == "gh " + GLOBAL_CALLS[0]:
-                    continue
                 with self.subTest(asset=relative_path, call=call):
                     self.assertTrue(
                         names_the_resolved_repository(call),
@@ -971,13 +1076,15 @@ class RepositoryScopeTests(unittest.TestCase):
                         "to be in",
                     )
 
-    def test_the_one_global_call_is_the_authenticated_user_lookup(self):
-        # The exception is enumerated rather than inferred: a second unscoped
-        # call would fail here even though it is equally unscoped.
+    def test_no_call_is_global_because_the_helper_owns_the_user_lookup(self):
+        # The authenticated-user lookup is the one call that may name no
+        # repository, and it is the bundled approval helper's now: the workflow
+        # carries no unscoped call at all, so a second one would fail here.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):
-                self.assertEqual(unscoped_calls(content), ["gh " + GLOBAL_CALLS[0]])
+                self.assertEqual(unscoped_calls(content), [])
+                self.assertNotIn("gh api user", content)
 
     def test_the_repository_is_resolved_without_a_github_call_of_its_own(self):
         # The identity cannot come from `gh`: at that point `$REPO` does not
@@ -1044,10 +1151,7 @@ class RepositoryScopeTests(unittest.TestCase):
                     planted = content.replace(DEFAULT_BRANCH_LOOKUP, misspelling)
                     self.assertEqual(
                         unscoped_calls(planted),
-                        [
-                            "gh " + GLOBAL_CALLS[0],
-                            misspelling + " --jq .defaultBranchRef.name",
-                        ],
+                        [misspelling + " --jq .defaultBranchRef.name"],
                     )
 
     def test_the_repository_flag_detector_reads_each_spelling(self):
@@ -1858,30 +1962,35 @@ class GateDecisionTests(unittest.TestCase):
             with self.subTest(asset=relative_path):
                 self.assertApproved(self.decide(relative_path, pages=pages))
 
-    def test_the_feed_is_not_passed_as_an_argument(self):
+    def test_the_feed_never_crosses_the_workflow_at_all(self):
         # The mechanism the size test above depends on, pinned directly: the
-        # gate names a file and reads it, rather than receiving the feed.
+        # comment feed is the one unbounded input, and the approval helper reads
+        # it in its own process rather than receiving it, so the gate names no
+        # feed, no scratch file for one, and no argument that could carry it.
+        # `test_pr_head_approval.py` pins the helper side of the same rule.
         for relative_path in RENDERED_ASSETS:
             fence = gate_fence(relative_path)
             with self.subTest(asset=relative_path):
-                self.assertIn('PR_COMMENTS="$(mktemp)"', fence)
-                self.assertIn("Path(sys.argv[4]).read_text", fence)
+                self.assertNotIn("comments", fence)
+                self.assertNotIn("PR_COMMENTS", fence)
+                self.assertNotIn("mktemp", fence)
 
-    def test_the_gate_removes_the_file_it_wrote(self):
+    def test_the_gate_leaves_no_scratch_file_behind(self):
         # CLAUDE.md forbids leaving a scratch file behind, and the drainer has
-        # to relocate any untracked file before a fast-forward.
+        # to relocate any untracked file before a fast-forward. The gate writes
+        # none, so a run from an empty working directory leaves it empty.
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
-                harness = Harness(Path(tempfile.mkdtemp(dir=directory.name)))
+                root = Path(tempfile.mkdtemp(dir=directory.name))
+                harness = Harness(root)
                 harness.script_github()
-                completed = harness.run(
-                    gate_fence(relative_path)
-                    + '\nprintf "left=%s\\n" "$(ls "$PR_COMMENTS" 2>/dev/null)"\n'
-                )
+                workdir = root / "workdir"
+                workdir.mkdir()
+                completed = harness.run(gate_fence(relative_path), cwd=workdir)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertIn("left=\n", completed.stdout)
+                self.assertEqual(list(workdir.iterdir()), [])
 
     def test_a_feed_with_no_marker_at_all_refuses(self):
         pages = [[comment(1, "2026-08-01T00:00:00Z", "looks good to me")]]
@@ -1910,12 +2019,15 @@ class MutationBoundaryTests(unittest.TestCase):
         gate_runs: int = 2,
         config: str | None = None,
         include_issue_close: bool = True,
+        stub: tuple[str, int] | None = None,
         **scripted,
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         harness = Harness(Path(directory.name), config=config)
         harness.script_github(**scripted)
+        if stub is not None:
+            harness.stub_helper(*stub)
         completed = harness.run(
             whole_workflow(
                 relative_path,
@@ -2034,6 +2146,148 @@ class MutationBoundaryTests(unittest.TestCase):
                 completed, harness = self.execute(relative_path, states=states)
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertNoMutation(harness)
+
+    def test_a_newer_non_approval_marker_at_an_unchanged_head_stops_the_merge(self):
+        # Approval withdrawn WITHOUT the head moving: between the two gate runs
+        # the reviewer publishes a changes-requested marker for the very same
+        # head. The label, the head and the first marker all still read green,
+        # so only a second, fresh read of the comment feed can stop the merge.
+        approved = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+        withdrawn = coordinator_marker(APPROVED_HEAD, "CHANGES_REQUESTED", ["codex"])
+        runs = [
+            [[comment(1, "2026-08-01T00:00:00Z", approved)]],
+            [
+                [
+                    comment(1, "2026-08-01T00:00:00Z", approved),
+                    comment(2, "2026-08-05T00:00:00Z", withdrawn),
+                ]
+            ],
+        ]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, page_runs=runs, states=[pull_request_state()]
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("verdict=CHANGES_REQUESTED", completed.stderr)
+                self.assertNoMutation(harness)
+
+    def test_a_marker_removed_from_the_feed_at_an_unchanged_head_stops_the_merge(self):
+        runs = [APPROVED_PAGES, [[comment(9, "2026-08-02T00:00:00Z", "looks fine")]]]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, page_runs=runs, states=[pull_request_state()]
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("no review marker published by", completed.stderr)
+                self.assertNoMutation(harness)
+
+    def test_a_review_decision_withdrawn_at_an_unchanged_head_stops_the_merge(self):
+        # The same withdrawal under a repository that approves by review: the
+        # aggregate decision flips while the head and the marker stay current.
+        config = '[workflow]\napproval_mode = "review"\n'
+        states = [
+            pull_request_state(labels=(), review_decision="APPROVED"),
+            pull_request_state(labels=(), review_decision=""),
+        ]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                completed, harness = self.execute(
+                    relative_path, config=config, states=states
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("approves by review", completed.stderr)
+                self.assertNoMutation(harness)
+
+    def test_a_readiness_read_of_another_head_than_the_approved_one_refuses(self):
+        # The approval was evaluated at one head and the readiness checks read
+        # another: the helper's pull request read and the gate's own read are
+        # separate, so neither may be allowed to speak for the other's commit.
+        # A refusal ends the workflow, so the first-run case runs one gate and
+        # stops where an agent would; running a second would let a clean second
+        # read stand in for the refused first one.
+        cases = {
+            "the first run": (
+                [pull_request_state(head=STALE_HEAD), pull_request_state()],
+                1,
+            ),
+            "the second run": (
+                [pull_request_state(), pull_request_state(head=STALE_HEAD)],
+                2,
+            ),
+        }
+        detail = "not the pull request's current head " + STALE_HEAD
+        for relative_path in RENDERED_ASSETS:
+            for label, (readiness, gate_runs) in cases.items():
+                with self.subTest(asset=relative_path, run=label):
+                    completed, harness = self.execute(
+                        relative_path,
+                        gate_runs=gate_runs,
+                        states=[pull_request_state(), pull_request_state()],
+                        readiness_states=readiness,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("Refusing to finalize", completed.stderr)
+                    self.assertIn(detail, completed.stderr)
+                    self.assertNoMutation(harness)
+
+    def test_the_gate_accepts_only_exit_zero_with_an_approved_true_result(self):
+        # `HEAD` is set only by a helper that exits 0 AND reports `approved`
+        # exactly true. Each of these carries output the gate could mistake for
+        # success if it tested the output's presence alone, so the control is
+        # that every one of them leaves `$HEAD` empty and reaches no mutation.
+        refusal = json.dumps(
+            {"approved": False, "head": APPROVED_HEAD, "reason": "scripted refusal"}
+        )
+        approved = json.dumps({"approved": True, "head": APPROVED_HEAD})
+        cases = {
+            "a nonempty refusal object with a nonzero status": (refusal, 1),
+            "a refusal object with a zero status": (refusal, 0),
+            "an approved result with a nonzero status": (approved, 1),
+            "malformed output with a zero status": ("approved", 0),
+            "an empty result with a zero status": ("", 0),
+            "approved as a string": (
+                json.dumps({"approved": "true", "head": APPROVED_HEAD}),
+                0,
+            ),
+            "an approval naming no head": (json.dumps({"approved": True}), 0),
+            "a failed helper": ("", 2),
+        }
+        for relative_path in RENDERED_ASSETS:
+            for label, stub in cases.items():
+                with self.subTest(asset=relative_path, case=label):
+                    completed, harness = self.execute(relative_path, stub=stub)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    self.assertIn("Refusing to finalize", completed.stderr)
+                    self.assertNoMutation(harness)
+        # The positive control, so the table above is refusing on the result
+        # and not on something else about the stubbed run: the very same stub
+        # with a real approval reaches the merge at the validated head.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path, case="the positive control"):
+                completed, harness = self.execute(
+                    relative_path, stub=(approved, 0), gate_runs=2
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                merges = [call for call in harness.gh_calls() if call[:2] == ["pr", "merge"]]
+                self.assertEqual(len(merges), 1, harness.gh_calls())
+                self.assertEqual(merges[0][-1], APPROVED_HEAD)
+
+    def test_a_refusal_leaves_head_empty_for_every_later_step(self):
+        # The cleared-before-each-run rule, observed: the first run approves and
+        # sets `$HEAD`, the second refuses, and the merge fence must then find
+        # it empty rather than the first run's value.
+        states = [pull_request_state(), pull_request_state(labels=())]
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                harness_dir = tempfile.TemporaryDirectory()
+                self.addCleanup(harness_dir.cleanup)
+                harness = Harness(Path(harness_dir.name))
+                harness.script_github(states=states)
+                gate = gate_fence(relative_path)
+                completed = harness.run(gate + "\n" + gate + '\nprintf "after=%s\\n" "$HEAD"\n')
+                self.assertIn("after=\n", completed.stdout, completed.stdout)
 
     def test_an_unconfirmed_merge_cleans_up_nothing(self):
         # The merge command's exit status is not the confirmation: only
@@ -2373,14 +2627,28 @@ class MutationBoundaryTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 _, harness = self.execute(relative_path)
+                view = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
                 gate_reads = [
                     call
                     for call in harness.gh_calls()
-                    if call[:6]
-                    == ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json"]
-                    and call[6] == PR_VIEW_FIELDS
+                    if call[:6] == view and call[6] == PR_VIEW_FIELDS
                 ]
                 self.assertEqual(len(gate_reads), 2, harness.gh_calls())
+                # The approval helper makes its own fresh reads on each run: the
+                # pull request, the authenticated login and the comment feed.
+                helper_reads = [
+                    call
+                    for call in harness.gh_calls()
+                    if call[:6] == view and call[6] == HELPER_PR_FIELDS
+                ]
+                self.assertEqual(len(helper_reads), 2, harness.gh_calls())
+                feed = COMMENT_FEED_PATH.format(repo=REPO_SLUG, pr=PR_NUMBER)
+                self.assertEqual(
+                    sum(1 for call in harness.gh_calls() if call[-1] == feed), 2
+                )
+                self.assertEqual(
+                    harness.gh_calls().count(["api", "user", "--jq", ".login"]), 2
+                )
 
     def test_the_log_records_a_merge_when_one_really_happens(self):
         # The control for every assertNoMutation above: run the merge fence

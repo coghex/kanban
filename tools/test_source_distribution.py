@@ -298,13 +298,21 @@ PROVIDER_MANIFESTS = (
 # The tracked issue-creation tool joins them beside the transaction module it
 # loads from beside itself: the processing workflows create every tracked issue
 # through it, so a bundle without it cannot create one at all.
+# The head-bound approval helper (issue #842) joins them on the same terms: `fix`
+# and `finalize` both run it to decide whether an approval names the pull
+# request's current head, so a bundle that shipped either workflow without it
+# would install one that refuses everything. `tools/pr_head_approval.py` is the
+# owning source, and the Codex bundle carries one copy beside each caller
+# because it has no shared scripts root.
 # Issue #841's issue-review backend resolver joins them as the one program the
 # fourteen workflow assets call instead of embedding a probe: a bundle that
 # shipped those assets without it would install a `solve`, `issue-review`,
 # `issue-rereview`, `triage` or `retriage` that cannot find its backend. It
 # ships once in the Claude bundle, once in each of the five Codex skills that
 # resolve the backend, and beside each external solve skill's trusted helper.
-# Twenty-seven modules: seven in the Claude bundle, twelve in the Codex bundle,
+# The head-bound approval helper (issue #842) is counted with them: one copy in the
+# Claude bundle and one beside each of `fix` and `finalize` in the Codex bundle.
+# Thirty modules: eight in the Claude bundle, fourteen in the Codex bundle,
 # the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers, and
 # those four bundles' resolver copies.
 BUNDLED_MECHANISM_MODULES = (
@@ -312,6 +320,7 @@ BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+    "claude-plugin/plugins/kanban/scripts/pr_head_approval.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
@@ -322,6 +331,8 @@ BUNDLED_MECHANISM_MODULES = (
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "codex-plugin/plugins/kanban/skills/finalize/scripts/pr_head_approval.py",
+    "codex-plugin/plugins/kanban/skills/fix/scripts/pr_head_approval.py",
     "kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",

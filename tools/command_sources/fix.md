@@ -69,6 +69,11 @@ through the coordinator's own `--repo` and `--config` options, so a fork
 checkout or a non-default config path fixes and rereviews the same repository
 the board displays. Omit an option the caller did not supply.
 
+Keep the three inputs in shell variables, because the approval fences below run
+as written and read them: `PR` is the positive pull request number, `REPO` is
+the resolved `<owner>/<name>`, and `CONFIG` is the explicit configuration path
+the caller supplied, empty when it supplied none.
+
 ## 2. Require approval before anything else
 
 This workflow acts only on an approved pull request. It is what makes the
@@ -98,6 +103,10 @@ commit, so neither can say which head a reviewer accepted. Step 2c binds the
 mode's signal to the current head, and only a signal that survives that binding
 is the approval this workflow acts on.
 
+Record the `headRefOid` that read returned as `RECORDED_HEAD`. It is the head
+this run diagnoses and edits, step 4 records the same value, and every approval
+below must have been evaluated at exactly it.
+
 Also resolve the configured `changes_requested_label` (default
 `reviewed:changes`) and `blocked_labels` (default `blocked`) from that same
 configuration, matched case-insensitively as `hasProblemLabel` does. Record
@@ -115,7 +124,10 @@ Read the `pr-origin` marker out of the body fetched above and apply exactly the
 rules `origin_from_body` applies in the bundled coordinator's `review_pr.py`:
 the body must carry exactly ONE marker, of exactly one kind, as its final
 non-whitespace content. Both markers present, the same marker twice, a marker with trailing
-text after it, and no marker at all are each a refusal — not a default.
+text after it, and no marker at all are each a refusal — not a default. The
+approval helper of step 2c applies these same rules to the same body, at the
+initial check and again before the push, and refuses with the reason; this step
+states what it requires so the brand it must name is explicit here.
 
 <!-- brand:claude -->
 This is the Claude bundle, so the marker must be `<!-- pr-origin:claude -->`.
@@ -174,93 +186,134 @@ content-safe carry answers for a branch update the drainer itself performed and
 observed, while this workflow faces an arbitrary third-party push whose
 contents it can establish nothing about.
 
-Weigh the two kinds of evidence independently, whichever mode is configured.
-`label` requires the canonical-marker evidence below, `review` requires the
-native-approval evidence below, and `either` is met by whichever of the two
-holds — one path failing never vetoes valid evidence from the other. The
-configured changes-requested and blocking labels remain unconditional refusals
-under every mode and are weighed against neither path.
-
-### The canonical marker binds the `label` path
-
-The canonical coordinator writes the reviewed SHA into the marker it publishes,
-`<!-- pr-review:v2 reviewers=... models=... head=<40 hex> verdict=APPROVE -->`,
-and refuses to publish a verdict once the head has moved. That marker is the
-head-bound evidence the label itself carries no trace of. Read the whole feed,
-exactly as {{cmd:finalize}}'s gate and the coordinator's own
-`latest_owned_review_marker` do:
+Run the bundled approval helper under its `fix` policy. It reads the
+authenticated publisher, the pull request, and the evidence itself, and it
+changes nothing:
 
 ```bash
-VIEWER="$(gh api user --jq .login)"
-COMMENTS="$(mktemp)"
-gh api --paginate --slurp "repos/<owner>/<name>/issues/<pr>/comments?per_page=100" > "$COMMENTS"
-# ... select the marker below, then:
-rm -f "$COMMENTS"
+<!-- brand:claude -->
+APPROVAL_HELPER="${CLAUDE_PLUGIN_ROOT}/scripts/pr_head_approval.py"
+<!-- brand:codex -->
+APPROVAL_HELPER="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/fix/scripts/pr_head_approval.py' 2>/dev/null | head -n1)"
+<!-- /brand -->
+APPROVED_HEAD=""
+APPROVAL="$(python3 "$APPROVAL_HELPER" --policy fix --brand {{brand:name}} --repo "$REPO" --pr "$PR" --config "${CONFIG:-}")"
+APPROVAL_STATUS=$?
+APPROVED_HEAD="$(python3 - "$APPROVAL_STATUS" "$APPROVAL" "${RECORDED_HEAD:-}" <<'PY'
+import json
+import sys
+
+status, text, recorded = sys.argv[1:4]
+try:
+    result = json.loads(text)
+except ValueError:
+    result = None
+if (
+    status == "0"
+    and isinstance(result, dict)
+    and result.get("approved") is True
+    and recorded
+    and result.get("head") == recorded
+):
+    sys.stdout.write(recorded)
+else:
+    reason = result.get("reason") if isinstance(result, dict) else None
+    sys.stderr.write(
+        "fix: no head-bound approval at the recorded head: "
+        + str(reason or "the approval result was unusable or named another head")
+        + "\n"
+    )
+PY
+)"
 ```
 
-Resolve the authenticated publisher first, and fail closed when it cannot be
-resolved: an unresolved login makes every ownership test below vacuously true.
-Read the COMPLETE paginated feed rather than a bounded view — on a long pull
-request the newest marker falls outside a capped one, and an older verdict
-would then speak for a head nobody reviewed. Among the comments that publisher
-wrote, select the newest marker-bearing comment by creation time with the
-comment id breaking ties, and only THEN test what it says. Accept the
-established v2 shape and the legacy v1 shape.
+**The success test is all three of these, and nothing weaker.** The helper must
+exit 0, its `approved` must be exactly `true`, and its `head` must equal
+`RECORDED_HEAD`. Nonempty output, a refusal object, missing or malformed
+output, a nonzero status, and an approval evaluated at any other head are each
+a refusal: this fence then leaves `APPROVED_HEAD` empty, and every later step is
+guarded on it. A `head` or `approval_head` in a refusal is a diagnostic and
+never authority.
 
-The configured approval label stays necessary and stops being sufficient, in
-`either` mode exactly as in `label` mode. The `label` path is met only when
-that label is still attached, the selected comment carries `verdict=APPROVE`,
-its `head=` equals the current `headRefOid`, and its `reviewers=` list does not
-name the origin brand step 2b validated — an approval published by the pull
-request's own brand is a self-review, and the marker alone cannot tell you
-that. **Missing evidence, an unreadable feed, and
-a malformed or multiply-markered selected comment each leave this path unmet
-rather than falling back to an older approval**, and so does a newer
-non-approval standing over an older approval: the selection is by recency, not
-by verdict.
+The helper's contract, in brief; the module docstring of
+`tools/pr_head_approval.py`, which this workflow bundles, is the full one.
 
-### A native approval binds the `review` path
+- **Inputs.** `--policy fix`, this bundle's brand, the resolved repository, one
+  pull request number, and the explicit configuration path when there is one.
+  Every read is scoped to that repository, so a fork checkout cannot redirect a
+  read to a same-numbered pull request elsewhere.
+- **Result.** One JSON object on approval and on every refusal: `approved`,
+  `head` (the current head it evaluated), `approval_head` (the head the evidence
+  names, null when it names none), `mode`, `origin`, `reason`, `marker_history`,
+  and the `paths` outcomes, `label` and `review`, each with its own `met`,
+  `evidence` and `detail`.
+- **Exit status.** 0 only when `approved` is true; 1 for a refusal; 2 for a
+  usage error. Under `either`, a read or parse failure confined to one evidence
+  path is that path's unmet outcome and does not veto the other, so the helper
+  still approves when the other path holds. A failure of an input every path
+  needs — the authenticated publisher, the pull request metadata, a readable
+  current head, or the origin check — always refuses.
+- **The publisher, resolved first and fail-closed.** The helper resolves the
+  authenticated login before it reads any evidence and refuses when it cannot: an
+  unresolved login makes every ownership test vacuously true.
+- **What it weighs.** The two kinds of evidence independently, whichever mode is
+  configured: `label` requires the canonical-marker evidence, `review` requires
+  the native-approval evidence, and `either` is met by whichever of the two holds
+  — one path failing never vetoes valid evidence from the other. The configured
+  changes-requested and blocking labels remain unconditional refusals under
+  every mode and are weighed against neither path. The origin marker must name
+  THIS bundle's brand under the rules of step 2b.
+- **The canonical marker binds the `label` path.** The canonical coordinator
+  writes the reviewed SHA into the marker it publishes,
+  `<!-- pr-review:v2 reviewers=... models=... head=<40 hex> verdict=APPROVE -->`,
+  and refuses to publish a verdict once the head has moved. The configured
+  approval label stays necessary and stops being sufficient: the path is met
+  only when that label is attached AND the newest marker the authenticated
+  publisher wrote, chosen from the COMPLETE paginated feed by creation time with
+  the comment id breaking ties, reads `verdict=APPROVE` at the current head and
+  its `reviewers=` list does not name the origin brand. The helper reads the
+  complete feed because a bounded view can leave the newest marker outside it,
+  and an older verdict would then speak for a head nobody reviewed; it selects
+  the newest comment BEFORE it tests what that comment says, and it accepts the
+  established v2 shape and the legacy v1 shape. Missing evidence, an
+  unreadable feed, and a malformed or multiply-markered newest comment each
+  leave the path unmet rather than falling back to an older approval, and so
+  does a newer non-approval over an older approval.
+- **A native approval binds the `review` path.** `reviewDecision == APPROVED`
+  stays necessary and stops being sufficient: it is an aggregate over the pull
+  request, not a statement about a commit. The path is met only when one author's
+  newest opinionated review (`APPROVED` or `CHANGES_REQUESTED`, by `submitted_at`
+  with the review id breaking ties) is an `APPROVED` whose `commit_id` equals the
+  current head. A dismissed, superseded, stale or unattributed approval is
+  insufficient.
 
-`reviewDecision == APPROVED` stays necessary and stops being sufficient: it is
-an aggregate over the pull request, not a statement about a commit. Read the
-reviews themselves and bind them:
-
-```bash
-REVIEWS="$(mktemp)"
-gh api --paginate --slurp "repos/<owner>/<name>/pulls/<pr>/reviews?per_page=100" > "$REVIEWS"
-# ... select the effective reviews below, then:
-rm -f "$REVIEWS"
-```
-
-Keep only the opinionated reviews — `APPROVED` and `CHANGES_REQUESTED` — and
-for each author keep only their newest one by `submitted_at`, with the review
-id breaking ties. A `DISMISSED` review is not evidence, and an author's later
-opinion supersedes their earlier one. **The `review` path is met only when one
-of those surviving reviews is `APPROVED` and its `commit_id` equals the current
-`headRefOid`.** A superseded or dismissed approval, the aggregate
-`reviewDecision` on its own, and a review whose commit attribution is absent or
-unreadable are each insufficient rather than assumed current.
+An approval that is not bound to the current head gets no worktree, no repair, no
+commit, no push, and no rereview handoff: the run stops having changed nothing.
 
 ### The refusal, and who clears it
 
-Report the mismatch concretely and stop: the current `headRefOid`, the head the
-approval actually belongs to when the evidence names one, and — when it does
-not — that the evidence is missing or unreadable rather than naming any head at
-all. Say which mode was in force and which path went unmet.
+Report the helper's `reason` concretely and stop: the `head` it evaluated, the
+`approval_head` the evidence names — or, when that is null, that the evidence is
+missing or unreadable rather than naming any head at all — the `mode` that was
+in force, and which `paths` went unmet. Say so too when the helper approved a
+head other than `RECORDED_HEAD`: the pull request moved after it was read, and
+the run starts over from step 2.
 
 Then name the remedy without performing it. A `label` path left unmet is
-cleared by a fresh canonical review of the current head: name
-{{cmd:pr-rereview}} when the comment feed already read for this step contains
-any canonical `pr-review` marker for this pull request — regardless of which
-head it named, whether a later marker superseded it, or whether the configured
-label is currently attached — and name {{cmd:pr-review}} only when that feed
-contains none. A label a legitimate stale-approval dismissal just stripped,
-and a marker bound to a head this pull request has since moved past, both mean
-it HAS been reviewed before; only a feed with no marker at all means it has
-not. A `review` path left unmet is NOT cleared that way: the canonical
-coordinator publishes a comment and switches verdict labels, and publishes no
-native GitHub approval at all, so that path is cleared only by a reviewer
-approving the current head on GitHub itself.
+cleared by a fresh canonical review of the current head. This workflow chooses
+the command, not the helper: name {{cmd:pr-rereview}} when `marker_history` is
+`true` — the authenticated publisher has published a canonical `pr-review`
+marker on this pull request at all, regardless of which head it named, whether a
+later marker superseded it, or whether the configured label is currently
+attached — and name {{cmd:pr-review}} only when it is `false`. A label a
+legitimate stale-approval dismissal just stripped, and a marker bound to a head
+this pull request has since moved past, both mean it HAS been reviewed before;
+only a feed with no marker at all means it has not. When `marker_history` is
+`null` the feed was not read or could not be read: report that and name neither.
+A `review` path left unmet is NOT cleared that way: the canonical coordinator
+publishes a comment and switches verdict labels, and publishes no native GitHub
+approval at all, so that path is cleared only by a reviewer approving the
+current head on GitHub itself.
 
 **This workflow manufactures neither.** It synthesizes no verdict label, and it
 invokes no review of its own to produce the approval it is missing. Verdict
@@ -392,9 +445,13 @@ conflict, a base the head is behind, or a check failure to fix. Every other
 branch of step 3 mutates nothing and needs no worktree at all.
 
 Resolve the pull request's head repository, head branch, and exact head SHA
-before editing anything, and record all three. `headRepositoryOwner` and
-`headRepository` identify the head repository; `isCrossRepository` reports
-whether it differs from the resolved repository the diagnosis above used.
+before editing anything, and record all three — the SHA is the `RECORDED_HEAD`
+of step 2, and it must be that same value, because the diagnosis worked on it
+and the approval of step 2c was evaluated at it. Name the head repository's
+remote `HEAD_REMOTE` and its branch `HEAD_BRANCH`, and the worktree you work in
+`WORKTREE`. `headRepositoryOwner` and `headRepository` identify the head
+repository; `isCrossRepository` reports whether it differs from the resolved
+repository the diagnosis above used.
 
 A cross-repository pull request is fail-closed. When the head repository differs
 from the resolved repository, `headRefName` is not a branch of the resolved
@@ -471,34 +528,68 @@ repository and verify its remote head still equals the recorded SHA. If the
 remote head moved, stop and report the competing update rather than
 overwriting it.
 
-After that head check and IMMEDIATELY before the push, re-read the pull request
-from the resolved repository with the same authority-bearing fields step 2
-used:
+After that head check and IMMEDIATELY before the push, run the approval helper
+again. It re-reads the pull request, the authenticated publisher, and the
+evidence itself, so nothing cached from step 2c can answer for this moment: a
+canonical verdict can be superseded and a native approval dismissed while the
+head never moves, so an earlier reading would carry an authority that has since
+been withdrawn straight into the push. The guard is step 2c's, applied to fresh
+evidence and bound to `RECORDED_HEAD`, and it can run only behind the initial
+guard:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json number,body,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,reviewDecision,statusCheckRollup,closingIssuesReferences,url
+: "${APPROVED_HEAD:?the initial approval guard did not pass; nothing may follow it}"
+<!-- brand:claude -->
+APPROVAL_HELPER="${CLAUDE_PLUGIN_ROOT}/scripts/pr_head_approval.py"
+<!-- brand:codex -->
+APPROVAL_HELPER="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/fix/scripts/pr_head_approval.py' 2>/dev/null | head -n1)"
+<!-- /brand -->
+PUSH_APPROVED_HEAD=""
+APPROVAL="$(python3 "$APPROVAL_HELPER" --policy fix --brand {{brand:name}} --repo "$REPO" --pr "$PR" --config "${CONFIG:-}")"
+APPROVAL_STATUS=$?
+PUSH_APPROVED_HEAD="$(python3 - "$APPROVAL_STATUS" "$APPROVAL" "${RECORDED_HEAD:-}" <<'PY'
+import json
+import sys
+
+status, text, recorded = sys.argv[1:4]
+try:
+    result = json.loads(text)
+except ValueError:
+    result = None
+if (
+    status == "0"
+    and isinstance(result, dict)
+    and result.get("approved") is True
+    and recorded
+    and result.get("head") == recorded
+):
+    sys.stdout.write(recorded)
+else:
+    reason = result.get("reason") if isinstance(result, dict) else None
+    sys.stderr.write(
+        "fix: authority to push was lost: "
+        + str(reason or "the approval result was unusable or named another head")
+        + "\n"
+    )
+PY
+)"
 ```
 
-Reapply step 2's configured approval decision to that FRESH `labels` and
-`reviewDecision`, reapply its configured changes-requested and blocking-label
-refusal, and reapply step 2b's complete origin-marker parse — including that
-the result still names THIS bundle's active brand. Require the fresh
-`headRefOid` to equal the recorded SHA too.
-
-**Re-run step 2c against freshly fetched evidence as well.** Re-read the
-comment feed for the `label` path, or the reviews for the `review` path,
-whichever the configured mode selected, and re-establish the head binding from
-what comes back. The marker read at step 2c and the reviews read there cannot
-answer for this moment: a canonical verdict can be superseded and a native
-approval dismissed while the head never moves, so a cached initial reading
-would carry an authority that has since been withdrawn straight into the push.
+Exit 0, `approved` exactly `true`, and a `head` equal to `RECORDED_HEAD` are
+required here exactly as in step 2c. The helper repeats every check of step 2b
+and step 2c against what it reads now: the configured approval decision, the
+changes-requested and blocking labels, the complete origin-marker parse
+including that it still names THIS bundle's active brand, and the selected
+mode's head-bound evidence, so a fresh `headRefOid` that is not the recorded SHA
+refuses too.
 
 If approval was withdrawn, the selected mode's head-bound evidence no longer
 holds, any configured problem label appeared, the origin became missing,
 malformed, or a different brand, or the head no longer matches, STOP with no
-push and no rereview. Leave the worktree's existing work exactly as it is: a
-stop here is a loss of authority to publish, not a reason to discard what was
-built. Do not perform other work between this fresh gate check and the push.
+push and no rereview, and leave `PUSH_APPROVED_HEAD` empty. Leave the worktree's
+existing work exactly as it is: a stop here is a loss of authority to publish,
+not a reason to discard what was built. Do not perform other work between this
+fresh guard and the push.
 
 The remote-ref comparison does not replace this revalidation. A pull request's
 body, labels, `reviewDecision`, canonical marker, and native reviews can all
@@ -506,7 +597,13 @@ change without moving its head SHA; the workflow's authority can therefore
 disappear while the branch itself still looks unchanged.
 
 Only after BOTH pre-push checks pass, push to that exact branch in the recorded
-head repository, without force.
+head repository, without force. The push is reachable only through the fresh
+guard above:
+
+```bash
+: "${PUSH_APPROVED_HEAD:?the pre-push approval guard did not pass; push nothing}"
+git -C "${WORKTREE:?}" push "${HEAD_REMOTE:?}" "HEAD:refs/heads/${HEAD_BRANCH:?}"
+```
 
 After pushing, verify the head repository's `headRefName` now resolves to a SHA
 different from the one recorded at the start. That verified new SHA is what
@@ -550,9 +647,10 @@ This plugin bundles its own copy of the coordinator at
 plugin being installed.
 
 ```bash
+: "${PUSH_APPROVED_HEAD:?the pre-push approval guard did not pass; invoke no rereview}"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py" \
   --path "$(git rev-parse --show-toplevel)" \
-  --rereview <pr> \
+  --rereview "$PR" \
   --allow-no-issue \
   --json
 ```
@@ -563,10 +661,11 @@ coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a
 path relative to the current directory.
 
 ```bash
+: "${PUSH_APPROVED_HEAD:?the pre-push approval guard did not pass; invoke no rereview}"
 COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/pr-review/scripts/review_pr.py' 2>/dev/null | head -n1)"
 python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
-  --rereview <pr> \
+  --rereview "$PR" \
   --allow-no-issue \
   --json
 ```
