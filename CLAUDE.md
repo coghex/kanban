@@ -1,11 +1,11 @@
 # CLAUDE.md
 
-Instructions for Claude Code sessions started at this repository's root. Kanban is
-two things: a Haskell terminal board for a GitHub repository with the Codex and
-Claude usage panel beside it, and the owner's tracked workflow skills and scripts.
-The application drives none of the second; they are installed by their own scripts.
-`docs/design.md` is the authoritative contract for the application; this file is an
-entry point, not a replacement for it.
+Instructions for every agent session started at this repository's root, whatever its
+brand (`AGENTS.md` is a symlink to this file). Kanban is two things: a Haskell terminal
+board for a GitHub repository with the Codex and Claude usage panel beside it, and the
+owner's tracked workflow skills and scripts. The application drives none of the second;
+they are installed by their own scripts. `docs/design.md` is the authoritative contract
+for the application; this file is an entry point, not a replacement for it.
 
 ## Build and test
 
@@ -93,40 +93,10 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 
 ## Source layout
 
-Modules live in `src/Kanban/`; search the group that matches the change.
-
-- `Domain`, `Workflow`, `Card`, `Tracker`, `Filter` — board state, column
-  classification, tracker hierarchy, and the composable card filter criteria.
-- `Repository` with `Repository.*`, `GitHub` with `GitHub.*`, `Cache`, `Config`, `Paths`,
-  `CLI` — repository resolution and the board lease, GitHub data and its refresh
-  coordinator, the last-good snapshot and the durable `gh` record, configuration (it
-  accepts and ignores the keys the scripts own), the private directories under the XDG
-  cache root, and the command line.
-- `Usage` with `Usage.Render`, `UsageCommand`, `Codex`, `Claude`, `Provider` — provider
-  quota windows, the wording the sidebar and `--usage` share, the configured external
-  usage commands, and the two built-in readers: `Codex` and `Claude` read account
-  status only and submit no model prompt.
-- `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest`, `Browser` — terminal presentation,
-  responsive layout, external-text sanitization, and the one place a URL is handed
-  to the platform's page opener. `UI` itself is only the composition root;
-  the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
-  `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
-  `UI.Keys` (the one declaration site for a board key binding, held against
-  `docs/design.md` §7 by a test), `UI.Search`, `UI.Filter`, `UI.Selection`
-  (column search, filter panel, and selection), `UI.Notice` (the notice line and its
-  expiry), `UI.Refresh` and `UI.Reconcile` (refresh), and `UI.Util`.
-- `Process`, `CommandCapture` — the bounded child-process helpers the GitHub fetch and
-  the usage readers run through.
-
-Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests,
-`Fixture` the invented board the golden frames and the tracked screenshot are drawn
-from. `claude-plugin/`, `codex-plugin/` and the external-origin bundles
-(`grok-plugin/`, `kimi-plugin/`, `google-plugin/`, `claude-copilot-plugin/`) are the
-owner's tracked skills; `tools/` holds the scripts that install them and the services
-they use (`setup_workflows.py`, the PR drainer, the issue approval service). The
-application invokes none of them. `claude-copilot-plugin/` is the same pair for a Copilot
-CLI session running a Claude model: the brand is the model, not the host, so it stamps
-the claude origin and Codex reviews it.
+Application modules live in `src/Kanban/`, the executable entry point in `app/`, the
+Haskell tests in `test/`; the owner's skill bundles and the scripts that install them
+are the plugin directories and `tools/`. The module-by-module tour, the `UI.*` seams and
+`Fixture` are in [`docs/development.md`](docs/development.md) "Source layout".
 
 ## Pipeline conventions
 
