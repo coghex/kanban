@@ -1688,11 +1688,12 @@ def contract_text() -> str:
 # that was true of all six for as long as they resolved it from $DOC_ROOT.
 #
 # `tools/` stays the source. Each bundle carries a byte-identical copy, held
-# identical below, and the four-file set is one unit: the two mechanism
-# modules load each other from beside themselves, the publication module
-# loads the configuration reader from beside itself, and the tracked
-# issue-creation tool loads the transaction module from beside itself, so a
-# bundle carrying part of the set carries none of it.
+# identical below, and the five-file set is one unit: the two document-write
+# modules (the publisher and, since issue #830, the approved-document helper)
+# load the transaction module from beside themselves, the publisher loads the
+# configuration reader from beside itself, and the tracked issue-creation tool
+# loads the transaction module from beside itself, so a bundle carrying part
+# of the set carries none of it.
 MECHANISM_SOURCE_DIR = REPO_ROOT / "tools"
 BUNDLE_ROOTS = {
     "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban",
@@ -1704,6 +1705,7 @@ BUNDLED_MECHANISM = {
 }
 MECHANISM_MODULES = (
     "publish_coordination_doc.py",
+    "approved_document.py",
     "tracker_transaction.py",
     "kanban_config.py",
     "tracked_issue_create.py",

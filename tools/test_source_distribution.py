@@ -298,6 +298,10 @@ PROVIDER_MANIFESTS = (
 # The tracked issue-creation tool joins them beside the transaction module it
 # loads from beside itself: the processing workflows create every tracked issue
 # through it, so a bundle without it cannot create one at all.
+# The approved-document helper (issue #830) joins them beside the transaction
+# module it loads from beside itself: it is the document-write half of the
+# publisher it will replace, and a bundle without it cannot apply or hand over
+# an approved document at all.
 # The head-bound approval helper (issue #842) joins them on the same terms: `fix`
 # and `finalize` both run it to decide whether an approval names the pull
 # request's current head, so a bundle that shipped either workflow without it
@@ -312,7 +316,7 @@ PROVIDER_MANIFESTS = (
 # resolve the backend, and beside each external solve skill's trusted helper.
 # The head-bound approval helper (issue #842) is counted with them: one copy in the
 # Claude bundle and one beside each of `fix` and `finalize` in the Codex bundle.
-# Thirty modules: eight in the Claude bundle, fourteen in the Codex bundle,
+# Thirty-two modules: nine in the Claude bundle, fifteen in the Codex bundle,
 # the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers, and
 # those four bundles' resolver copies.
 BUNDLED_MECHANISM_MODULES = (
@@ -320,6 +324,7 @@ BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+    "claude-plugin/plugins/kanban/scripts/approved_document.py",
     "claude-plugin/plugins/kanban/scripts/pr_head_approval.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
@@ -338,6 +343,7 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/approved_document.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",

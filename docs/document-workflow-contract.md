@@ -651,6 +651,24 @@ push frequency, so §5's one-artifact boundary is untouched: an approved
 publication is the same artifact's last step, never a licence to sweep in a
 second.
 
+**Under the approved-document helper (issue #830, taking over in slice C).**
+`tools/approved_document.py` is added beside the publisher in slice B and
+replaces its publication half in slice C; until then every declared asset still
+publishes through the publisher and this paragraph describes the mechanism that
+is waiting, not the one running. A publication through the helper carries the
+one named document and nothing else, for a stronger reason than the commit's
+shape: the helper builds no commit. It names exactly one path to `docs-push`,
+which builds a commit holding that path alone on `origin/<default>`, and lands
+the approved bytes with `--expect` rather than whatever the file holds by then.
+Because `docs-push` merges three ways, the blob that lands may legitimately
+differ from the blob that was approved when the default branch moved under the
+run; the result reports the **approved blob** and the **published blob**
+separately and does not require them equal. Whether the path may land directly
+is `docs-push`'s decision from its own configuration. The helper never reads
+`workflow.direct_publication_paths`, §7 of `docs/agent-workflow-contract.md`, or
+`workflow.coordination_paths`, and a refusal is an outcome it reports (§9.5),
+not a lane it routes around.
+
 ### 9.4 The mechanism lives in one tested module
 
 `tools/publish_coordination_doc.py` is the whole mechanism, and the declared
@@ -908,6 +926,169 @@ guard at all. The assets are held to extracting it for real rather than to
 mentioning the flag, because a binding that expanded to nothing is exactly the
 defect this rule exists to have caught.
 
+#### The approved-document helper (slice B of #775)
+
+`tools/approved_document.py` is the document-write protocol of
+`tools/publish_coordination_doc.py` made independent of the publication
+mechanism. It is added by issue #830 (slice B of #775: A → B → C → D), changes no
+asset, and leaves the publisher in place and working; slice C points the
+processing, drafting and note-problem assets at it and deletes the publisher,
+and slice D retires the §7 lane. Its recovery contract — states, interruption
+points, evidence rules — is `docs/designs/approved_document_recovery_design.md`,
+and every `T-NN` row of that design is a named regression in
+`tools/test_approved_document_faults.py`. It owns, and only owns:
+
+1. **Approved-content application with custody.** The caller supplies the
+   complete approved document through a scratch path the helper mints
+   (`--new-content-file`) and keeps it until the intent below is durable. The
+   helper binds the content to the verified repository (the write root's own
+   `origin`, never the argument), the path, the baseline the preflight observed
+   (`working_copy_blob`, passed back as `--expected-working-copy`) and the
+   approved blob, and replaces the document only while it still holds those
+   baseline bytes. The replacement keeps custody at every step: a capture
+   descriptor (an exclusively reserved directory beside the document, its
+   scratch and aside files, the worktree) is persisted and read back before the
+   document moves; custody begins at the rename, before any read; files are
+   installed and restored by exclusive link only; and a captured file is
+   unlinked only after its restoration or its retention is verified. An outside
+   edit captured in the swap is rooted in the intent and put back; a writer who
+   recreated the document in the gap keeps their file. A file that cannot be read
+   is neither absent nor empty, and a document whose path passes through a
+   symbolic link is refused before anything moves, so a write or a recovery never
+   leaves the write root. The write root is the owning repository's
+   current isolated worktree; `docs-wip` is neither required nor selected, and
+   the helper never checks out, resets, switches or stages anything.
+2. **Per-document serialization.** One lock per (repository, document), keyed by
+   the publisher's own digest, so the two exclude each other. A document has one
+   canonical spelling (no `./`, repeated or trailing separators, no `..`), and the
+   helper and the tracker each refuse every other — and, in the helper, every
+   spelling the filesystem would resolve to a different one (case or Unicode
+   form) — so an alias can never key a second lock and record. A reference that cannot be read is an error, never
+   absence, in both modules; a standalone applied record that the document has
+   since diverged from is a stop (`applied-diverged`), not a predecessor to
+   replace. An applied record that contradicts a recorded intent (neither its
+   approved blob nor the predecessor it rooted) is found before any capture
+   recovery, migration, evidence persistence or application, and stops it
+   (`applied-conflict`). The tracker applies the same filesystem-spelling rule at every entry
+   point, and the lock-clearing command never overrides a tool child known to be
+   live, with or without `--operator-quiescent`. A lock whose owner
+   is dead is cleared only when the tool's child is also known to have exited, and
+   a lock naming no usable owner (no integer pid above 1, or a payload that is
+   not an object) is kept with an error rather than read as an owner that exited.
+3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
+   parentless version-2 commit: the repository, branch, path, attempt id, write
+   root, baseline `B`, approved blob `A`, the tip `R` it was prepared against, the
+   capture descriptor, the tool handoff and any landing evidence travel in its
+   message, and its tree roots `A`, `B`, any captured foreign edit and any
+   predecessor under a fixed internal directory, so the bytes are retained by
+   reachability. It is created absent-only before the document is touched,
+   rewritten and deleted only by compare-and-swap with a read-back, and never
+   discarded because something later failed. Every distinct captured foreign
+   edit stays rooted: the newest is `captured`, and one it displaces moves to
+   `captured-<n>` in the same rewrite. The captured file is read once more immediately
+   before it is unlinked: an editor holding the original descriptor can still
+   write to that inode, so bytes that changed since they were verified are rooted
+   and kept and the capture stops (`capture-changed`). The replacement carries the mode the captured
+   file has when it is installed, and a mode change after that stops the cleanup
+   the same way, including a resume in a new process, which refuses to clean up a
+   capture whose replacement and captured file disagree about permissions. A resume validates the record's landing
+   evidence read-only (a stale or unverifiable record refuses) and the document's
+   index entry (a staged change refuses) before it settles
+   a capture or writes anything. `refs/kanban/applied-locally/<key>`
+   is the blob the protocol applied, never proof of publication. The helper also
+   reads the paused branch's version-1 record and the publisher's commit-shaped
+   one, validating first and migrating only when something is about to be
+   written, with the original rooted in the replacement. An operator sets an
+   intent aside with `--abandon-intent`, which refuses while a capture is
+   unresolved or a tool ever had the document and moves the record to
+   `refs/kanban/abandoned-publication/<key>/<commit>` (one absent-only reference per
+   intent, verified before the pending reference is deleted), never deleting what
+   it rooted.
+4. **The preflight** (`--check-pending`), which keeps the publisher's contract:
+   `status` is `clear` or `pending`; `publication_tip` is a freshly fetched tip;
+   `working_copy_blob`, `pending_kinds` and the `tracker_transaction` report are
+   present; and it stops a run that has a pending publication or an unresolved
+   tracker transaction before any further tracker mutation. It adds the capture,
+   handoff and evidence state, reports unknown as null and never as false, answers
+   from a stable snapshot (a held lock is reported as kind `lock`; records that
+   moved while it read are read again, and a snapshot that will not settle is a
+   refusal), and fails closed (with the records already read attached) on an unreadable
+   tracker module or a publication tool that is missing or lacks `--expect` or
+   `--keep`.
+5. **The one call to `docs-push`**, from the write root, naming that one path:
+   `docs-push --expect <approved_blob> --keep -m <message> <document>`, with a
+   trailer in the message naming the repository, document, approved blob and
+   attempt. A handoff marker is persisted before the spawn, then the child's
+   pid, operating-system start time and exact argv; quiescence means that exact
+   identity no longer exists and its process group is empty (a reused pid with
+   another start time is not the child; a missing identity, a changed argv or a
+   failed inspection is unknown, and so is an exited leader whose group still
+   has members, including after a crash between the tool's exit and the check) A handoff that names another host is
+   unknown whatever this machine can see of its pid. Quiescence is established before
+   any recovery write to the document or the capture (an unknown child needs
+   `--operator-quiescent`, a live one is never overridden), not only before the
+   tool is started again.
+   The tool is started as the leader of its own process group; the
+   capability probe, the marker and then the last check of the index entry and
+   the document's bytes all precede the spawn, in that order, and a refused
+   check takes the marker back. A tool that times out is stopped with its whole
+   group, and a handoff is marked finished only when nothing it started is known
+   to be running: a group member left alive or an output pipe still held open
+   leaves the handoff unresolved (child state unknown) until the operator
+   confirms quiescence. A missing tool, a tool lacking either flag, a refusal, a conflict, or
+   a file changed between the write and `--expect` is an
+   **`incomplete-publication`** outcome carrying the tool's exact message and the
+   next safe action. The helper never falls back to a raw `git push` or another
+   publisher.
+
+**Landing is decided by evidence, in the interval from the recorded tip.** After
+a successful fetch of the default branch into a private reference of the fetch's
+own (`refs/kanban/fetched/...`, so the answer does not depend on how, or whether,
+the repository's configured refspec maps the branch onto `origin/<default>`;
+the tracker does the same), with that commit object name used throughout, a mutation has landed only if valid evidence lies in
+`I(R, F) = {R} ∪ (Anc(F) ∖ Anc(R))`, inspected over every commit in the range —
+merges and their second parents included, with no path limit and no first-parent
+filter: a receipt (a single-parent commit with the exact whole-line trailer,
+changing exactly the document, whose tree holds the published blob `M`, which
+may differ from `A` after a three-way merge) or the approved blob at the
+document's path in a commit of the interval. `R` must exist and be reachable
+from `F` before anything is accepted. Saved evidence is validated by the same
+rules, takes precedence, and stops the run when invalid — it is never discarded
+to enable a search; without saved evidence the complete interval is searched
+and the finding is saved by compare-and-swap before any cleanup. Several
+receipts for one attempt are an inconsistency, not a choice. A shallow history,
+a missing object or any unreadable step is *unknown*, and unknown never
+publishes. The document's path is walked through each commit's trees, so an
+absent path is proved absent from a tree that was read, and an unreadable tree
+is unknown; an ancestry check that errors is unknown, never "no". An automatic
+retry classifies landing again after the child is known gone and the gate is
+satisfied, and only that later negative authorizes the call, after the document and the
+index are checked once more immediately before the spawn. The tool's output decides nothing, and "historically landed" is
+reported apart from the current branch blob.
+
+**An automatic retry is gated on a rule.** After a handoff that did not land, a
+retry needs the earlier child to be gone and a fresh, affirmative
+`non_fast_forward` rule on the publication branch
+(`GET /repos/{owner}/{repo}/rules/branches/{branch}`, branch URL-encoded, all
+pages read), or readable classic protection with `allow_force_pushes.enabled`
+false. The rule is the gate: bypass actors are not read and the pushing
+identity's permissions are not proven — an accepted residual risk, so an
+administrator can still erase an unsaved landing. A missing, inactive,
+unreadable or ambiguous answer stops for operator reconciliation, an earlier
+positive is never reused, and a positive landing reconciles with no gate.
+
+**Shipped as a unit.** The helper is a byte-identical copy in both bundles beside
+`tracker_transaction.py`, which it loads from beside itself, resolved from the
+installed bundle and never from the consuming repository or a personal path.
+`tools/test_approved_document.py` and `tools/test_approved_document_faults.py`
+drive it against temporary repositories with a controlled `docs-push` and `gh`
+first on `PATH` (`tools/fake_docs_push.py`); the fake implements the contract
+above and claims nothing about the owner's own git engine, whose behavioral
+coverage (`--get` and edit, three-way merge, the lost-push-race retry) belongs
+to its owner and is documented, not copied. No copy of `docs-push` ships in any
+bundle, and the helper reads neither the tool's configuration nor
+`~/.config/docs-push.json`.
+
 ### 9.5 What "published" means, and the three-state failure report
 
 A run may describe a document as published only when the module reports it, and
@@ -992,6 +1173,17 @@ never widened to a status, a write outcome, or a record on its own.
 still invoked, its result still inspected, and §9.6's transaction still resolved
 before the run closes. Silence is what a run says at the end, never a step it
 skips.
+
+**Under the approved-document helper (slice B of #775).** Two outcomes are
+reported where the publisher reported one. `published` carries the approved blob
+and the published blob separately, the receipt commit, how the landing was
+established (`receipt`, `already-present`, or the publisher's recorded commit),
+and the tool's result as information only. `incomplete-publication` is not a
+failure of the document and not a success of the publication: the approved
+content is applied, its records are kept, `remote_contains_commit` is `false` (or
+`null` when the branch could not be fetched to find out), and the tool's exact
+message is carried. Every failure short of those still carries §9.5's three
+states. The command line exits `0` only for `published`.
 
 ### 9.6 The tracker transaction
 
@@ -1240,6 +1432,36 @@ module.
 **It fails closed.** A record that cannot be created, read, or updated stops the
 run before its first irreversible action. There is no path on which an
 unreadable transaction reads as no transaction.
+
+**Local resolution under the approved-document helper (slice B of #775).**
+`tools/tracker_transaction.py` no longer loads the publisher, and so no longer
+asks whether a document has a direct-publication lane. `--resolve --source branch`
+is unchanged: it verifies the approved disposition and the artifact identity in
+the document reachable from a freshly fetched `origin/<default>`; a historic
+receipt alone never resolves an entry that a later edit removed.
+`--resolve --source local` is permitted only for content the helper's exact
+applied record shows was applied and has not landed: the reference must name a
+blob, the working copy must still be that blob, and landing must be a verified
+*no*. For a pending attempt that verdict is the helper's own landing validator
+(the same interval, receipts and saved evidence), and an unresolved capture, a
+tool child not known to have exited, a pending attempt recorded for another
+branch than the one asked about, or any unreadable evidence refuses. The branch is
+read after those checks, so a child that lands while it is being established to
+have exited is seen. The bytes then verified are the bytes read for
+resolution, hashed and held to the applied blob whose landing was checked (the
+blob the decision names, not whatever the reference holds by then), so a hand
+edit or a replaced applied record made meanwhile refuses. For a
+legacy applied-only record, which has no recorded tip, the tracker searches the
+branch's complete reachable history for the applied blob and any occurrence
+refuses — deliberately broader than a pending attempt's interval, and never used
+to certify a new attempt's publication. A hand edit permits nothing, and neither
+does the mere absence of an old lane. The checkpoint is a **local** one: the
+result reports `published: false` and, from the helper's pending record,
+`publication_obligation`. A successful local checkpoint resolves the tracker
+half only; it does not clear the publication obligation, which stays until a
+landing is verified on the branch, and the preflight keeps stopping the next
+disposition until it is. A missing or failing `docs-push` leaves the approved
+content and its record in place for exactly that reason.
 
 ## 10. The end of an arc: removing the processing apparatus
 

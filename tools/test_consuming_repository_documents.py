@@ -37,11 +37,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+from test_approved_document import FAKE_GH  # noqa: E402  (a constant, not the tests)
 
 # The owner is deliberately not this repository: §7 classifies coghex/kanban and
 # nothing else, so a fixture that reused the slug would take the one branch this
@@ -673,6 +677,143 @@ class ConsumingRepositoryTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "not-published", outcome)
         self.assertTrue(outcome["document_written"], outcome)
 
+    # -- the approved-document helper (issue #830) -----------------------------
+
+    def tool_environment(self, mode="land"):
+        """A controlled `docs-push` first on PATH, and the owner's own
+        configuration pointed at nothing: the helper never reads it."""
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        fake = bin_dir / "docs-push"
+        source = (REPO_ROOT / "tools" / "fake_docs_push.py").read_text(encoding="utf-8")
+        fake.write_text(f"#!{sys.executable}\n" + source.split("\n", 1)[1], encoding="utf-8")
+        fake.chmod(0o755)
+        gh = bin_dir / "gh"
+        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
+        gh.chmod(0o755)
+        return dict(
+            os.environ, HOME=str(self.home), XDG_CONFIG_HOME=str(self.config_home),
+            PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            DOCS_PUSH_CONFIG=str(self.root / "no-such-config.json"),
+            FAKE_DOCS_PUSH_MODE=mode, FAKE_GH_MODE="rules",
+            FAKE_DOCS_PUSH_LOG=str(self.root / "docs-push-calls.jsonl"),
+        )
+
+    def approved_helper(self, script, *args, environment, expect=0, document=DOCUMENT):
+        proc = subprocess.run(
+            ["python3", script, "--repo", CONSUMING_REPOSITORY,
+             "--root", str(self.fixture.docs), "--path", document, *args],
+            capture_output=True, text=True, env=environment, timeout=180,
+        )
+        self.assertEqual(proc.returncode, expect, f"{args}\n{proc.stdout}\n{proc.stderr}")
+        return json.loads(proc.stdout)
+
+    def bundled_approved_document(self, relative_path, brand):
+        """The helper as the installed bundle carries it: beside the transaction
+        module the asset's own lookup resolves, never out of the repository."""
+        _publish, tracker_script = self.resolve_helpers(relative_path, brand)
+        script = Path(tracker_script).with_name("approved_document.py")
+        self.assertTrue(script.is_file(), script)
+        return str(script), tracker_script
+
+    def test_each_bundle_applies_and_publishes_through_the_tool_without_a_declared_lane(self):
+        # The lane is the tool's decision from its own configuration, so a
+        # consuming repository that declares nothing publishes through it, and
+        # neither §7 nor `workflow.direct_publication_paths` is consulted.
+        for relative_path, brand, uses_tracker in ASSETS:
+            if not uses_tracker:
+                continue
+            with self.subTest(asset=relative_path):
+                self.build_repository()
+                script, _tracker = self.bundled_approved_document(relative_path, brand)
+                environment = self.tool_environment()
+                (self.root / "docs-push-calls.jsonl").unlink(missing_ok=True)
+                clear = self.approved_helper(
+                    script, "--branch", BRANCH, "--check-pending", environment=environment
+                )
+                self.assertEqual(clear["status"], "clear", clear)
+                content = self.root / "approved.md"
+                content.write_text(RESOLVED_REPORT, encoding="utf-8")
+                published = self.approved_helper(
+                    script, "--branch", BRANCH, "--content", str(content),
+                    "--expected-working-copy", clear["working_copy_blob"],
+                    "--expected-tip", clear["publication_tip"], environment=environment,
+                )
+                self.assertEqual(published["status"], "published", published)
+                self.assertIn("[#7]", self.fixture.remote_content())
+                self.assertFalse((self.fixture.primary / "tools").exists())
+                calls = [
+                    json.loads(line) for line in
+                    (self.root / "docs-push-calls.jsonl").read_text().splitlines()
+                ]
+                landing = [call for call in calls if "argv" in call]
+                self.assertEqual(len(landing), 1)
+                self.assertEqual(landing[0]["paths"], [DOCUMENT])
+                self.assertTrue(landing[0]["keep"])
+                self.assertEqual(
+                    self.approved_helper(
+                        script, "--branch", BRANCH, "--check-pending",
+                        environment=environment,
+                    )["status"],
+                    "clear",
+                )
+
+    def test_a_refusing_tool_leaves_the_obligation_and_the_transaction_resolves_locally(self):
+        for relative_path, brand, uses_tracker in ASSETS:
+            if not uses_tracker:
+                continue
+            with self.subTest(asset=relative_path):
+                self.build_repository()
+                script, tracker_script = self.bundled_approved_document(
+                    relative_path, brand
+                )
+                environment = self.tool_environment(mode="refuse")
+                tip = self.approved_helper(
+                    script, "--branch", BRANCH, "--check-pending", environment=environment
+                )["publication_tip"]
+                self.transaction(
+                    tracker_script, "--acquire", "--approved",
+                    "--publication-tip", tip, "--plan", "-", stdin=self.PLAN,
+                )
+                begun = self.transaction(tracker_script, "--begin-step", "0", "--approved")
+                self.transaction(
+                    tracker_script, "--confirm-step", "0",
+                    "--begin-token", begun["begin_token"], "--identity", "-",
+                    stdin=self.IDENTITY,
+                )
+                self.transaction(tracker_script, "--publication-pending")
+                content = self.root / "approved.md"
+                content.write_text(RESOLVED_REPORT, encoding="utf-8")
+                blob = run(
+                    ["git", "hash-object", str(self.fixture.docs / DOCUMENT)],
+                    self.fixture.docs,
+                )
+                refused = self.approved_helper(
+                    script, "--branch", BRANCH, "--content", str(content),
+                    "--expected-working-copy", blob, "--expected-tip", tip,
+                    environment=environment, expect=1,
+                )
+                self.assertEqual(refused["status"], "incomplete-publication", refused)
+                self.assertIn("counts as code", refused["message"])
+                self.assertNotIn("[#7]", self.fixture.remote_content())
+                resolved = self.transaction(
+                    tracker_script, "--resolve", "--source", "local", "--branch", BRANCH,
+                )
+                self.assertEqual(resolved["status"], "resolved", resolved)
+                self.assertFalse(resolved["published"])
+                self.assertEqual(resolved["publication_obligation"], "outstanding")
+                pending = self.approved_helper(
+                    script, "--branch", BRANCH, "--check-pending",
+                    environment=environment, expect=1,
+                )
+                self.assertEqual(pending["pending_kinds"], ["publication"])
+                landed = self.approved_helper(
+                    script, "--branch", BRANCH, "--resume",
+                    environment=self.tool_environment(mode="land"),
+                )
+                self.assertEqual(landed["status"], "published", landed)
+                self.assertIn("[#7]", self.fixture.remote_content())
+
     # -- the premise itself --------------------------------------------------
 
     def test_the_helpers_run_from_the_bundle_with_no_tools_directory_present(self):
@@ -681,7 +822,10 @@ class ConsumingRepositoryTests(unittest.TestCase):
         # succeeds, the fixture has stopped being a consuming repository and
         # every result above is about Kanban's own tree instead.
         self.build_repository()
-        for name in ("publish_coordination_doc.py", "tracker_transaction.py"):
+        for name in (
+            "publish_coordination_doc.py", "tracker_transaction.py",
+            "approved_document.py",
+        ):
             with self.subTest(module=name):
                 self.assertFalse((self.fixture.primary / "tools" / name).exists())
                 self.assertFalse((self.fixture.docs / "tools" / name).exists())

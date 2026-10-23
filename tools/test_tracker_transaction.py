@@ -1570,35 +1570,29 @@ class TrackerTransactionTests(TrackerFixture):
         self.assertIn(expected, caught.exception.message)
         self.assertEqual(self.fx.check()["status"], "outstanding")
 
-    def test_an_unreadable_lane_declaration_stops_a_local_resolution(self):
-        # Issue #370: outside §7 a document's lane comes from its owner's own
-        # configuration, which can be present and unreadable. An unknown lane
-        # may not clear a record — resolving against the working tree is
-        # admissible only for a document that provably has none — so the
-        # failure arrives as a named tracker status rather than as a lane read
-        # as absent.
+    def test_local_resolution_does_not_read_the_lane_configuration(self):
+        # Issue #830: whether a document has a direct-publication lane is the
+        # publication tool's decision, taken from its own configuration, so an
+        # unreadable declaration here is not a reason to refuse anything. What
+        # decides is the applied record, and this one has none.
         config = Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
             '[repositories."otherorg/product".workflow\n', encoding="utf-8"
         )
         self.addCleanup(config.unlink, missing_ok=True)
-        with self.assertRaises(tracker.TransactionError) as caught:
-            tracker.local_resolution_permitted(
-                self.fx.docs,
-                {"repository": "otherorg/product", "document": "docs/ui-bugs.md"},
-                "master",
-            )
-        self.assertEqual(
-            caught.exception.status, "publication-classification-unavailable"
+        permitted, why_not = tracker.local_resolution_permitted(
+            self.fx.docs,
+            {"repository": "otherorg/product", "document": "docs/ui-bugs.md"},
+            "master",
         )
-        self.assertIn("could not be decided", caught.exception.message)
+        self.assertFalse(permitted)
+        self.assertIn("never applied a disposition", why_not)
 
-    def test_a_declared_lane_outside_section_7_refuses_a_local_resolution(self):
-        # The other side of the same branch, so the status above is a real
-        # failure rather than the only outcome this path has: a repository that
-        # does declare the document publishes it to the branch, and a record for
-        # such a document is never resolvable from the working tree.
+    def test_a_declared_lane_alone_neither_permits_nor_forbids_a_local_resolution(self):
+        # The other side of the same fact: declaring the document a lane changes
+        # nothing about the answer. A hand-edited document is refused because no
+        # record shows the helper applied it, with or without a lane.
         config = Path(os.environ["XDG_CONFIG_HOME"]) / "kanban" / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
@@ -1613,7 +1607,7 @@ class TrackerTransactionTests(TrackerFixture):
             "master",
         )
         self.assertFalse(permitted)
-        self.assertIn("publishes directly to master", why_not)
+        self.assertIn("never applied a disposition", why_not)
 
     def test_an_unchecked_entry_carrying_the_link_does_not_resolve(self):
         # The interrupted run's own signature: the issue exists and the number
@@ -1970,7 +1964,7 @@ class TrackerTransactionTests(TrackerFixture):
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.resolve(source="local")
         self.assertEqual(caught.exception.status, "local-resolution-refused")
-        self.assertIn("publishes directly to master", caught.exception.message)
+        self.assertIn("never applied a disposition", caught.exception.message)
         self.assertEqual(self.fx.check()["status"], "outstanding")
         # And the branch remains the way it does resolve. (Restore the baseline
         # first: the helper is the document's only writer, and it refuses a
@@ -2170,15 +2164,16 @@ class TrackerTransactionTests(TrackerFixture):
             self.fx.check(document=classified)["status"], "outstanding"
         )
 
-    def test_a_novel_document_with_a_lane_is_written_locally_but_resolves_on_the_branch_only(self):
-        # Requirement 3's lane precedence once the applied record exists
-        # (#605). Classified for the direct lane but never on the branch, the
-        # document IS written and recorded locally: the helper declines to
-        # publish a novel document (#237) and applies the approved mutation
-        # over the copy the preflight observed like any other. That record
-        # still does not license a local resolution, because the lane says
-        # the disposition is verified on the branch, so the transaction stays
-        # outstanding until the document is enrolled and published there.
+    def test_a_novel_document_the_publisher_classified_for_a_lane_resolves_from_its_applied_record(self):
+        # Issue #830 retired the lane precedence this case used to pin (#605).
+        # Classified for the direct lane but never on the branch, the document
+        # IS written and recorded locally: the publisher declines to publish a
+        # novel document and applies the approved mutation over the copy the
+        # preflight observed. What the tracker consults is now that record
+        # alone, because the lane was never the tracker's to decide: the record
+        # shows the content was applied and has not landed, so the tracker half
+        # resolves, and it says so rather than pretending the document
+        # published.
         classified = "docs/drainer-bugs.md"
         run(["git", "checkout", "-q", "master"], self.fx.primary)
         (self.fx.primary / "docs" / "agent-workflow-contract.md").write_text(
@@ -2220,14 +2215,12 @@ class TrackerTransactionTests(TrackerFixture):
             publisher.working_blob(self.fx.docs, classified),
         )
 
-        with self.assertRaises(tracker.TransactionError) as caught:
-            self.fx.resolve(source="local", document=classified)
-        self.assertEqual(caught.exception.status, "local-resolution-refused")
-        self.assertIn("publishes directly to master", caught.exception.message)
-        self.assertEqual(
-            self.fx.check(document=classified)["status"], "outstanding"
-        )
-        self.assertIsNotNone(self.fx.read(document=classified)[0])
+        outcome = self.fx.resolve(source="local", document=classified)
+        self.assertEqual(outcome["status"], "resolved")
+        self.assertEqual(outcome["source"], "local")
+        self.assertFalse(outcome["published"])
+        self.assertEqual(outcome["publication_obligation"], "none-recorded")
+        self.assertIsNone(self.fx.read(document=classified)[0])
         # Still novel: nothing here published it, and nothing may (#237).
         self.assertIsNone(publisher.blob_at(self.fx.docs, "origin/master", classified))
 

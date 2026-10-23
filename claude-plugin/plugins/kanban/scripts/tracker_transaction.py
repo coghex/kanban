@@ -7,9 +7,9 @@ Run as:
         --repo coghex/kanban --root <write-root> --path docs/ui-bugs.md \\
         --acquire --approved --publication-tip <sha> --plan -   < plan.json
 
-Issue #327. `tools/publish_coordination_doc.py` made the *document* half of a
-disposition recoverable: a pending publication is recorded before the push, and
-the processing workflows stop during preflight while one is outstanding. The
+Issue #327. The document half of a disposition became recoverable first: a
+pending publication is recorded before the document is handed over, and the
+processing workflows stop during preflight while one is outstanding. The
 *tracker* half had no such record. A run could create a label, create an issue,
 comment on another, and edit an umbrella epic, then terminate before the
 document mutation was recorded — and the next invocation would see an unchanged
@@ -30,10 +30,14 @@ find the twenty-first defect.
 Issue #370. The processing assets install into whatever repository a session is
 working, and almost none of them track this file, so it is a tracked plugin
 asset in its own right: `tools/tracker_transaction.py` is the source and
-byte-identical copies ship in both bundles. The pair travels together — this
-module loads `publish_coordination_doc.py` from beside itself and that module
-loads this one from beside itself — so a bundle carrying one without the other
-carries neither.
+byte-identical copies ship in both bundles. The document-write modules load
+this one from beside themselves to report both outstanding records from a
+single preflight. This one no longer loads the publisher (issue #830). The
+content the approved-document helper applied locally and has not landed is
+read from the `refs/kanban/applied-locally` reference both of them key
+identically (tools/test_approved_document.py pins that key), and whether a
+recorded publication has landed is asked of the helper on the one local
+resolution path that needs it, failing closed when it cannot answer.
 
 ## The record is repository-shared, not worktree-local
 
@@ -41,7 +45,7 @@ The declared assets write in the `docs-wip` linked worktree, and a later
 invocation may resolve a different write root for the same repository. So the
 record is a Git reference under `refs/kanban/tracker-transaction/`, resolved
 through the repository's *common* Git directory, which every linked worktree of
-the clone shares — the same placement `tools/publish_coordination_doc.py` uses
+the clone shares — the same placement `tools/approved_document.py` uses
 for its pending-publication record, and for the same reason.
 
 ## Every transition is a compare-and-swap
@@ -80,9 +84,17 @@ import secrets
 import socket
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 NAMESPACE = "refs/kanban/tracker-transaction"
+
+# The two references the approved-document helper keys with the same digest as
+# this module's own record, so a preflight can answer for all three. Read here,
+# never written: the helper owns them.
+APPLIED_NAMESPACE = "refs/kanban/applied-locally"
+PENDING_PUBLICATION_NAMESPACE = "refs/kanban/pending-publication"
+FETCHED_NAMESPACE = "refs/kanban/fetched"
 
 # The record travels as a blob in the reference's tree rather than in its commit
 # subject. A subject is a message, and `commit-tree` is entitled to clean one
@@ -234,13 +246,13 @@ def git_out(args, *, cwd: Path, input_bytes: bytes | None = None) -> str:
 # ---------------------------------------------------------------- identity --
 #
 # The four helpers below are deliberately this module's own rather than imported
-# from tools/publish_coordination_doc.py, which defines the same four. That
-# module loads *this* one to report both outstanding records from a single
-# preflight (requirement 8), so importing back would make two independently
-# invocable command-line tools mutually dependent. The duplication is pinned
-# instead: tools/test_tracker_transaction.py asserts both modules key a
-# (repository, document) pair identically, so the two cannot drift apart
-# unnoticed.
+# from tools/approved_document.py (or the publisher it replaces), which define
+# the same four. Those modules load *this* one to report both outstanding
+# records from a single preflight (requirement 8), so importing back would make
+# two independently invocable command-line tools mutually dependent. The
+# duplication is pinned instead: tools/test_tracker_transaction.py and
+# tools/test_approved_document.py assert the modules key a (repository,
+# document) pair identically, so they cannot drift apart unnoticed.
 
 
 def normalized_slug(raw: str) -> str:
@@ -290,11 +302,78 @@ def verify_owner(root: Path, declared: str) -> str:
     return actual
 
 
+def ref_value(root: Path, spec: str) -> str:
+    """The object `spec` names, or "" when it is verifiably absent. A failed read
+    is not absence, and an outstanding record must never read as clear because
+    the read broke."""
+    proc = git(["rev-parse", "--verify", "--quiet", spec], cwd=root, check=False)
+    out = proc.stdout.decode().strip()
+    if proc.returncode == 0 and out:
+        return out
+    if proc.returncode == 1 and not out and not proc.stderr.strip():
+        return ""
+    raise TransactionError(
+        "ref-unreadable",
+        f"{spec} could not be read ({(proc.stderr or proc.stdout).decode(errors='replace').strip() or proc.returncode}); "
+        "it is not treated as absent",
+        ref=spec,
+    )
+
+
+def check_canonical(document: str) -> None:
+    """One spelling per document, exactly as the approved-document helper holds
+    it, so both modules key a document identically."""
+    if (
+        not document
+        or document.endswith("/")
+        or any(part in ("", ".", "..") for part in document.split("/"))
+    ):
+        raise TransactionError(
+            "document-name-unsupported",
+            f"{document!r} is not the canonical repository-relative spelling of a file",
+        )
+
+
+def actual_spelling(root: Path, document: str) -> None:
+    """Refuse a spelling the filesystem would resolve to a different one — the
+    approved-document helper's own rule, held here too so a direct call cannot
+    open a second transaction for a file that already has one under another
+    spelling (`Docs/notes.md` and `docs/notes.md` on a case-insensitive
+    filesystem). Each existing component must be spelled as the directory stores
+    it."""
+    current = root
+    for part in Path(document).parts:
+        try:
+            names = os.listdir(current)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise TransactionError(
+                "document-path-unsafe", f"{current} could not be listed ({error})"
+            ) from error
+        if part not in names:
+            folded = unicodedata.normalize("NFC", part).casefold()
+            twins = [
+                name for name in names
+                if unicodedata.normalize("NFC", name).casefold() == folded
+            ]
+            if twins:
+                raise TransactionError(
+                    "document-name-unsupported",
+                    f"{document!r} is spelled {part!r} where the filesystem stores "
+                    f"{twins[0]!r}: one file must have one spelling, so it is not "
+                    "keyed under both",
+                )
+            return
+        current = current / part
+
+
 def record_key(repository: str, document: str) -> str:
     """A ref-safe name for one (repository, document) pair, and a distinct one
     for every pair. A digest rather than a path substitution, so `docs/a-b.md`
     and `docs/a/b.md` cannot share one record — the payload carries both values
     in clear for a human to read back."""
+    check_canonical(document)
     return hashlib.sha256(f"{repository}\0{document}".encode()).hexdigest()[:40]
 
 
@@ -478,9 +557,7 @@ def read_record(
     the transition overwrite whatever happened in between, which is the one
     thing a compare-and-swap exists to refuse.
     """
-    observed = git(
-        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
-    ).stdout.decode().strip()
+    observed = ref_value(root, ref)
     if not observed:
         return None, ""
     proc = git(
@@ -1176,6 +1253,8 @@ def require_step(record: dict, index: int, expected: str) -> dict:
 
 
 def action_acquire(root, ref, repository, document, plan, publication_tip) -> dict:
+    check_canonical(document)
+    actual_spelling(Path(root), document)
     record = validate_plan(plan, repository, document, publication_tip)
     commit = write_record(root, ref, record, "")
     return {"status": "acquired"} | transaction_report(record, ref, commit)
@@ -1343,123 +1422,244 @@ def action_publication_pending(root, ref, record, observed) -> dict:
     return {"status": "publication-pending"} | transaction_report(record, ref, commit)
 
 
-def publication_module():
-    """tools/publish_coordination_doc.py, loaded from beside this file.
+def applied_ref(repository: str, document: str) -> str:
+    """The reference the approved-document helper (and the publisher before it)
+    writes when, and only when, its own write of the document succeeded."""
+    return f"{APPLIED_NAMESPACE}/{record_key(repository, document)}"
 
-    That module loads this one to report both records from a single preflight,
-    and this one loads it to ask the single question only it can answer: whether
-    this document has a direct-publication lane at all. Neither call path calls
-    back into the other, so the two loads do not recur — and asking is strictly
-    better than restating §7's classification parser here, where the copy could
-    disagree with the module that actually publishes.
+
+def approved_document_module():
+    """tools/approved_document.py, loaded from beside this file.
+
+    Asked one question only it can answer: whether a recorded publication has
+    already landed, which for a three-way merge is decided by a receipt on the
+    branch and not by any blob this module could name. That module loads this
+    one for its preflight, and this one loads it only here, on the local
+    resolution path, which that module never reaches; the two loads do not
+    recur.
     """
-    source = Path(__file__).resolve().parent / "publish_coordination_doc.py"
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "_kanban_publish_for_tracker", source
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(f"no loader for {source}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception as error:  # noqa: BLE001 - reported, never raised bare
-        raise TransactionError(
-            "publication-module-unavailable",
-            f"the publication module at {source} could not be loaded ({error}), "
-            "so whether this document publishes to the branch cannot be decided",
-        ) from error
+    source = Path(__file__).resolve().parent / "approved_document.py"
+    spec = importlib.util.spec_from_file_location("_kanban_approved_for_tracker", source)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"no loader for {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
-def local_resolution_permitted(root: Path, record: dict, branch: str):
+def fetched_tip(root: Path, branch: str) -> str:
+    """The commit the remote's `<branch>` names right after a successful fetch,
+    read from the fetch's own destination (the same private reference the
+    approved-document helper uses) rather than from `origin/<branch>`, which a
+    narrowed or remapped refspec leaves stale after a successful fetch."""
+    destination = (
+        f"{FETCHED_NAMESPACE}/{hashlib.sha256(branch.encode()).hexdigest()[:16]}"
+    )
+    git(["fetch", "origin", f"+refs/heads/{branch}:{destination}"], cwd=root)
+    return git_out(["rev-parse", "--verify", f"{destination}^{{commit}}"], cwd=root)
+
+
+def recorded_publication_landed(root: Path, record: dict, branch: str, applied: str | None = None):
+    """(landed, why) for the publication the helper recorded, if it recorded one.
+
+    Fails closed: a record that cannot be read, a module that cannot be loaded,
+    or a landing that cannot be verified is reported as undecided, and an
+    undecided landing may not license a local resolution.
+    """
+    ref = pending_publication_ref(record["repository"], record["document"])
+    recorded = ref_value(root, ref)
+    if not recorded:
+        return False, None
+    try:
+        module = approved_document_module()
+        pending = module.read_pending(root, record["repository"], record["document"])
+        if pending["branch"] not in (None, branch):
+            # The attempt's interval is on the branch it was recorded against; a
+            # negative about some other branch's history is not about it.
+            return None, (
+                f"the publication recorded at {ref} is for {pending['branch']}, not "
+                f"{branch}; it is kept until it is reconciled"
+            )
+        if applied is not None and pending["approved_blob"] != applied:
+            # The negative landing result below is about the pending attempt's
+            # content; it says nothing about some other blob the applied record
+            # happens to name, so a disagreement is a stop, not an inheritance.
+            return None, (
+                f"the applied record names {applied[:12]} but the pending attempt "
+                f"at {ref} is for {pending['approved_blob'][:12]}; both are kept "
+                "until they are reconciled"
+            )
+        if pending["capture"] is not None:
+            return None, (
+                f"a capture of {record['document']} recorded at {ref} is unresolved"
+            )
+        if module.child_state(pending["handoff"]) in ("live", "unknown"):
+            return None, (
+                f"the tool child of the publication recorded at {ref} is not known "
+                "to have exited"
+            )
+        # Fetched here, after the checks above: a child that was running when
+        # the caller began may land and exit before it is known to be gone, and
+        # history read earlier would say it had not.
+        info = module.landing(root, branch, pending)
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        return None, (
+            f"whether the publication recorded at {ref} landed could not be "
+            f"verified ({getattr(error, 'message', error)})"
+        )
+    return info["landed"], (
+        f"the publication recorded at {ref} landed on {branch} ({info['via']})"
+        if info["landed"]
+        else None
+    )
+
+
+def pending_publication_ref(repository: str, document: str) -> str:
+    return f"{PENDING_PUBLICATION_NAMESPACE}/{record_key(repository, document)}"
+
+
+def local_resolution_permitted(root: Path, record: dict, branch: str, decided: dict | None = None):
     """Whether this document may be resolved against the working tree, and why
     not when it may not.
 
-    `--source local` exists for exactly one outcome: the publication module
-    reported `not-published` *and* applied the approved content to the document
-    itself. Then the working tree is the only evidence there will ever be, and a
-    legitimate terminal state. Both halves matter, and each rules out a case:
+    `--source local` exists for exactly one outcome: the approved-document
+    helper applied the approved content to the document and has not landed it.
+    Then the working tree is the evidence there is, and a legitimate terminal
+    state for the tracker half. What licenses it is the helper's own applied
+    record — the exact content it wrote, named by a reference — and nothing
+    else:
 
-    - a document that *does* have a coordination lane belongs on the branch, and
-      clearing it from a locally edited cursor would leave the next preflight
-      clear while the entry never landed; and
-    - a working tree the module did not write is somebody else's edit, whether
-      the document is tracked or not.
+    - a hand-edited document carrying a terminal entry looks identical from
+      here, and the absence of a reference is what says nobody applied it;
+    - a document changed since the helper wrote it is somebody else's later
+      edit, whatever it started as; and
+    - a document whose applied content ever reached the branch is landed, not
+      locally applied, so it resolves against the branch, even if a later edit
+      has since replaced it there.
 
-    A document absent from the publication tip is not a third case (#605): the
-    module writes one over the working copy the run's own preflight observed,
-    and records that write exactly as it records a write over a tracked
-    baseline, so whether the disposition reached the document is decided by
-    the same record below. Being novel neither licenses nor forbids a local
-    resolution by itself — a novel document with a lane still resolves on the
-    branch only, and a novel document the module never wrote is still refused.
-    Nor is a tracked document applied over the copy the preflight observed
-    (#727): that write is recorded the same way, so it resolves through the
-    same record, and a tracked document the module never wrote, or one changed
-    since it wrote it, is refused exactly as before.
+    Whether the document has a direct-publication lane is deliberately not a
+    question this module asks. That is the publication tool's decision, taken
+    from its own configuration, and an old lane's absence licenses nothing here:
+    permission is derived from what the helper recorded, not from what a
+    classification says it would have done.
 
     The permission is derived rather than asserted: the caller says which source
-    it wants, and this decides whether that source is admissible, from the same
-    classification the publication module itself applies.
+    it wants, and this decides whether that source is admissible. The branch is
+    fetched first, so "not landed" is a statement about the branch now rather
+    than about a cached ref. When `decided` is given it receives the applied blob
+    the decision was made for, which resolution must then be held to.
     """
-    publisher = publication_module()
-    git(["fetch", "origin", branch], cwd=root)
-    tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
+    fresh = fetched_tip(root, branch)
     document = record["document"]
-    try:
-        publishable, why_not = publisher.eligibility(
-            root, record["repository"], tip, document
-        )
-    except Exception as error:  # noqa: BLE001 - reported, never raised bare
-        # Issue #370: for an owner outside §7 the classification comes from that
-        # repository's own configuration, which can be present and unreadable.
-        # Then whether this document publishes to the branch is unknown, and an
-        # unknown lane may not clear a record: resolving from the working tree
-        # is admissible only for a document that provably has no lane.
-        raise TransactionError(
-            "publication-classification-unavailable",
-            f"whether {document} publishes directly to {branch} could not be "
-            f"decided ({getattr(error, 'message', error)}), so this record "
-            "cannot be resolved from the working tree",
-        ) from error
-    if publishable:
-        return False, (
-            f"{document} publishes directly to {branch}, so its disposition is "
-            "verified there rather than in the working tree"
-        )
-    # Classification says the module *would* decline to publish it. That is not
-    # the same as the module having applied anything: a hand-edited document
-    # carrying a terminal entry looks identical from here. What tells them apart
-    # is the reference the module writes when — and only when — its own write
-    # succeeded, naming the exact content it wrote.
-    applied = publisher.applied_ref(record["repository"], document)
-    recorded = git(
-        ["rev-parse", "--verify", "--quiet", applied], cwd=root, check=False
-    ).stdout.decode().strip()
+    applied = applied_ref(record["repository"], document)
+    recorded = ref_value(root, applied)
+    if decided is not None:
+        decided["applied"] = recorded
     if not recorded:
         return False, (
-            f"the publication module never applied a disposition to {document} "
-            f"locally ({applied} does not exist), so the working tree is somebody "
-            "else's edit rather than an approved mutation"
+            f"the approved-document helper never applied a disposition to "
+            f"{document} locally ({applied} does not exist), so the working tree "
+            "is somebody else's edit rather than an approved mutation"
         )
-    present = publisher.working_blob(root, document)
+    kind = git(["cat-file", "-t", recorded], cwd=root, check=False)
+    if kind.stdout.decode().strip() != "blob":
+        return False, (
+            f"the applied record {applied} names {recorded}, which is not the "
+            "blob of applied content a record must name, so it cannot license a "
+            "local resolution"
+        )
+    target = root / document
+    present = (
+        git_out(["hash-object", "--", str(target)], cwd=root)
+        if target.is_file()
+        else None
+    )
     if present != recorded:
         return False, (
-            f"{document} is not the content the publication module applied "
+            f"{document} is not the content the approved-document helper applied "
             f"({present} rather than {recorded}), so it has been changed since"
         )
-    return True, why_not
+    # "Not landed" is a statement about the branch's whole reachable history,
+    # not about its tip and not about a path-simplified view of it: a later edit
+    # can replace the landed content (and the entry the tracker transaction
+    # needs) while the landing stays a fact, and a merge that kept an older copy
+    # of the document through its first parent hides a landing reachable
+    # through its second. So the content's blob is looked for at the document's
+    # path in every reachable commit, and a history that cannot be read
+    # refuses rather than guesses.
+    pending_exists = ref_value(root, pending_publication_ref(record["repository"], document))
+    if pending_exists:
+        # A pending attempt has its own recorded interval and one validator, the
+        # helper's: a second, weaker heuristic here would only disagree with it.
+        landed, why = recorded_publication_landed(root, record, branch, recorded)
+        if landed is None:
+            return False, why
+        if landed:
+            return False, (
+                f"{why}, so {document} is landed rather than locally applied and is "
+                "verified on the branch"
+            )
+        return True, f"{document} was applied locally and has not landed on {branch}"
+    if "\n" in document:
+        return False, f"{document} has a newline in its name, so its history cannot be searched"
+    commits = git(["rev-list", fresh], cwd=root, check=False)
+    if commits.returncode != 0:
+        return False, (
+            f"the history of origin/{branch} could not be read, so whether the "
+            "applied content already landed cannot be decided"
+        )
+    try:
+        helper = approved_document_module()
+        if helper.is_shallow(root):
+            return False, (
+                f"the history of origin/{branch} is shallow or its depth cannot be "
+                "read, so whether the applied content already landed cannot be decided"
+            )
+        seen = helper.blobs_at(root, commits.stdout.decode().split(), document)
+    except Exception as error:  # noqa: BLE001 - an unreadable history refuses
+        return False, (
+            f"the revisions of {document} on origin/{branch} could not all be read "
+            f"({getattr(error, 'message', error)}), so whether the applied content "
+            "already landed cannot be decided"
+        )
+    if recorded in seen:
+        return False, (
+            f"origin/{branch} already carried the applied content of "
+            f"{document} at some revision, so it is landed rather than "
+            "locally applied and is verified on the branch"
+        )
+    return True, f"{document} was applied locally and has not landed on {branch}"
 
 
-def published_document(root: Path, record: dict, source: str, branch: str) -> str:
+def publication_obligation(root: Path, record: dict) -> dict:
+    """What a local checkpoint leaves outstanding.
+
+    Resolving a transaction against the locally applied document records the
+    tracker half as done. It says nothing about publication: a pending record
+    the helper wrote is still there, still stops the next preflight, and is
+    cleared only by a landing that is verified on the branch.
+    """
+    ref = pending_publication_ref(record["repository"], record["document"])
+    recorded = ref_value(root, ref)
+    return {
+        "published": False,
+        "publication_obligation": "outstanding" if recorded else "none-recorded",
+        "pending_publication_ref": ref,
+        "pending_publication_commit": recorded or None,
+    }
+
+
+def published_document(
+    root: Path, record: dict, source: str, branch: str, applied: str | None = None
+) -> str:
     """The bytes resolution is verified against.
 
     `branch` is the ordinary case: the published document as the remote
-    publication branch itself carries it. `local` is the `not-published`
-    outcome, where the helper declined publication for a `pr-atomic`,
-    unmatched, or not-yet-tracked document and applied the approved content to
-    the working tree instead — a legitimate terminal state for such a document,
-    and the only evidence there is.
+    publication branch itself carries it, after a fresh fetch. `local` is the
+    document the approved-document helper applied to the working tree and has
+    not landed — a legitimate terminal state for the tracker half, and the
+    only evidence there is until the document lands. The caller has already
+    established that the helper's applied record licenses it.
     """
     document = record["document"]
     if source == "local":
@@ -1470,11 +1670,22 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
                 f"{document} does not exist under {root}, so the applied "
                 "disposition cannot be verified",
             )
-        return target.read_text(encoding="utf-8", errors="replace")
-    git(["fetch", "origin", branch], cwd=root)
-    proc = git(
-        ["show", f"origin/{branch}:{document}"], cwd=root, check=False
-    )
+        data = target.read_bytes()
+        # The bytes resolution is verified against are the bytes the helper
+        # applied: the permission was decided before slow checks, and a hand
+        # edit made since is not the disposition's evidence.
+        current = ref_value(root, applied_ref(record["repository"], document))
+        held = git_out(["hash-object", "--stdin"], cwd=root, input_bytes=data)
+        if not current or held != current or (applied is not None and current != applied):
+            raise TransactionError(
+                "local-resolution-refused",
+                f"{document} is not the content the approved-document helper "
+                "applied, so it has been changed since the permission was decided; "
+                "the record is kept",
+            )
+        return data.decode("utf-8", errors="replace")
+    fresh = fetched_tip(root, branch)
+    proc = git(["show", f"{fresh}:{document}"], cwd=root, check=False)
     if proc.returncode != 0:
         raise TransactionError(
             "document-unreadable",
@@ -1663,7 +1874,8 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
             **transaction_report(record, ref, observed),
         )
     if source == "local":
-        permitted, why = local_resolution_permitted(root, record, branch)
+        decided = {}
+        permitted, why = local_resolution_permitted(root, record, branch, decided)
         if not permitted:
             raise TransactionError(
                 "local-resolution-refused",
@@ -1672,7 +1884,9 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
                 source=source,
                 **transaction_report(record, ref, observed),
             )
-    text = published_document(root, record, source, branch)
+    text = published_document(
+        root, record, source, branch, decided.get("applied") if source == "local" else None
+    )
     tokens = required_document_tokens(record)
     entry_key = record["entry_key"]
     fault, lines = resolution_fault(record, text)
@@ -1686,8 +1900,9 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
             entry_lines=lines,
             **transaction_report(record, ref, observed),
         )
+    obligation = publication_obligation(root, record) if source == "local" else {}
     clear_record(root, ref, observed, _binding(record))
-    return {
+    return obligation | {
         "status": STATE_RESOLVED,
         "source": source,
         "required_tokens": tokens,
@@ -1754,6 +1969,8 @@ def check(root: Path, repository: str, document: str) -> dict:
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
+    check_canonical(document)
+    actual_spelling(resolved, document)
     ref = transaction_ref(owner, document)
     report = observed_report(resolved, ref, repository=owner, document=document)
     # `acquired` is False only for a record that is genuinely absent and
@@ -1831,14 +2048,16 @@ def main(argv: list[str] | None = None) -> int:
         choices=("branch", "local"),
         default="branch",
         help="verify resolution against the publication branch, or against the "
-        "locally applied document when the helper reported not-published having "
-        "written and recorded that document itself",
+        "locally applied document when the approved-document helper applied and "
+        "recorded that content and it has not landed",
     )
     args = parser.parse_args(argv)
 
     try:
         root = resolve_write_root(args.root)
         owner = verify_owner(root, args.repo)
+        check_canonical(args.path)
+        actual_spelling(root, args.path)
         ref = transaction_ref(owner, args.path)
 
         if args.check:
