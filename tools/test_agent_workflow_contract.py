@@ -330,7 +330,7 @@ TRUSTED_SPEC_SURFACE_FILES = {
 DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
-    "codex-plugin/plugins/kanban/skills/process-report/scripts/approved_document.py": {"git", "docs-push"},
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/approved_document.py": {"git", "docs-push", "gh", "ps"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py": {"gh"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py": set(),
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py": set(),
@@ -338,7 +338,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
-    "claude-plugin/plugins/kanban/scripts/approved_document.py": {"git", "docs-push"},
+    "claude-plugin/plugins/kanban/scripts/approved_document.py": {"git", "docs-push", "gh", "ps"},
     "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py": {"gh"},
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
@@ -2800,7 +2800,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
         self.assertEqual(
             found,
-            {"gh", "git", "codex", "claude", "launchctl", "systemctl"},
+            {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps"},
         )
 
     def test_each_service_manager_cli_is_declared_and_load_bearing(self):

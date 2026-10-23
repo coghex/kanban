@@ -9,75 +9,58 @@ Run as:
         --expected-working-copy <preflight working_copy_blob> \\
         --content <file holding the complete approved document>
 
-Issue #830, slice B of #775. `tools/publish_coordination_doc.py` is two things:
-a publication mechanism (eligibility, a commit built on the branch tip, a push)
-and a document-write protocol every processing workflow relies on. The owner's
-`docs-push` replaces the first. This module is the second, kept whole and
-reduced to what it owns:
+Issue #830, slice B of #775; recovery contract in
+docs/designs/approved_document_recovery_design.md. `tools/publish_coordination_doc.py`
+is two things: a publication mechanism (eligibility, a commit built on the branch
+tip, a push) and a document-write protocol every processing workflow relies on.
+The owner's `docs-push` replaces the first. This module is the second, reduced
+to what it owns:
 
-- approved-content application that refuses to overwrite an outside edit;
+- approved-content application that refuses to overwrite an outside edit, and
+  keeps custody of every file it moves;
 - per-document serialization;
-- the durable `refs/kanban/pending-publication` and `refs/kanban/applied-locally`
-  records and the `--check-pending` preflight that reports a publication record
-  and a tracker transaction together; and
+- the durable `refs/kanban/pending-publication` intent record and
+  `refs/kanban/applied-locally` blob record, and the `--check-pending` preflight
+  that reports a publication record and a tracker transaction together; and
 - the one call that hands a named document to `docs-push`.
 
 It never constructs, signs or pushes a publication commit, never implements a
 push or a merge, and never reads `workflow.direct_publication_paths`, §7 of
 docs/agent-workflow-contract.md or `workflow.coordination_paths`. Whether a path
-may land directly is `docs-push`'s decision, taken from its own configuration;
-a refusal is an outcome this module reports, not a lane it routes around.
+may land directly is `docs-push`'s decision; a refusal is an outcome this module
+reports, not a lane it routes around. The publisher stays in place and keeps
+working until slice C; this module reads, and coexists with, every record it
+writes.
 
-Slice B adds this module beside the publisher and changes no asset: the
-publisher stays in place and keeps working, and slice C is what deletes it and
-points the processing workflows here. This module therefore reads, and
-coexists with, every record the publisher writes.
+## One retained intent, and custody before every move
 
-## The caller hands over content, never a pre-edited file
+The pending record is the durable intent and the recovery journal. It is a
+parentless commit whose tree roots the approved bytes, the baseline and any
+captured foreign edit under fixed internal names, so an object is retained by
+reachability and not by a name in JSON. It is created absent-only before the
+document is touched, rewritten and deleted only by compare-and-swap, and is
+never discarded because something later failed: an application error keeps it.
 
-`--content` is the complete approved document, and this module writes it. It
-binds that content to the verified repository (the write root's own `origin`),
-the repository-relative path, the baseline the caller's preflight observed
-(`working_copy_blob`) and the exact approved blob, and replaces the document
-only while it still holds those baseline bytes. The write is the publisher's
-capture-and-refuse protocol (`verify_and_write`), not a read followed by a
-write: an outside edit is preserved in the object database and put back, never
-overwritten.
+Before the document is moved, a capture descriptor naming an exclusively
+reserved directory beside it, the scratch and aside files in it and the
+originating worktree is persisted and read back. Custody of the document begins
+at the rename, before any read; a Python flag set after the rename is not
+evidence of anything. After a crash the exact recorded locations are inspected.
+Files are installed and restored by exclusive link only, and a captured file is
+unlinked only after its restoration or its retention is verified.
 
-The write root is the owning repository's current isolated worktree. `docs-wip`
-is neither required nor selected.
+## The tool, and landing decided by evidence
 
-## Publication is `docs-push`, and the receipt decides
-
-After the write this module runs `docs-push --expect <approved_blob> --keep -m
-<message> <document>` from the write root, naming that one path. `docs-push`
-merges three ways, so the blob it publishes can legitimately differ from the
-approved input; its output, good or bad, decides nothing. The commit message
-carries a marker naming the recorded attempt, and the verdict is reachability
-alone, decided against a freshly fetched `origin/<branch>`:
-
-- a commit carrying this attempt's marker lies in the history since the recorded
-  tip, and the published blob is that commit's own blob for the document, not
-  whatever a later tip holds; or
-- the branch already carries the approved blob at the document's path, which is
-  the tool's "nothing to land".
-
-A missing tool, a tool that lacks `--expect` or `--keep`, a refusal, a conflict
-or a changed file is an explicit `incomplete-publication` outcome carrying the
-tool's exact message. Nothing falls back to a raw `git push` or another
-publisher, and the approved content and its records stay where they are.
-
-## Recovery points
-
-The pending record is written before the document is replaced, so every
-interruption leaves something the next run recognizes:
-
-1. before application: the record exists and the document is still the baseline;
-2. after application and before the tool: the document is the approved blob;
-3. after publication and before cleanup, including after a three-way merge: the
-   document is the merged copy `--keep` left, and the receipt is on the branch;
-4. between a tracker checkpoint and its resolution: the preflight reports both
-   records, and `tracker_transaction.py` resolves against the published entry.
+The helper records a handoff marker, then the child's pid, start time and exact
+argv, before it waits on `docs-push --expect <approved_blob> --keep -m <message>
+<document>`. Landing is decided only by evidence in the freshly fetched
+`origin/<default>`, over the interval from the recorded tip `R` (inclusive)
+through the fetched tip: a receipt commit carrying this attempt's marker, or the
+approved blob at the document's path. Saved evidence is validated by the same
+rules as rediscovered evidence and takes precedence; invalid saved evidence
+stops. The tool's output decides nothing. An automatic retry after a handoff
+that did not land also needs the exact child to be gone and an affirmative
+`non_fast_forward` rule on the publication branch.
 
 A record that is stale, changed, malformed or unverifiable stops with a report;
 it is never ignored or deleted to proceed.
@@ -93,13 +76,17 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import time
+import urllib.parse
+from pathlib import Path, PurePosixPath
 
 LOCK_NAMESPACE = "refs/kanban/publish-lock"
 PENDING_NAMESPACE = "refs/kanban/pending-publication"
+ABANDONED_NAMESPACE = "refs/kanban/abandoned-publication"
 
 # What this module applied to a document and has not yet landed. A working tree
 # is equally what a hand edit produces, so this reference is the difference: it
@@ -109,11 +96,17 @@ APPLIED_NAMESPACE = "refs/kanban/applied-locally"
 
 # The subject of this module's own pending record. A record under
 # PENDING_NAMESPACE without it is the publisher's commit-shaped form, which is
-# recognized and resumed rather than rejected.
+# recognized and resumed rather than rejected. Version 1 (the paused branch's
+# own form, whose tree holds the document at its own path) is read and migrated.
 PENDING_SUBJECT = "kanban approved-document pending publication"
-PENDING_VERSION = 1
+PENDING_VERSION = 2
 FORM_HELPER = "approved-document"
 FORM_PUBLISHER = "publish-coordination-doc"
+
+# Internal tree entries of a version-2 record, under a fixed directory a
+# document path may not use.
+PAYLOAD_DIR = "kanban-approved-document"
+PAYLOAD_NAMES = ("approved", "baseline", "captured", "predecessor", "predecessor-record")
 
 # The trailer that names one publication attempt in the commit `docs-push`
 # builds. Everything that identifies the attempt travels in it, so a receipt is
@@ -127,6 +120,7 @@ TOOL_TIMEOUT_SECONDS = 600
 
 OID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 ATTEMPT_RE = re.compile(r"^[0-9a-f]{32}$")
+HANDOFF_STATES = ("marker", "running", "finished")
 
 
 class DocumentError(Exception):
@@ -538,197 +532,7 @@ def _preserve(root: Path, data: bytes) -> str:
     )
 
 
-def rename_aside(target: Path, aside: Path) -> None:
-    """Move the document out of the way, atomically. A seam a test can reach."""
-    os.rename(target, aside)
 
-
-def link_into_place(scratch: Path, target: Path) -> None:
-    """Put the new content at the document's path, failing if anything is
-    already there. `link` is the one filesystem primitive here that refuses
-    rather than overwrites, which is what makes the gap detectable."""
-    os.link(scratch, target)
-
-
-def put_back(aside: Path, target: Path, data: bytes, mode: int) -> bool:
-    """Return the captured document to its path without overwriting anything.
-
-    `link` refuses when the path is occupied, which is the point: by the time a
-    recovery runs, another writer may already have created a file there, and
-    that file is newer than what is being put back. Restoring must never be the
-    step that destroys a write — the same rule the swap itself follows.
-
-    It also never raises. This runs on the way out of a failure, and a
-    restoration that throws would replace the real error with its own and leave
-    the document deleted. When `link` is unavailable for some reason other than
-    the path being taken, the document is recreated exclusively instead: that
-    still refuses an occupied path, where a rename would check and then
-    overwrite — the very race this module declines to run anywhere else.
-    """
-    try:
-        link_into_place(aside, target)
-        return True
-    except FileExistsError:
-        return False
-    except OSError:
-        pass
-    try:
-        descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
-    except OSError:
-        return False
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-        os.chmod(target, mode)
-        return True
-    except OSError:
-        return False
-
-
-def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
-    """Replace the document, refusing if it is not the baseline — and never
-    overwriting whatever is actually there.
-
-    A check followed by a write can always be raced, and POSIX offers no
-    compare-and-swap on file content, so this does not check and then write.
-    It *captures* instead:
-
-    - `rename` moves whatever occupies the path out of the way atomically, so
-      nothing can be clobbered by this module — an in-place edit and a wholesale
-      replacement are both carried out of the way intact, and whichever it is
-      gets hashed;
-    - if that is not the baseline it is preserved in the object database, moved
-      back, and the run fails closed;
-    - `link` then puts the new content in place and *fails* if anything was
-      created in the gap, in which case what was created stays and the captured
-      document is moved back.
-
-    The document is briefly absent between those two steps: a reader in that
-    instant sees no file rather than a torn or wrong one, which is the cost of
-    never destroying somebody else's write.
-    """
-    target = root / document
-    handle = scratch = aside = None
-    captured, captured_mode, captured_blob = b"", 0o644, None
-    # Only a completed capture may be restored. Before it, `captured` is a
-    # placeholder rather than the document, and putting *that* back would
-    # invent a file rather than return one.
-    captured_ok = False
-    try:
-        existing, _ = read_for_write(target)
-        if git_blob_hash(existing) != baseline:
-            raise DocumentError(
-                "document-changed-before-write",
-                f"{document} changed after its baseline was verified; nothing was "
-                "written and nothing was published",
-                preserved_blob=_preserve(root, existing),
-            )
-
-        handle, scratch_name = tempfile.mkstemp(
-            prefix=f".{target.name}.kanban-publish-", dir=str(target.parent)
-        )
-        scratch = Path(scratch_name)
-        with os.fdopen(handle, "wb") as stream:
-            handle = None
-            stream.write(content)
-        # mkstemp creates 0600, and the swap replaces the file, so the mode
-        # travels with it rather than silently narrowing a document other
-        # people and processes read.
-        os.chmod(scratch, os.stat(target).st_mode & 0o7777)
-
-        captured_mode = os.stat(target).st_mode & 0o7777
-        aside = Path(
-            tempfile.mkdtemp(prefix=".kanban-publish-aside-", dir=str(target.parent))
-        ) / target.name
-        rename_aside(target, aside)
-
-        captured, _ = read_for_write(aside)
-        captured_ok = True
-        # Unconditionally, and before anything else can fail: from here the
-        # document exists only as this temporary, so its content belongs
-        # somewhere durable whatever happens next.
-        captured_blob = _preserve(root, captured)
-        if captured_blob != baseline:
-            preserved = captured_blob
-            restored = put_back(aside, target, captured, captured_mode)
-            raise DocumentError(
-                "document-changed-before-write",
-                f"{document} was changed between its verification and the swap; "
-                + (
-                    "the change was put back and nothing was published"
-                    if restored
-                    else "another writer had already recreated the document, so "
-                    "that file was left in place and the captured change is "
-                    "recoverable from the object database; nothing was published"
-                ),
-                preserved_blob=preserved,
-                restored=restored,
-            )
-
-        try:
-            link_into_place(scratch, target)
-        except FileExistsError:
-            # Somebody created the document in the gap. Their file is the most
-            # recent write and stays exactly as it is — moving the captured
-            # copy back over it would destroy the write this whole design
-            # exists to protect. What was captured is the baseline, which the
-            # publication branch already carries, and it is preserved anyway so
-            # the report can name both.
-            preserved = _preserve(root, captured)
-            raise DocumentError(
-                "document-changed-before-write",
-                f"{document} was recreated by another writer during the swap; "
-                "that file was left in place and nothing was published",
-                preserved_blob=preserved,
-            ) from None
-    except OSError as error:
-        raise DocumentError(
-            "document-unwritable",
-            f"{document} could not be read or replaced: {error}",
-        ) from error
-    finally:
-        # Cleanup runs after the document may already have been replaced, so
-        # nothing in here may raise: an exception thrown from a `finally`
-        # replaces whatever was propagating, and one thrown from *here* would
-        # escape the result contract entirely and skip the lock release with
-        # it. Every step below is best-effort by construction.
-        if handle is not None:
-            _quietly(os.close, handle)
-        # Only this invocation's own temporaries, each created exclusively.
-        if scratch is not None:
-            _quietly(scratch.unlink, missing_ok=True)
-        if aside is not None:
-            # Between the rename and the link the document does not exist, and
-            # `aside` holds the only copy of it. *Any* failure in that gap —
-            # not just the one this code anticipated — must therefore put it
-            # back before the temporary is dropped, or a failed publication
-            # deletes the cursor it was trying to publish. Checked as an
-            # invariant on the way out rather than repeated at each raise,
-            # because the failure that matters here is the one not enumerated.
-            restored = True
-            if captured_ok and not _quietly(target.stat):
-                restored = put_back(aside, target, captured, captured_mode)
-            elif not captured_ok:
-                # The rename never completed, so nothing was taken and there is
-                # nothing to give back. A missing document here was removed by
-                # somebody else; recreating it from the placeholder would turn
-                # their deletion into an unapproved empty file.
-                restored = True
-            if restored:
-                _quietly(aside.unlink, missing_ok=True)
-                _quietly(aside.parent.rmdir)
-            else:
-                # Kept — but a file kept somewhere nobody is told about is only
-                # marginally better than one deleted, so the path travels with
-                # the failure that is already on its way out.
-                in_flight = sys.exc_info()[1]
-                if isinstance(in_flight, DocumentError):
-                    in_flight.detail.setdefault("captured_file", str(aside))
-                    in_flight.detail.setdefault("captured_blob", captured_blob)
-            # If it could not be put back, the temporary stays: the content is
-            # in the object database either way, but deleting the only file
-            # copy on the way out of a failure would be the worst thing this
-            # module could do.
 
 # ---------------------------------------------------------- pending record --
 
@@ -746,6 +550,25 @@ def read_ref(root: Path, ref: str) -> str:
 
 def default_message(document: str) -> str:
     return f"docs: publish the approved mutation to {document}"
+
+
+def check_supported_name(document: str) -> None:
+    """Refuse a path this module cannot track, before anything is recorded or
+    touched rather than halfway through a recovery."""
+    parts = PurePosixPath(document).parts
+    if (
+        not document
+        or "\n" in document
+        or "\0" in document
+        or document.startswith("/")
+        or ".." in parts
+        or (parts and parts[0] == PAYLOAD_DIR)
+    ):
+        raise DocumentError(
+            "document-name-unsupported",
+            f"{document!r} is not a repository-relative path this module can "
+            "track (no newline, absolute, parent or reserved-directory names)",
+        )
 
 
 def receipt_line(pending: dict) -> str:
@@ -769,19 +592,18 @@ def receipt_line(pending: dict) -> str:
     return f"{RECEIPT_TRAILER}: {payload}"
 
 
-def build_pending_commit(root: Path, document: str, fields: dict) -> str:
-    """A parentless commit whose tree is the document at the approved blob and
-    whose message carries the record.
+def build_pending_commit(root: Path, fields: dict, payloads: dict) -> str:
+    """A parentless commit whose message carries the record and whose tree roots
+    every payload under a fixed internal directory.
 
     Commit-shaped so it sits in the namespace the publisher's preflight already
-    reads, and so the approved bytes are retained by object reachability rather
-    than by an object name a prune could orphan. It has no parent on purpose:
-    the publisher resuming such a record would otherwise read a parent as its
-    pinned tip and push the commit, which is the one thing this module exists
-    to take out of that tool's hands. Without a parent the publisher stops.
-
-    Built through a scratch index in the common Git directory, so the write
-    root's own index is never touched.
+    reads, and so the payloads are retained by object reachability and not by
+    an object name a prune could orphan. Parentless on purpose: the publisher
+    resuming such a record would otherwise read a parent as its pinned tip and
+    push the commit, which is the one thing this module exists to take out of
+    that tool's hands. Without a parent the publisher stops. Built through a
+    scratch index in the common Git directory, so the write root's own index is
+    never touched.
     """
     try:
         handle, scratch_name = tempfile.mkstemp(
@@ -791,25 +613,26 @@ def build_pending_commit(root: Path, document: str, fields: dict) -> str:
     except OSError as error:
         raise DocumentError(
             "scratch-index-unavailable",
-            f"a scratch index for {document} could not be created: {error}",
+            f"a scratch index for {fields['document']} could not be created: {error}",
         ) from error
     scratch = Path(scratch_name)
     env = dict(os.environ, GIT_INDEX_FILE=str(scratch))
     try:
         # mkstemp leaves an empty file, which git reads as a corrupt index.
         scratch.unlink()
-        update = subprocess.run(
-            [
-                "git", "update-index", "--add", "--cacheinfo",
-                f"100644,{fields['approved_blob']},{document}",
-            ],
-            cwd=str(root), capture_output=True, env=env,
-        )
-        if update.returncode != 0:
-            raise DocumentError(
-                "git-failed",
-                f"git update-index failed: {update.stderr.decode().strip()}",
+        for name, blob in sorted(payloads.items()):
+            update = subprocess.run(
+                [
+                    "git", "update-index", "--add", "--cacheinfo",
+                    f"100644,{blob},{PAYLOAD_DIR}/{name}",
+                ],
+                cwd=str(root), capture_output=True, env=env,
             )
+            if update.returncode != 0:
+                raise DocumentError(
+                    "git-failed",
+                    f"git update-index failed: {update.stderr.decode().strip()}",
+                )
         tree = subprocess.run(
             ["git", "write-tree"], cwd=str(root), capture_output=True, env=env
         )
@@ -837,14 +660,89 @@ def _malformed(ref: str, commit: str, why: str) -> DocumentError:
     )
 
 
+def capture_fault(capture, attempt: str) -> str | None:
+    if not isinstance(capture, dict):
+        return "its capture descriptor is not an object"
+    if capture.get("directory") != f".kanban-attempt-{attempt}":
+        return "its capture directory is not this attempt's reservation"
+    for name in ("scratch", "aside"):
+        value = capture.get(name)
+        if not isinstance(value, str) or not value or "/" in value or value in (".", ".."):
+            return f"its capture {name} is not a plain file name"
+    if not isinstance(capture.get("worktree"), str) or not capture["worktree"]:
+        return "its capture names no worktree"
+    return None
+
+
+def handoff_fault(handoff) -> str | None:
+    if not isinstance(handoff, dict):
+        return "its handoff is not an object"
+    if handoff.get("state") not in HANDOFF_STATES:
+        return f"its handoff state {handoff.get('state')!r} is unknown"
+    if not isinstance(handoff.get("host"), str):
+        return "its handoff names no host"
+    argv = handoff.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        return "its handoff argv is not a list of strings"
+    child = handoff.get("child")
+    if child is not None:
+        if (
+            not isinstance(child, dict)
+            or not isinstance(child.get("pid"), int)
+            or not isinstance(child.get("start"), str)
+            or not isinstance(child.get("argv"), list)
+        ):
+            return "its handoff child identity is unusable"
+    if handoff["state"] == "running" and child is None:
+        return "a running handoff names no child"
+    result = handoff.get("result")
+    if result is not None and (
+        not isinstance(result, dict) or not isinstance(result.get("returncode"), (int, type(None)))
+    ):
+        return "its handoff result is unusable"
+    return None
+
+
+def landing_evidence_fault(evidence) -> str | None:
+    """What makes recorded landing evidence unusable in shape, or None. Whether
+    it is *true* is `validate_evidence`'s question, asked of the repository."""
+    if not isinstance(evidence, dict):
+        return "it is not an object"
+    if evidence.get("via") not in ("receipt", "already-present"):
+        return f"its via {evidence.get('via')!r} is not a known landing"
+    for name in ("published_blob", "evidence_commit"):
+        value = evidence.get(name)
+        if not isinstance(value, str) or not OID_RE.match(value):
+            return f"its {name} is not an object name"
+    receipt = evidence.get("receipt_commit")
+    if receipt is not None and (not isinstance(receipt, str) or not OID_RE.match(receipt)):
+        return "its receipt_commit is not an object name"
+    return None
+
+
+def tree_paths(root: Path, commit: str) -> dict:
+    """Every blob in a commit's tree, by path."""
+    listing = git(["ls-tree", "-r", "-z", commit], cwd=root).stdout.decode(
+        "utf-8", errors="surrogateescape"
+    )
+    found = {}
+    for entry in listing.split("\0"):
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) == 3 and fields[1] == "blob":
+            found[path] = fields[2]
+    return found
+
+
 def read_pending(root: Path, owner: str, document: str) -> dict | None:
     """The pending publication recorded for this document, or None.
 
-    Both forms are recognized: this module's own record, and the publisher's
-    commit-shaped one. A record that is neither, or that does not name the
-    document it is keyed under, is reported rather than read as absent — an
-    absent record is the one conclusion a caller deciding whether it may write
-    must never reach by accident.
+    All three forms are recognized: this module's version-2 record, the paused
+    branch's version-1 record, and the publisher's commit-shaped one. A record
+    that is none of them, or that does not name the document it is keyed under,
+    is reported rather than read as absent — an absent record is the one
+    conclusion a caller deciding whether it may write must never reach by
+    accident.
     """
     ref = pending_ref(owner, document)
     commit = read_ref(root, ref)
@@ -856,27 +754,33 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
     raw = git_out(["cat-file", "commit", commit], cwd=root)
     _, _, message = raw.partition("\n\n")
     subject, _, body = message.partition("\n")
-    recorded = blob_at(root, commit, document)
-    if recorded is None:
-        raise _malformed(ref, commit, f"does not carry {document}")
+    tree = tree_paths(root, commit)
+    base = {
+        "ref": ref, "commit": commit, "repository": owner, "document": document,
+        "branch": None, "root": None, "capture": None, "handoff": None,
+        "landing_evidence": None, "payloads": {}, "message": None,
+    }
     if subject.strip() != PENDING_SUBJECT:
+        recorded = tree.get(document)
+        if recorded is None:
+            raise _malformed(ref, commit, f"does not carry {document}")
         parent = git(["rev-parse", f"{commit}^"], cwd=root, check=False)
         if parent.returncode != 0:
             raise _malformed(
                 ref, commit, "is neither this module's record nor a publisher commit"
             )
-        return {
-            "form": FORM_PUBLISHER, "ref": ref, "commit": commit,
-            "repository": owner, "document": document, "approved_blob": recorded,
+        return base | {
+            "form": FORM_PUBLISHER, "version": 0, "approved_blob": recorded,
             "baseline": None, "rendered_tip": parent.stdout.decode().strip(),
-            "attempt": None, "message": None,
+            "attempt": None, "payloads": {"approved": recorded},
         }
     try:
         fields = json.loads(body)
     except json.JSONDecodeError as error:
         raise _malformed(ref, commit, f"is not valid JSON ({error})") from error
-    if not isinstance(fields, dict) or fields.get("version") != PENDING_VERSION:
-        raise _malformed(ref, commit, f"is not a version {PENDING_VERSION} record")
+    version = fields.get("version") if isinstance(fields, dict) else None
+    if version not in (1, 2):
+        raise _malformed(ref, commit, f"is not a version 1 or {PENDING_VERSION} record")
     for name in ("repository", "document", "approved_blob", "rendered_tip", "attempt"):
         if not isinstance(fields.get(name), str) or not fields[name]:
             raise _malformed(ref, commit, f"has no {name}")
@@ -895,12 +799,42 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
         or not ATTEMPT_RE.match(fields["attempt"])
     ):
         raise _malformed(ref, commit, "has an identifier that is not an object name")
-    if fields["approved_blob"] != recorded:
-        raise _malformed(
-            ref, commit,
-            f"names approved blob {fields['approved_blob']} but its tree holds "
-            f"{recorded}",
-        )
+    if version == 1:
+        payloads = {"approved": tree.get(document)}
+        if payloads["approved"] != fields["approved_blob"]:
+            raise _malformed(
+                ref, commit,
+                f"names approved blob {fields['approved_blob']} but its tree holds "
+                f"{payloads['approved']}",
+            )
+    else:
+        payloads = {
+            name: tree[f"{PAYLOAD_DIR}/{name}"]
+            for name in PAYLOAD_NAMES
+            if f"{PAYLOAD_DIR}/{name}" in tree
+        }
+        if payloads.get("approved") != fields["approved_blob"]:
+            raise _malformed(ref, commit, "does not root its approved blob")
+        if (baseline is None) != ("baseline" not in payloads) or (
+            baseline is not None and payloads["baseline"] != baseline
+        ):
+            raise _malformed(ref, commit, "does not root its baseline")
+        for name in ("branch", "root"):
+            if not isinstance(fields.get(name), str) or not fields[name]:
+                raise _malformed(ref, commit, f"has no {name}")
+        if fields.get("capture") is not None:
+            fault = capture_fault(fields["capture"], fields["attempt"])
+            if fault is not None:
+                raise _malformed(ref, commit, fault)
+        if fields.get("handoff") is not None:
+            fault = handoff_fault(fields["handoff"])
+            if fault is not None:
+                raise _malformed(ref, commit, fault)
+    evidence = fields.get("landing")
+    if evidence is not None:
+        fault = landing_evidence_fault(evidence)
+        if fault is not None:
+            raise _malformed(ref, commit, f"carries unusable landing evidence ({fault})")
     if (
         git(
             ["cat-file", "-e", f"{fields['rendered_tip']}^{{commit}}"],
@@ -917,60 +851,638 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
             pending_commit=commit,
         )
     message_text = fields.get("message")
-    evidence = fields.get("landing")
-    if evidence is not None:
-        fault = landing_evidence_fault(evidence)
-        if fault is not None:
-            raise _malformed(ref, commit, f"carries unusable landing evidence ({fault})")
-    return {
-        "form": FORM_HELPER, "ref": ref, "commit": commit,
-        "repository": owner, "document": document,
+    return base | {
+        "form": FORM_HELPER, "version": version,
         "approved_blob": fields["approved_blob"], "baseline": baseline,
         "rendered_tip": fields["rendered_tip"], "attempt": fields["attempt"],
         "message": message_text if isinstance(message_text, str) else None,
-        "landing_evidence": evidence,
+        "branch": fields.get("branch"), "root": fields.get("root"),
+        "capture": fields.get("capture"), "handoff": fields.get("handoff"),
+        "landing_evidence": evidence, "payloads": payloads,
     }
-
-
-def landing_evidence_fault(evidence) -> str | None:
-    """What makes recorded landing evidence unusable, or None.
-
-    The evidence is the one thing that outlives the branch's later edits, so it
-    is held to its shape here and to the repository's history in
-    `verified_evidence`: a record that cannot say where the approved content
-    was seen stops rather than being trusted or ignored.
-    """
-    if not isinstance(evidence, dict):
-        return "it is not an object"
-    if evidence.get("via") not in ("receipt", "already-present"):
-        return f"its via {evidence.get('via')!r} is not a known landing"
-    for name in ("published_blob", "evidence_commit"):
-        value = evidence.get(name)
-        if not isinstance(value, str) or not OID_RE.match(value):
-            return f"its {name} is not an object name"
-    receipt = evidence.get("receipt_commit")
-    if receipt is not None and (not isinstance(receipt, str) or not OID_RE.match(receipt)):
-        return "its receipt_commit is not an object name"
-    return None
 
 
 def new_pending_fields(
-    owner: str, document: str, approved_blob: str, baseline: str | None,
-    rendered_tip: str, message: str,
+    owner: str, branch: str, document: str, approved_blob: str, baseline: str | None,
+    rendered_tip: str, message: str, root: Path,
 ) -> dict:
     return {
-        "version": PENDING_VERSION,
-        "repository": owner,
-        "document": document,
-        "approved_blob": approved_blob,
-        "baseline": baseline,
-        "rendered_tip": rendered_tip,
-        "attempt": os.urandom(16).hex(),
-        "message": message,
+        "version": PENDING_VERSION, "repository": owner, "branch": branch,
+        "document": document, "attempt": os.urandom(16).hex(), "root": str(root),
+        "baseline": baseline, "approved_blob": approved_blob,
+        "rendered_tip": rendered_tip, "message": message, "capture": None,
+        "handoff": None, "landing": None,
     }
 
 
+def create_pending(root: Path, owner: str, fields: dict, payloads: dict) -> dict:
+    """Create the intent absent-only, and read it back before trusting it. A
+    write whose effect cannot be read back is not absence."""
+    document = fields["document"]
+    commit = build_pending_commit(root, fields, payloads)
+    ref = pending_ref(owner, document)
+    created = git(["update-ref", ref, commit, ""], cwd=root, check=False)
+    actual = read_ref(root, ref)
+    if created.returncode != 0 and actual != commit:
+        raise DocumentError(
+            "pending-exists",
+            f"a pending publication appeared for {document} while this run held "
+            "its lock; it was left as it is",
+            pending_ref=ref,
+        )
+    pending = read_pending(root, owner, document)
+    if pending is None or pending["commit"] != commit:
+        raise DocumentError(
+            "pending-unverified",
+            f"the pending record for {document} could not be read back as written",
+            pending_ref=ref,
+        )
+    return pending
+
+
+def rewrite_pending(
+    root: Path, pending: dict, *, branch: str | None = None, root_id: Path | None = None,
+    payloads: dict | None = None, **changes,
+) -> dict:
+    """Replace the record under compare-and-swap against the value just read,
+    keeping every payload and field and applying `changes` (capture, handoff,
+    landing, message). Always writes the current version, rooting the
+    predecessor's raw record when it is migrated so nothing it carried is lost.
+    """
+    fields = {
+        "version": PENDING_VERSION,
+        "repository": pending["repository"],
+        "branch": branch or pending.get("branch"),
+        "document": pending["document"],
+        "attempt": pending["attempt"] or os.urandom(16).hex(),
+        "root": str(root_id) if root_id is not None else pending.get("root"),
+        "baseline": pending["baseline"],
+        "approved_blob": pending["approved_blob"],
+        "rendered_tip": pending["rendered_tip"],
+        "message": pending["message"],
+        "capture": pending["capture"],
+        "handoff": pending["handoff"],
+        "landing": pending["landing_evidence"],
+    }
+    for name, value in changes.items():
+        fields["landing" if name == "landing_evidence" else name] = value
+    kept = dict(pending["payloads"])
+    if pending["form"] == FORM_PUBLISHER and fields["baseline"] is None:
+        fields["baseline"] = blob_at(root, pending["rendered_tip"], pending["document"])
+    if fields["baseline"] is not None:
+        kept.setdefault("baseline", fields["baseline"])
+    if pending["version"] != PENDING_VERSION:
+        kept["predecessor-record"] = _preserve(
+            root, git(["cat-file", "commit", pending["commit"]], cwd=root).stdout
+        )
+    kept.update(payloads or {})
+    if not fields["branch"] or not fields["root"]:
+        raise DocumentError(
+            "pending-unmigratable",
+            "a record without a branch and write root cannot be rewritten",
+            pending_ref=pending["ref"],
+        )
+    commit = build_pending_commit(root, fields, kept)
+    proc = git(["update-ref", pending["ref"], commit, pending["commit"]], cwd=root, check=False)
+    actual = read_ref(root, pending["ref"])
+    if proc.returncode != 0 and actual != commit:
+        raise DocumentError(
+            "pending-changed",
+            f"the pending publication for {pending['document']} changed while it "
+            "was being updated; it was left as it is",
+            pending_ref=pending["ref"],
+        )
+    reread = read_pending(root, pending["repository"], pending["document"])
+    if reread is None or reread["commit"] != commit:
+        raise DocumentError(
+            "pending-unverified",
+            f"the pending publication for {pending['document']} could not be read "
+            "back after it was updated",
+            pending_ref=pending["ref"],
+        )
+    return reread
+
+
+# ------------------------------------------------------------- applied record --
+
+
+def validate_applied(root: Path, owner: str, document: str) -> str | None:
+    """The applied record, when there is one and it is usable.
+
+    A record names a blob of applied content. One naming anything else is
+    reported and left exactly where it is: replacing it would destroy the only
+    evidence of what wrote it, and clearing it later would do so silently.
+    """
+    ref = applied_ref(owner, document)
+    recorded = read_ref(root, ref)
+    if not recorded:
+        return None
+    kind = git(["cat-file", "-t", recorded], cwd=root, check=False)
+    if kind.stdout.decode().strip() != "blob":
+        raise DocumentError(
+            "applied-malformed",
+            f"the applied record {ref} names {recorded}, which is not a blob of "
+            "applied content; it cannot be interpreted and is left as it is "
+            "until it is resolved by hand",
+            applied_ref=ref,
+            applied_object=recorded,
+        )
+    return recorded
+
+
+def record_applied_content(root: Path, owner: str, pending: dict) -> str:
+    """Record the applied bytes, under compare-and-swap against what was read.
+    A different valid predecessor is replaced only when the intent roots it."""
+    document, blob = pending["document"], pending["approved_blob"]
+    ref = applied_ref(owner, document)
+    current = validate_applied(root, owner, document)
+    if current == blob:
+        return "recorded"
+    if current is not None and current != pending["payloads"].get("predecessor"):
+        raise DocumentError(
+            "applied-conflict",
+            f"the applied record {ref} names other content than this attempt "
+            "rooted as its predecessor; it was left as it is",
+            applied_ref=ref,
+            applied_object=current,
+        )
+    git(["update-ref", ref, blob, current or ""], cwd=root, check=False)
+    return "recorded" if read_ref(root, ref) == blob else "unrecorded"
+
+
+# ------------------------------------------------------------ capture custody --
+
+
+def file_state(path: Path):
+    """('absent'|'file'|'other', blob). Never reads a failure as absence or as
+    emptiness: an unreadable file is neither, and raises."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent", None
+    except OSError as error:
+        raise DocumentError(
+            "file-unreadable", f"{path} could not be inspected ({error})", path=str(path)
+        ) from error
+    if not stat.S_ISREG(info.st_mode):
+        return "other", None
+    try:
+        return "file", git_blob_hash(Path(path).read_bytes())
+    except OSError as error:
+        raise DocumentError(
+            "file-unreadable",
+            f"{path} could not be read ({error}); it is not treated as absent or empty",
+            path=str(path),
+        ) from error
+
+
+def reserve_directory(directory: Path) -> None:
+    """Exclusively create this attempt's reservation. A seam a test can reach."""
+    os.mkdir(directory, 0o700)
+
+
+def write_scratch(path: Path, content: bytes, mode: int) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(path, mode)
+
+
+def rename_aside(target: Path, aside: Path) -> None:
+    """Move the document into custody, atomically. A seam a test can reach."""
+    os.rename(target, aside)
+
+
+def read_captured(aside: Path) -> bytes:
+    return Path(aside).read_bytes()
+
+
+def link_into_place(source: Path, target: Path) -> None:
+    """Put a file at the document's path, failing if anything is already there.
+    `link` is the one filesystem primitive here that refuses rather than
+    overwrites, which is what makes a lost race detectable."""
+    os.link(source, target)
+
+
+def restore_exclusive(aside: Path, target: Path) -> None:
+    """Return a captured file to its path without overwriting anything, by hard
+    link so the inode and its mode travel with it. When linking is unavailable
+    the file is copied exclusively; a partial copy is reported as divergent by
+    the caller and the aside is kept."""
+    try:
+        link_into_place(aside, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    data = Path(aside).read_bytes()
+    mode = stat.S_IMODE(os.lstat(aside).st_mode)
+    descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(data)
+    os.chmod(target, mode)
+
+
+def capture_locations(root: Path, pending: dict):
+    """(directory, aside, scratch) of the recorded capture, validated: the
+    descriptor must belong to this worktree and this attempt, and nothing it
+    names may be a symlink or a different kind of entry."""
+    capture = pending["capture"]
+    if capture["worktree"] != str(root):
+        raise DocumentError(
+            "capture-foreign-worktree",
+            f"the capture was recorded for {capture['worktree']}, not {root}; it "
+            "is left as it is",
+            capture=capture,
+        )
+    directory = (root / pending["document"]).parent / capture["directory"]
+    return directory, directory / capture["aside"], directory / capture["scratch"]
+
+
+def inspect_capture(root: Path, pending: dict) -> dict:
+    directory, aside, scratch = capture_locations(root, pending)
+    try:
+        info = os.lstat(directory)
+        present = True
+    except FileNotFoundError:
+        present = False
+    if present:
+        if not stat.S_ISDIR(info.st_mode):
+            raise DocumentError(
+                "capture-inconsistent",
+                f"{directory} is not the directory this attempt reserved",
+                path=str(directory),
+            )
+        unexpected = sorted(
+            entry for entry in os.listdir(directory)
+            if entry not in (aside.name, scratch.name)
+        )
+        if unexpected:
+            raise DocumentError(
+                "capture-inconsistent",
+                f"{directory} holds unexpected entries {unexpected}",
+                path=str(directory),
+            )
+    return {
+        "directory": directory, "aside_path": aside, "scratch_path": scratch,
+        "present": present,
+        "aside": safe_state(aside) if present else ("absent", None),
+        "scratch": safe_state(scratch) if present else ("absent", None),
+        "target": file_state(root / pending["document"]),
+    }
+
+
+def safe_state(path: Path):
+    """`file_state`, with an unreadable file reported as its own state so that a
+    capture that cannot be read is still restored and kept, never lost."""
+    try:
+        return file_state(path)
+    except DocumentError:
+        return "unreadable", None
+
+
+def remove_file(path: Path, directory: bool = False) -> None:
+    """Remove one leftover, treating an already-missing one as removed. A seam."""
+    try:
+        path.rmdir() if directory else path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def finish_capture(root: Path, pending: dict, inspected: dict) -> dict:
+    """Remove this attempt's leftovers and clear its descriptor. Only called once
+    the actual captured bytes are restored, rooted or known equal to the rooted
+    baseline; a leftover that cannot be removed keeps the descriptor."""
+    leftovers = []
+    for path in (inspected["aside_path"], inspected["scratch_path"]):
+        try:
+            remove_file(path)
+        except OSError:
+            leftovers.append(str(path))
+    if not leftovers and inspected["present"]:
+        try:
+            remove_file(inspected["directory"], directory=True)
+        except OSError:
+            leftovers.append(str(inspected["directory"]))
+    if leftovers:
+        raise DocumentError(
+            "capture-cleanup-incomplete",
+            f"the capture leftovers {leftovers} could not be removed; the intent "
+            "keeps naming them",
+            leftovers=leftovers,
+            pending_ref=pending["ref"],
+        )
+    return persist_capture(root, pending, None)
+
+
+def capture_stop(status: str, message: str, inspected: dict, pending: dict) -> DocumentError:
+    return DocumentError(
+        status, message,
+        pending_ref=pending["ref"], aside=str(inspected["aside_path"]),
+        capture_states={
+            "aside": inspected["aside"][0], "scratch": inspected["scratch"][0],
+            "target": inspected["target"][0],
+        },
+        aside_blob=inspected["aside"][1], target_blob=inspected["target"][1],
+        approved_blob=pending["approved_blob"], baseline_blob=pending["baseline"],
+    )
+
+
+def persist_capture(root: Path, pending: dict, capture) -> dict:
+    """Record (or clear) the capture descriptor. A named seam."""
+    return rewrite_pending(root, pending, capture=capture)
+
+
+def persist_handoff(root: Path, pending: dict, handoff) -> dict:
+    """Record the tool handoff. A named seam."""
+    return rewrite_pending(root, pending, handoff=handoff)
+
+
+def persist_landing(root: Path, pending: dict, branch: str, evidence: dict) -> dict:
+    """Save verified landing evidence into the intent. A named seam."""
+    return rewrite_pending(
+        root, pending, branch=branch, root_id=Path(pending.get("root") or root),
+        landing=evidence,
+    )
+
+
+def preserve_captured(root: Path, data: bytes) -> str:
+    """Store the captured bytes as an object. A named seam."""
+    return _preserve(root, data)
+
+
+def root_capture(root: Path, pending: dict, captured: str) -> dict:
+    """Retain a captured foreign edit by reachability in the intent."""
+    if pending["payloads"].get("captured") == captured:
+        return pending
+    return rewrite_pending(root, pending, payloads={"captured": captured})
+
+
+def recover_capture(root: Path, pending: dict) -> dict:
+    """Settle an interrupted capture from what is actually on disk, never from a
+    flag: inspect the recorded locations, restore or retain, and return the
+    intent with its descriptor cleared — or stop with the state reported."""
+    inspected = inspect_capture(root, pending)
+    approved, baseline = pending["approved_blob"], pending["baseline"]
+    target_state, target_blob = inspected["target"]
+    if target_state == "other":
+        raise capture_stop(
+            "capture-conflict", "the document's path is not a regular file", inspected, pending
+        )
+    aside_state, aside_blob = inspected["aside"]
+    if aside_state == "unreadable":
+        if target_state == "absent":
+            try:
+                restore_exclusive(inspected["aside_path"], root / pending["document"])
+            except OSError:
+                pass
+        raise capture_stop(
+            "capture-unreadable",
+            f"the captured file {inspected['aside_path']} cannot be read; it is "
+            "kept and is not treated as empty",
+            inspected, pending,
+        )
+    if aside_state == "other":
+        raise capture_stop(
+            "capture-inconsistent", "the captured entry is not a regular file", inspected, pending
+        )
+    if aside_state == "absent":
+        # Nothing was taken. A harmless reservation, unless the document is
+        # missing too, which nobody here may invent a file for.
+        if target_state == "absent":
+            raise capture_stop(
+                "capture-lost",
+                f"neither {pending['document']} nor its capture exists; the "
+                "rooted payloads are the only copies, and the unexpected "
+                "deletion needs explicit reconciliation",
+                inspected, pending,
+            )
+        return finish_capture(root, pending, inspected)
+    if target_state == "absent":
+        restore_exclusive(inspected["aside_path"], root / pending["document"])
+        restored = file_state(root / pending["document"])
+        if restored != ("file", aside_blob):
+            raise capture_stop(
+                "capture-divergent",
+                "the restored document is not the captured file; the capture is kept",
+                inspected | {"target": restored}, pending,
+            )
+        if aside_blob != baseline:
+            pending = root_capture(root, pending, _preserve(root, Path(inspected["aside_path"]).read_bytes()))
+        return finish_capture(root, pending, inspected | {"target": restored})
+    if target_blob == approved and aside_blob == baseline:
+        return finish_capture(root, pending, inspected)
+    if target_blob == aside_blob:
+        return finish_capture(root, pending, inspected)
+    if aside_blob != baseline:
+        pending = root_capture(root, pending, _preserve(root, Path(inspected["aside_path"]).read_bytes()))
+    raise capture_stop(
+        "capture-conflict",
+        f"{pending['document']} and its captured file differ; both are kept for "
+        "reconciliation and nothing was overwritten",
+        inspected, pending,
+    )
+
+
+def apply_over_baseline(root: Path, pending: dict, content: bytes) -> dict:
+    """Replace the document with the approved content, only while it still holds
+    the rooted baseline, keeping custody of the original at every step.
+
+    The descriptor is persisted and read back before the rename; custody begins
+    at the rename, before any read. Nothing after it unlinks the captured file
+    unless its restoration or retention is verified.
+    """
+    document = pending["document"]
+    target = root / document
+    state, blob = file_state(target)
+    if state != "file" or blob != pending["baseline"]:
+        raise DocumentError(
+            "document-changed-before-write",
+            f"{document} is no longer the baseline this attempt was recorded "
+            "over; nothing was moved, written or published",
+            working_blob=blob, baseline_blob=pending["baseline"],
+            preserved_blob=_preserve(root, target.read_bytes()) if state == "file" else None,
+        )
+    require_unstaged(root, document)
+    mode = stat.S_IMODE(os.lstat(target).st_mode)
+    name = f".kanban-attempt-{pending['attempt']}"
+    directory = target.parent / name
+    try:
+        reserve_directory(directory)
+    except FileExistsError:
+        if not directory.is_dir() or directory.is_symlink() or any(directory.iterdir()):
+            raise DocumentError(
+                "capture-inconsistent",
+                f"{directory} already exists and is not an empty reservation",
+                path=str(directory),
+            ) from None
+    except OSError as error:
+        raise DocumentError(
+            "document-unwritable",
+            f"the reservation {directory} could not be created ({error}); "
+            "nothing was moved",
+        ) from error
+    descriptor = {
+        "directory": name, "scratch": "scratch", "aside": "aside", "worktree": str(root),
+    }
+    pending = persist_capture(root, pending, descriptor)
+    aside, scratch = directory / "aside", directory / "scratch"
+    try:
+        write_scratch(scratch, content, mode)
+        rename_aside(target, aside)
+    except OSError as error:
+        raise DocumentError(
+            "document-unwritable",
+            f"{document} could not be prepared for replacement ({error}); the "
+            "intent and this attempt's reservation are kept",
+            pending_ref=pending["ref"],
+        ) from error
+    inspected = {
+        "directory": directory, "aside_path": aside, "scratch_path": scratch,
+        "present": True, "aside": ("file", None), "scratch": ("file", None),
+        "target": ("absent", None),
+    }
+    try:
+        data = read_captured(aside)
+        captured = preserve_captured(root, data)
+    except OSError as error:
+        try:
+            restore_exclusive(aside, target)
+        except OSError:
+            pass
+        raise DocumentError(
+            "capture-unreadable",
+            f"the captured {document} could not be read ({error}); the captured "
+            f"file is kept at {aside} and was not treated as empty",
+            aside=str(aside), pending_ref=pending["ref"],
+        ) from error
+    inspected["aside"] = ("file", captured)
+    if captured != pending["baseline"]:
+        pending = root_capture(root, pending, captured)
+        restored = False
+        try:
+            restore_exclusive(aside, target)
+            restored = file_state(target) == ("file", captured)
+        except OSError:
+            pass
+        if restored:
+            finish_capture(root, pending, inspected | {"target": ("file", captured)})
+        raise DocumentError(
+            "document-changed-before-write",
+            f"{document} was changed between its verification and the swap; "
+            + (
+                "the captured edit was rooted and put back"
+                if restored
+                else "the captured edit was rooted and is kept at " + str(aside)
+            )
+            + "; nothing was published",
+            preserved_blob=captured, restored=restored, aside=str(aside),
+            pending_ref=pending["ref"],
+        )
+    try:
+        link_into_place(scratch, target)
+    except FileExistsError:
+        raise DocumentError(
+            "document-changed-before-write",
+            f"{document} was recreated by another writer during the swap; that "
+            f"file was left in place and the original is kept at {aside}",
+            aside=str(aside), pending_ref=pending["ref"],
+        ) from None
+    except OSError as error:
+        restored = False
+        try:
+            restore_exclusive(aside, target)
+            restored = file_state(target) == ("file", captured)
+        except OSError:
+            pass
+        if restored:
+            finish_capture(root, pending, inspected | {"target": ("file", captured)})
+        raise DocumentError(
+            "document-unwritable",
+            f"{document} could not be replaced ({error}); "
+            + ("the original was put back" if restored else f"the original is kept at {aside}"),
+            aside=str(aside), restored=restored, pending_ref=pending["ref"],
+        ) from error
+    return finish_capture(root, pending, inspected | {"target": ("file", pending["approved_blob"])})
+
+
 # ------------------------------------------------------------------ landing --
+#
+# Landing is three-valued: yes, no, or unknown. "No" is concluded only after a
+# complete, successful search of the publication interval; anything that cannot
+# be read raises, and a raise never licenses a write, a tool call or a cleanup.
+
+
+def fresh_tip(root: Path, branch: str) -> str:
+    """The commit `origin/<branch>` names right after a *successful* fetch.
+
+    Every check in one classification uses this object name, not the moving
+    symbolic ref, and a failed fetch cannot certify a cached ref as fresh."""
+    fetched = git(["fetch", "origin", branch], cwd=root, check=False)
+    if fetched.returncode != 0:
+        raise DocumentError(
+            "fetch-failed",
+            f"origin/{branch} could not be fetched "
+            f"({fetched.stderr.decode(errors='replace').strip()}), so nothing "
+            "about its history can be concluded",
+        )
+    return git_out(["rev-parse", f"{remote_ref(branch)}^{{commit}}"], cwd=root)
+
+
+def interval_commits(root: Path, fresh: str, recorded_tip: str) -> list[str]:
+    """`Anc(F) minus Anc(R)`, oldest first in topological order: every commit
+    reachable from the fetched tip and not from the recorded one, merges and
+    their second parents included, with no path limit and no history
+    simplification. Deterministic, so a choice among equal candidates is stable."""
+    listed = git(
+        ["rev-list", "--topo-order", "--reverse", fresh, f"^{recorded_tip}"],
+        cwd=root, check=False,
+    )
+    if listed.returncode != 0:
+        raise DocumentError(
+            "landing-unverifiable",
+            f"the history between {recorded_tip[:12]} and {fresh[:12]} could not be "
+            "read, so whether the mutation landed cannot be decided",
+        )
+    return listed.stdout.decode().split()
+
+
+def blobs_at(root: Path, commits: list[str], document: str) -> list[str | None]:
+    """The document's blob in each commit, in one process. A commit whose tree
+    does not hold the path yields None; an object that cannot be read raises."""
+    if not commits:
+        return []
+    probe = git(
+        ["cat-file", "--batch-check=%(objecttype)"], cwd=root, check=False,
+        input_bytes="".join(f"{commit}^{{tree}}\n" for commit in commits).encode(),
+    )
+    types = probe.stdout.decode().splitlines()
+    if probe.returncode != 0 or types != ["tree"] * len(commits):
+        raise DocumentError(
+            "landing-unverifiable",
+            "a commit in the publication interval has no readable tree, so "
+            f"whether {document} landed cannot be decided",
+        )
+    named = git(
+        ["cat-file", "--batch-check=%(objectname)"], cwd=root, check=False,
+        input_bytes="".join(f"{commit}:{document}\n" for commit in commits).encode(),
+    )
+    lines = named.stdout.decode().splitlines()
+    if named.returncode != 0 or len(lines) != len(commits):
+        raise DocumentError(
+            "landing-unverifiable",
+            f"the revisions of {document} in the publication interval could not "
+            "all be read",
+        )
+    return [None if line.endswith(" missing") else line for line in lines]
+
+
+def is_shallow(root: Path) -> bool:
+    answer = git(["rev-parse", "--is-shallow-repository"], cwd=root, check=False)
+    return answer.returncode != 0 or answer.stdout.decode().strip() != "false"
 
 
 def receipt_paths(root: Path, commit: str) -> list[str]:
@@ -985,183 +1497,64 @@ def receipt_paths(root: Path, commit: str) -> list[str]:
     return [entry for entry in listing.split("\0") if entry]
 
 
-def find_receipt(root: Path, remote: str, pending: dict) -> str | None:
-    """The commit on `remote`, since the recorded tip, that carries this
-    attempt's marker, or None.
+def receipt_fault(root: Path, commit: str, pending: dict) -> str | None:
+    """Why `commit` is not this attempt's publication, or None. One ordinary
+    (single-parent) commit carrying the exact whole-line trailer and changing
+    exactly the document; a merge carrying a copied trailer is not a receipt."""
+    body = git(["log", "-1", "--format=%P%x1f%B", commit], cwd=root, check=False)
+    if body.returncode != 0:
+        return "the commit cannot be read"
+    parents, _, message = body.stdout.decode(errors="replace").partition("\x1f")
+    if len(parents.split()) != 1:
+        return "it is not a single-parent publication commit"
+    if receipt_line(pending) not in message.splitlines():
+        return "it does not carry this attempt's marker"
+    if receipt_paths(root, commit) != [pending["document"]]:
+        return f"it does not change {pending['document']} alone"
+    return None
 
-    Searched over the complete reachable range, and the marker must be a whole
-    line of the message rather than a substring of one. The oldest match wins: the
-    tool is only invoked while nothing has landed, so a second match could only
-    be a copy of the first.
-    """
-    document = pending["document"]
-    # The whole reachable range, with no path limit: a path-limited log applies
-    # history simplification, and a merge that kept an older copy of the
-    # document through its first parent hides a receipt that is reachable
-    # through its second. The receipt's scope is validated below instead.
+
+def find_receipt(root: Path, fresh: str, pending: dict) -> str | None:
+    """The one commit in the interval carrying this attempt's marker."""
     log = git_out(
-        [
-            "log", "--format=%H%x1f%B%x1e",
-            f"{pending['rendered_tip']}..{remote}",
-        ],
+        ["log", "--format=%H%x1f%B%x1e", "--topo-order", fresh, f"^{pending['rendered_tip']}"],
         cwd=root,
     )
     expected = receipt_line(pending)
-    matches = []
+    marked = []
     for entry in log.split("\x1e"):
         commit, separator, body = entry.strip().partition("\x1f")
         if separator and expected in body.splitlines():
-            matches.append(commit.strip())
-    if not matches:
+            marked.append(commit.strip())
+    if len(marked) > 1:
+        raise DocumentError(
+            "receipt-ambiguous",
+            f"{len(marked)} commits carry this attempt's marker; one attempt has "
+            "one publication, so the history is inconsistent and nothing is "
+            "chosen among them",
+            receipt_commits=marked,
+        )
+    if not marked:
         return None
-    receipt = matches[-1]
-    touched = receipt_paths(root, receipt)
-    if touched != [document]:
+    fault = receipt_fault(root, marked[0], pending)
+    if fault is not None:
         raise DocumentError(
             "receipt-unverifiable",
-            f"the commit {receipt[:12]} carries this attempt's marker but changes "
-            f"{touched} rather than {document} alone, so it is not a publication "
-            "of this document",
-            receipt_commit=receipt,
-            changed_paths=touched,
+            f"the commit {marked[0][:12]} carries this attempt's marker but is not "
+            f"a publication of {pending['document']} ({fault})",
+            receipt_commit=marked[0],
         )
-    return receipt
+    return marked[0]
 
 
-def landing(root: Path, branch: str, pending: dict) -> dict:
-    """Whether the recorded mutation has reached `origin/<branch>`, and the blob
-    that was published when it has.
+def validate_evidence(root: Path, fresh: str, pending: dict, evidence: dict) -> dict:
+    """Hold saved or rediscovered evidence to the recorded publication and to the
+    interval `{R} union (Anc(F) minus Anc(R))`.
 
-    The caller fetches first. Reachability is the whole verdict, and the
-    published blob comes from the receipt commit itself, so a later same-document
-    advance changes neither the answer nor the blob it names.
-    """
-    remote = remote_ref(branch)
-    document = pending["document"]
-    approved = pending["approved_blob"]
-    if pending.get("landing_evidence") is not None:
-        # Verified once, durably recorded, and trusted over the branch's
-        # present shape: a later edit that moves the document away from the
-        # landed bytes does not un-land them.
-        return verified_evidence(root, remote, pending)
-    tip_reachable = is_ancestor(root, pending["rendered_tip"], remote)
-    if pending["form"] == FORM_PUBLISHER:
-        if is_ancestor(root, pending["commit"], remote):
-            return {
-                "landed": True, "via": "recorded-commit", "published_blob": approved,
-                "receipt_commit": pending["commit"],
-            }
-    elif tip_reachable:
-        receipt = find_receipt(root, remote, pending)
-        if receipt is not None:
-            published = blob_at(root, receipt, document)
-            if published is None:
-                raise DocumentError(
-                    "receipt-unverifiable",
-                    f"the receipt commit {receipt[:12]} does not carry {document}",
-                    receipt_commit=receipt,
-                )
-            return {
-                "landed": True, "via": "receipt", "published_blob": published,
-                "receipt_commit": receipt, "evidence_commit": receipt,
-            }
-    # "Nothing to land": the branch carries the approved blob at this path now,
-    # or carried it at the tip the record was made against. The second half is
-    # what keeps the verdict across an interruption: a later edit that moves the
-    # document away from those bytes does not un-establish that the mutation
-    # was already there, and republishing would reinstate it over that edit.
-    for revision in (remote, pending["rendered_tip"]):
-        if tip_reachable or revision == remote:
-            present = blob_at(root, revision, document)
-            if present is not None and present == approved:
-                return {
-                    "landed": True, "via": "already-present", "published_blob": approved,
-                    "receipt_commit": None,
-                    "evidence_commit": git_out(
-                        ["rev-parse", f"{revision}^{{commit}}"], cwd=root
-                    ),
-                }
-    if tip_reachable:
-        # No saved evidence and nothing at the tips: the landing may still have
-        # happened in between and been moved away from since. Recover it from
-        # every commit reachable from `remote` and not from the recorded tip, at
-        # the document's path, with no history simplification. Bounded to what
-        # happened after the record was made, so an old revision that happens
-        # to hold the same bytes is not a landing.
-        seen = revision_carrying(root, remote, pending["rendered_tip"], document, approved)
-        if seen is not None:
-            return {
-                "landed": True, "via": "already-present", "published_blob": approved,
-                "receipt_commit": None, "evidence_commit": seen,
-            }
-    if not tip_reachable:
-        raise DocumentError(
-            "pending-stale",
-            f"the tip this publication of {document} was recorded against "
-            f"({pending['rendered_tip'][:12]}) is not in the history of {remote}, "
-            "so whether it landed cannot be verified; the record is kept",
-            pending_ref=pending["ref"],
-            rendered_tip=pending["rendered_tip"],
-        )
-    return {"landed": False, "via": None, "published_blob": None, "receipt_commit": None}
-
-
-def revision_carrying(
-    root: Path, remote: str, since: str, document: str, blob: str
-) -> str | None:
-    """The oldest commit in `since..remote` whose tree holds `blob` at `document`.
-
-    One `rev-list` and one `cat-file --batch-check`, so the cost does not grow
-    with the number of commits spawned. Anything unreadable raises: a landing
-    that cannot be searched for is undecided, and undecided never publishes.
-    """
-    if "\n" in document:
-        raise DocumentError(
-            "landing-unverifiable",
-            f"{document} has a newline in its name, so its history cannot be searched",
-        )
-    commits = git(["rev-list", f"{since}..{remote}"], cwd=root, check=False)
-    if commits.returncode != 0:
-        raise DocumentError(
-            "landing-unverifiable",
-            f"the history of {remote} since {since[:12]} could not be read, so "
-            f"whether {document} already landed cannot be decided",
-        )
-    listed = commits.stdout.decode().split()
-    if not listed:
-        return None
-    probed = git(
-        ["cat-file", "--batch-check=%(objectname)"],
-        cwd=root, check=False,
-        input_bytes="".join(f"{commit}:{document}\n" for commit in listed).encode(),
-    )
-    if probed.returncode != 0:
-        raise DocumentError(
-            "landing-unverifiable",
-            f"the revisions of {document} on {remote} could not be read, so "
-            "whether it already landed cannot be decided",
-        )
-    found = probed.stdout.decode().splitlines()
-    if len(found) != len(listed):
-        raise DocumentError(
-            "landing-unverifiable",
-            f"the revisions of {document} on {remote} were not all readable",
-        )
-    matches = [commit for commit, name in zip(listed, found) if name == blob]
-    return matches[-1] if matches else None
-
-
-def verified_evidence(root: Path, remote: str, pending: dict) -> dict:
-    """The recorded landing, re-verified against the repository, never against
-    the branch's present content.
-
-    The commit where the approved content was seen must still exist and still
-    be in the history of `remote`, and must still carry the published blob at
-    the document's path. Anything less is unverifiable and stops: evidence that
-    cannot be checked is not evidence, and ignoring it would republish.
-    """
-    evidence = pending["landing_evidence"]
-    document = pending["document"]
+    Saved evidence is a claim, and is checked by exactly the rules rediscovery
+    uses; anything less is unverifiable and stops, and is never discarded to
+    make room for a fallback search."""
+    document, recorded_tip = pending["document"], pending["rendered_tip"]
     commit = evidence["evidence_commit"]
 
     def unverifiable(why: str) -> DocumentError:
@@ -1169,12 +1562,17 @@ def verified_evidence(root: Path, remote: str, pending: dict) -> dict:
             "landing-evidence-unverifiable",
             f"the landing recorded for {document} cannot be trusted ({why}); the "
             "record is kept",
-            pending_ref=pending["ref"],
-            evidence_commit=commit,
+            pending_ref=pending["ref"], evidence_commit=commit,
         )
 
-    # Consistent with the publication it sits in: evidence for some other
-    # mutation, or for another attempt, is not evidence for this one.
+    in_history = git(["cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, check=False)
+    if in_history.returncode != 0 or not is_ancestor(root, commit, fresh):
+        raise unverifiable(f"{commit[:12]} is not in the history of the fetched tip")
+    if commit != recorded_tip and is_ancestor(root, commit, recorded_tip):
+        raise unverifiable(
+            f"{commit[:12]} is at or before the recorded tip, outside the "
+            "publication interval"
+        )
     if evidence["via"] == "already-present":
         if evidence["published_blob"] != pending["approved_blob"]:
             raise unverifiable(
@@ -1184,88 +1582,92 @@ def verified_evidence(root: Path, remote: str, pending: dict) -> dict:
         if evidence.get("receipt_commit") is not None:
             raise unverifiable("an already-present landing has no receipt")
     else:
-        if evidence.get("receipt_commit") != commit:
+        if commit == recorded_tip or evidence.get("receipt_commit") != commit:
             raise unverifiable("its receipt is not the commit it names as evidence")
-        marker = git(["log", "-1", "--format=%B", commit], cwd=root, check=False)
-        if marker.returncode != 0 or receipt_line(pending) not in (
-            marker.stdout.decode(errors="replace").splitlines()
-        ):
-            raise unverifiable("the commit does not carry this attempt's marker")
-        if receipt_paths(root, commit) != [document]:
-            raise unverifiable(f"the commit does not change {document} alone")
-    if (
-        git(["cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, check=False).returncode
-        != 0
-        or not is_ancestor(root, commit, remote)
-        or blob_at(root, commit, document) != evidence["published_blob"]
-    ):
-        raise unverifiable(
-            f"{commit[:12]} is not a revision in the history of {remote} that "
-            "carries the published content"
-        )
+        fault = receipt_fault(root, commit, pending)
+        if fault is not None:
+            raise unverifiable(fault)
+    if blob_at(root, commit, document) != evidence["published_blob"]:
+        raise unverifiable(f"{commit[:12]} does not carry the published content")
     return {
         "landed": True, "via": evidence["via"],
         "published_blob": evidence["published_blob"],
         "receipt_commit": evidence.get("receipt_commit"),
-        "evidence_commit": commit, "recorded": True,
+        "evidence_commit": commit, "fresh_tip": fresh,
     }
 
 
-def record_landing(root: Path, pending: dict, info: dict) -> dict:
-    """Write a verified landing into the pending record before any cleanup.
+def landing(root: Path, branch: str, pending: dict, fresh: str | None = None) -> dict:
+    """Whether the recorded mutation reached `origin/<branch>`, as {landed: True
+    with the evidence} or {landed: False}. Unknown raises.
 
-    The record is rewritten under compare-and-swap against the value just read,
-    keeping its tree (and so the approved bytes) and every field, so an
-    interruption after this point resumes from the evidence and never asks the
-    tool again.
+    The caller's `fresh` (or a fresh fetch) is the one tip used throughout.
+    `R` must exist and be reachable from it before anything is accepted, a
+    current-tip blob match included. Saved evidence takes precedence and is
+    validated, never bypassed; without it the interval is searched in full:
+    a receipt first (it identifies the actual merged publication), then the
+    approved blob at the document's path in any commit of the interval.
     """
-    fields = {
-        "version": PENDING_VERSION,
-        "repository": pending["repository"],
-        "document": pending["document"],
-        "approved_blob": pending["approved_blob"],
-        "baseline": pending["baseline"],
-        "rendered_tip": pending["rendered_tip"],
-        "attempt": pending["attempt"],
-        "message": pending["message"],
-        "landing": {
-            "via": info["via"],
-            "published_blob": info["published_blob"],
-            "receipt_commit": info["receipt_commit"],
-            "evidence_commit": info["evidence_commit"],
-        },
-    }
-    commit = build_pending_commit(root, pending["document"], fields)
-    proc = git(["update-ref", pending["ref"], commit, pending["commit"]], cwd=root, check=False)
-    if proc.returncode != 0:
+    fresh = fresh or fresh_tip(root, branch)
+    document, approved = pending["document"], pending["approved_blob"]
+    recorded_tip = pending["rendered_tip"]
+    if not is_ancestor(root, recorded_tip, fresh):
         raise DocumentError(
-            "pending-changed",
-            f"the pending publication for {pending['document']} changed while its "
-            "landing was being recorded; it was left as it is",
-            pending_ref=pending["ref"],
+            "pending-stale",
+            f"the tip this publication of {document} was recorded against "
+            f"({recorded_tip[:12]}) is not in the history of {remote_ref(branch)}, "
+            "so whether it landed cannot be verified; the record is kept",
+            pending_ref=pending["ref"], rendered_tip=recorded_tip,
         )
-    reread = read_pending(root, pending["repository"], pending["document"])
-    if reread is None or reread["commit"] != commit:
+    if pending.get("landing_evidence") is not None:
+        return validate_evidence(root, fresh, pending, pending["landing_evidence"])
+    commits = interval_commits(root, fresh, recorded_tip)
+    if pending["form"] == FORM_PUBLISHER and pending["commit"] in commits:
+        return {
+            "landed": True, "via": "recorded-commit", "published_blob": approved,
+            "receipt_commit": pending["commit"], "evidence_commit": pending["commit"],
+            "fresh_tip": fresh,
+        }
+    if pending["form"] == FORM_HELPER:
+        receipt = find_receipt(root, fresh, pending)
+        if receipt is not None:
+            published = blob_at(root, receipt, document)
+            return validate_evidence(root, fresh, pending, {
+                "via": "receipt", "published_blob": published,
+                "receipt_commit": receipt, "evidence_commit": receipt,
+            })
+    candidates = [recorded_tip, *commits]
+    for commit, blob in zip(candidates, blobs_at(root, candidates, document)):
+        if blob == approved:
+            return validate_evidence(root, fresh, pending, {
+                "via": "already-present", "published_blob": approved,
+                "receipt_commit": None, "evidence_commit": commit,
+            })
+    if is_shallow(root):
         raise DocumentError(
-            "pending-changed",
-            f"the pending publication for {pending['document']} could not be "
-            "re-read after its landing was recorded",
-            pending_ref=pending["ref"],
+            "landing-unverifiable",
+            f"the history of {remote_ref(branch)} is shallow, so a negative cannot "
+            "be concluded; fetch complete history first",
         )
-    return reread
+    return {"landed": False, "fresh_tip": fresh}
 
 
-def confirm_landing(root: Path, branch: str, pending: dict) -> tuple[dict, dict]:
+def confirm_landing(root: Path, branch: str, pending: dict, fresh: str | None = None):
     """`landing`, and when it finds a landing nothing durable yet records, record
-    it. Returns the (possibly rewritten) pending record and the landing."""
-    info = landing(root, branch, pending)
+    it by compare-and-swap before anything else is done. Returns the (possibly
+    rewritten) pending record and the landing. A failed save raises, keeping the
+    intent: the landing is rediscovered next time by the same rules."""
+    info = landing(root, branch, pending, fresh)
     if (
         info["landed"]
-        and pending["form"] == FORM_HELPER
         and pending.get("landing_evidence") is None
-        and info["via"] in ("receipt", "already-present")
+        and info["via"] != "recorded-commit"
     ):
-        pending = record_landing(root, pending, info)
+        pending = persist_landing(root, pending, branch, {
+            "via": info["via"], "published_blob": info["published_blob"],
+            "receipt_commit": info["receipt_commit"],
+            "evidence_commit": info["evidence_commit"],
+        })
     return pending, info
 
 
@@ -1310,51 +1712,237 @@ def publication_tool() -> dict:
     return {"available": True, "path": path}
 
 
-def run_publication_tool(root: Path, document: str, blob: str, message: str) -> dict:
-    """Run `docs-push --expect <blob> --keep -m <message> <document>` from the
-    write root. The result describes what happened; it does not say whether the
-    document landed."""
-    tool = publication_tool()
-    if not tool["available"]:
-        return {"ran": False} | tool
+def process_identity(pid: int):
+    """{start, args} of the live process `pid`, or None when it does not exist.
+    Anything that cannot be inspected raises: unknown is not gone."""
     try:
         proc = subprocess.run(
-            [tool["path"], "--expect", blob, "--keep", "-m", message, document],
-            cwd=str(root), capture_output=True, timeout=TOOL_TIMEOUT_SECONDS,
+            ["ps", "-o", "lstart=,args=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
+        raise DocumentError(
+            "process-inspection-failed", f"process {pid} could not be inspected ({error})"
+        ) from error
+    output = proc.stdout.strip()
+    if not output:
+        if proc.returncode == 1 and not proc.stderr.strip():
+            return None
+        raise DocumentError(
+            "process-inspection-failed",
+            f"process {pid} could not be inspected (ps exited {proc.returncode})",
+        )
+    start = output[:24].strip()
+    if len(start) < 20:
+        raise DocumentError(
+            "process-inspection-failed", f"process {pid} has no readable start time"
+        )
+    return {"start": start, "args": output[24:].strip()}
+
+
+def child_state(handoff: dict | None) -> str:
+    """'none', 'gone', 'live' or 'unknown' for the tool a handoff started.
+
+    The identity is the pid, the operating-system start time and the exact argv,
+    never the pid alone: a reused pid is a different process, and neither blocks
+    this one nor may be touched. A marker with no child recorded (the crash
+    between spawning and recording it), a changed argv for the same live
+    process, and any failed inspection are unknown, which is not quiescent."""
+    if handoff is None:
+        return "none"
+    if handoff["state"] == "finished":
+        return "gone"
+    child = handoff.get("child")
+    if child is None:
+        return "unknown"
+    try:
+        identity = process_identity(child["pid"])
+    except DocumentError:
+        return "unknown"
+    if identity is None or identity["start"] != child["start"]:
+        return "gone"
+    return "live" if identity["args"] == " ".join(child["argv"]) else "unknown"
+
+
+def parse_json_stream(text: str) -> list:
+    """Every JSON value in `text`, for `gh api --paginate`, which prints one
+    document per page back to back."""
+    decoder, index, found = json.JSONDecoder(), 0, []
+    while index < len(text):
+        if text[index].isspace():
+            index += 1
+            continue
+        value, index = decoder.raw_decode(text, index)
+        found.append(value)
+    return found
+
+
+def gh_json(path: str):
+    gh = shutil.which("gh")
+    if gh is None:
+        raise DocumentError("gh-missing", "gh was not found on PATH")
+    try:
+        proc = subprocess.run(
+            [gh, "api", "--paginate", path], capture_output=True, text=True, timeout=120
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise DocumentError("gh-failed", f"gh api {path} could not be run ({error})") from error
+    if proc.returncode != 0:
+        raise DocumentError(
+            "gh-failed", f"gh api {path} failed: {(proc.stderr or proc.stdout).strip()}"
+        )
+    try:
+        return parse_json_stream(proc.stdout)
+    except ValueError as error:
+        raise DocumentError("gh-failed", f"gh api {path} returned unreadable JSON") from error
+
+
+def retry_gate(repository: str, branch: str) -> dict:
+    """Whether an automatic negative-history retry is permitted (design D-5).
+
+    Only an active, applicable `non_fast_forward` rule on the publication branch,
+    read fresh from GitHub, permits it; readable classic protection that
+    disables force pushes is the alternative. The rule is the gate: bypass
+    actors and the pushing identity's permissions are deliberately not read, an
+    accepted residual risk. A missing, inactive, unreadable or ambiguous answer
+    grants nothing, and an earlier positive answer is never reused.
+    """
+    owner, _, name = repository.partition("/")
+    quoted = urllib.parse.quote(branch, safe="")
+    reasons = []
+    try:
+        pages = gh_json(f"repos/{owner}/{name}/rules/branches/{quoted}")
+        entries = [item for page in pages for item in (page if isinstance(page, list) else [page])]
+        if any(isinstance(item, dict) and item.get("type") == "non_fast_forward" for item in entries):
+            return {"ok": True, "via": "rules"}
+        reasons.append("no active non_fast_forward rule applies to the branch")
+    except DocumentError as error:
+        reasons.append(error.message)
+    try:
+        pages = gh_json(f"repos/{owner}/{name}/branches/{quoted}/protection")
+        protection = pages[0] if pages else None
+        enabled = (protection or {}).get("allow_force_pushes", {}).get("enabled") if isinstance(protection, dict) else None
+        if enabled is False:
+            return {"ok": True, "via": "classic-protection"}
+        reasons.append("classic protection does not explicitly disable force pushes")
+    except DocumentError as error:
+        reasons.append(error.message)
+    return {"ok": False, "reason": "; ".join(reasons)}
+
+
+def run_publication_tool(root: Path, pending: dict, message: str):
+    """Run `docs-push --expect <blob> --keep -m <message> <document>` from the
+    write root, recording the handoff before and during. Returns (result,
+    pending): the result describes what happened and does not say whether the
+    document landed; `pending` is the intent as last rewritten."""
+    tool = publication_tool()
+    if not tool["available"]:
+        return {"ran": False} | tool, pending
+    argv = [
+        tool["path"], "--expect", pending["approved_blob"], "--keep", "-m", message,
+        pending["document"],
+    ]
+    # Marker first: once it is written the tool may run, whatever happens next.
+    pending = persist_handoff(root, pending, {
+        "state": "marker", "host": socket.gethostname(), "argv": argv,
+        "child": None, "result": None,
+    })
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except OSError as error:
+        pending = persist_handoff(root, pending, dict(
+            pending["handoff"], state="finished", result={"returncode": None}
+        ))
         return {
             "ran": False, "path": tool["path"], "reason": "tool-failed",
-            "message": f"{TOOL} could not be run to completion: {error}",
-        }
-    output = (proc.stdout + proc.stderr).decode(errors="replace").strip()
+            "message": f"{TOOL} could not be started: {error}",
+        }, pending
+    try:
+        identity = process_identity(proc.pid)
+        if identity is not None:
+            pending = persist_handoff(root, pending, dict(
+                pending["handoff"], state="running",
+                child={"pid": proc.pid, "start": identity["start"], "argv": argv},
+            ))
+    except DocumentError:
+        # The child is running and its identity is unrecorded: the marker
+        # stays, and a later retry is blocked until the operator establishes
+        # quiescence. This run still waits for it.
+        pass
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=TOOL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        stdout, stderr = proc.communicate()
+    pending = persist_handoff(root, pending, dict(
+        pending["handoff"], state="finished",
+        result={"returncode": None if timed_out else proc.returncode},
+    ))
+    output = (stdout + stderr).decode(errors="replace").strip()
+    if timed_out:
+        return {
+            "ran": False, "path": tool["path"], "reason": "tool-failed",
+            "message": f"{TOOL} did not finish within {TOOL_TIMEOUT_SECONDS}s and was stopped",
+        }, pending
     return {
-        "ran": True, "path": tool["path"], "returncode": proc.returncode,
-        "message": output,
-    }
+        "ran": True, "path": tool["path"], "returncode": proc.returncode, "message": output,
+    }, pending
 
 
 # ----------------------------------------------------------------- outcomes --
 
 
 def document_state(root: Path, document: str) -> dict:
+    try:
+        state, blob = file_state(root / document)
+    except DocumentError:
+        state, blob = "unreadable", None
     return {
         "document_edit": {
-            "exists": (root / document).is_file(),
-            "write_root": str(root),
-            "path": document,
-            "blob": working_blob(root, document),
+            "exists": state == "file", "state": state, "write_root": str(root),
+            "path": document, "blob": blob,
         }
     }
 
 
 def incomplete(
-    root: Path, owner: str, branch: str, document: str, pending: dict, tool: dict,
-    *, reachable: bool | None, landing_error: str | None = None,
+    root: Path, owner: str, branch: str, pending: dict, *, reason: str, message: str,
+    next_action: str, tool: dict | None = None, reachable: bool | None = False,
+    landing_error: str | None = None,
 ) -> dict:
-    """The approved content is applied and recorded and the tool did not land
-    it. Reported as an outcome, with the tool's own words, and nothing more is
-    attempted."""
+    """The approved content is applied and recorded and the publication did not
+    complete. Reported as an outcome with the exact reason, the tool's own words
+    when it spoke, and the next safe action; nothing more is attempted."""
+    tool = tool or {}
+    return {
+        "status": "incomplete-publication",
+        "reason": reason,
+        "message": message,
+        "next_action": next_action,
+        "tool": {
+            "path": tool.get("path"), "ran": tool.get("ran", False),
+            "returncode": tool.get("returncode"),
+        },
+        "landing_error": landing_error,
+        "repository": owner,
+        "branch": branch,
+        "document": pending["document"],
+        "publication_tip": pending["rendered_tip"],
+        "approved_blob": pending["approved_blob"],
+        "published_blob": None,
+        "pending_ref": pending["ref"],
+        "pending_commit": pending["commit"],
+        "applied_ref": applied_ref(owner, pending["document"]),
+        "remote_branch": remote_ref(branch),
+        "remote_contains_commit": reachable,
+    } | document_state(root, pending["document"])
+
+
+def tool_incomplete(root, owner, branch, pending, tool, *, reachable=False, landing_error=None):
     if not tool.get("ran"):
         reason = tool.get("reason", "tool-failed")
     elif tool.get("returncode") != 0:
@@ -1363,51 +1951,62 @@ def incomplete(
         reason = "landing-unverifiable"
     else:
         reason = "tool-reported-success-without-landing"
-    return {
-        "status": "incomplete-publication",
-        "reason": reason,
-        "message": tool.get("message") or landing_error or "",
-        "tool": {
-            "path": tool.get("path"), "ran": tool.get("ran", False),
-            "returncode": tool.get("returncode"),
-        },
-        "landing_error": landing_error,
-        "repository": owner,
-        "branch": branch,
-        "document": document,
-        "publication_tip": pending["rendered_tip"],
-        "approved_blob": pending["approved_blob"],
-        "published_blob": None,
-        "pending_ref": pending["ref"],
-        "pending_commit": pending["commit"],
-        "applied_ref": applied_ref(owner, document),
-        "remote_branch": remote_ref(branch),
-        "remote_contains_commit": reachable,
-        "resolution": (
-            "the approved content is applied to the write root and its records "
-            "are kept; nothing was published and nothing was pushed by other "
-            f"means. Fix what {TOOL} reported and re-run this module with the "
-            "same content (or --resume) to retry, or land the document through "
-            "its owner's own lane"
+    if landing_error is not None:
+        message = "publication outcome unknown: " + landing_error + (
+            f" (tool said: {tool['message']})" if tool.get("message") else ""
+        )
+    else:
+        message = tool.get("message") or ""
+    return incomplete(
+        root, owner, branch, pending, reason=reason, message=message, tool=tool,
+        reachable=reachable, landing_error=landing_error,
+        next_action=(
+            f"the approved content and its intent are kept; fix what {TOOL} "
+            "reported and re-run with the same content (or --resume). A retry "
+            "after a handoff also needs the exact child gone and an affirmative "
+            "non_fast_forward rule on the branch"
         ),
-    } | document_state(root, document)
+    )
+
+
+def delete_ref(root: Path, ref: str, expected: str) -> bool:
+    """CAS-delete, then trust only a read-back: a failed command whose effect
+    landed is success, and a successful one that left the ref is not."""
+    git(["update-ref", "-d", ref, expected], cwd=root, check=False)
+    return read_ref(root, ref) == ""
 
 
 def settle_landed(
     root: Path, owner: str, branch: str, document: str, pending: dict, info: dict
 ) -> dict:
-    """Drop the records of a publication that is verified to have landed, but
-    only from a write root that still holds what was published.
+    """Clean up a publication that is verified to have landed, but only from a
+    write root that still holds what was published, with nothing unresolved.
 
     Reachability is settled by now. What is not settled is the write root: the
     tool's `--keep` leaves the merged copy there, and an outside process can
-    change or stage the document between that and this call. Clearing the
-    record then would leave the divergence with nothing pointing at it.
+    change or stage the document between that and this call. The applied record
+    goes first, then the intent, so a crash cannot leave an applied-only record
+    of a new-format attempt; the lock is released by the caller.
     """
     published = info["published_blob"]
-    if working_blob(root, document) != published or staged_blob(
+    if pending["capture"] is not None:
+        raise DocumentError(
+            "capture-unresolved",
+            f"{document} landed, but a capture of the document is unresolved; the "
+            "record is kept",
+            pending_ref=pending["ref"],
+        )
+    if child_state(pending["handoff"]) in ("live", "unknown"):
+        raise DocumentError(
+            "tool-child-not-quiescent",
+            f"{document} landed, but the tool's child process is not known to have "
+            "exited; the record is kept",
+            pending_ref=pending["ref"],
+        )
+    state, blob = file_state(root / document)
+    if state != "file" or blob != published or staged_blob(root, document) != head_blob(
         root, document
-    ) != head_blob(root, document):
+    ):
         raise DocumentError(
             "landed-but-divergent",
             f"{document} reached {branch}, but the write root no longer holds the "
@@ -1421,38 +2020,28 @@ def settle_landed(
             pending_commit=pending["commit"],
         )
     cleared = {"applied": "absent"}
-    applied = read_applied(root, owner, document)
+    applied = validate_applied(root, owner, document)
     if applied is not None:
         if applied == pending["approved_blob"]:
-            proc = git(
-                ["update-ref", "-d", applied_ref(owner, document), applied],
-                cwd=root, check=False,
-            )
-            if proc.returncode != 0:
+            if not delete_ref(root, applied_ref(owner, document), applied):
                 raise DocumentError(
                     "record-retained",
                     f"{document} reached {branch}, but its applied record could "
                     "not be cleared; the next run's preflight will report it",
-                    remote_contains_commit=True,
-                    published_blob=published,
-                    applied_ref=applied_ref(owner, document),
-                    pending_ref=pending["ref"],
+                    remote_contains_commit=True, published_blob=published,
+                    applied_ref=applied_ref(owner, document), pending_ref=pending["ref"],
                 )
             cleared["applied"] = "cleared"
         else:
             cleared["applied"] = "kept: it names other content"
-    proc = git(
-        ["update-ref", "-d", pending["ref"], pending["commit"]], cwd=root, check=False
-    )
-    if proc.returncode != 0:
+    if not delete_ref(root, pending["ref"], pending["commit"]):
         raise DocumentError(
             "record-retained",
             f"{document} reached {branch}, but its pending record could not be "
-            "cleared; the next run's preflight will stop until it is resolved",
-            remote_contains_commit=True,
-            published_blob=published,
-            pending_ref=pending["ref"],
-            pending_commit=pending["commit"],
+            "cleared (or changed concurrently); the next run's preflight will "
+            "stop until it is resolved",
+            remote_contains_commit=True, published_blob=published,
+            pending_ref=pending["ref"], pending_commit=pending["commit"],
         )
     cleared["pending"] = "cleared"
     return cleared
@@ -1471,10 +2060,13 @@ def published_outcome(
         "approved_blob": pending["approved_blob"],
         "published_blob": info["published_blob"],
         # `docs-push` merges three ways, so the two legitimately differ; the
-        # result reports both rather than requiring them equal.
+        # result reports both rather than requiring them equal. Historically
+        # landed is not the same as present at today's tip.
         "merged": info["published_blob"] != pending["approved_blob"],
         "landed_via": info["via"],
         "receipt_commit": info["receipt_commit"],
+        "evidence_commit": info["evidence_commit"],
+        "current_branch_blob": blob_at(root, remote_ref(branch), document),
         "remote_contains_commit": True,
         "resumed": resumed,
         "records": cleared,
@@ -1492,9 +2084,9 @@ def published_outcome(
 
 def publish_recorded(
     root: Path, owner: str, branch: str, document: str, pending: dict,
-    *, resumed: str | None,
+    *, resumed: str | None, operator_quiescent: bool = False,
 ) -> dict:
-    """The record exists and the document holds the approved blob: land it, or
+    """The intent exists and the document holds the approved blob: land it, or
     recognize that it already landed."""
     pending, info = confirm_landing(root, branch, pending)
     if info["landed"]:
@@ -1507,22 +2099,51 @@ def publish_recorded(
     # already holding the approved bytes, and an index entry staged since then
     # is work the tool's settling and the cleanup below would carry or lose.
     require_unstaged(root, document)
+    state, blob = file_state(root / document)
+    if state != "file" or blob != pending["approved_blob"]:
+        raise DocumentError(
+            "document-not-applied",
+            f"{document} does not hold the approved content, so it is not handed "
+            "to the tool",
+            working_blob=blob,
+        )
+    if pending["handoff"] is not None:
+        # A retry: the tool already ran (or may have) and nothing landed.
+        children = child_state(pending["handoff"])
+        if children == "live" or (children == "unknown" and not operator_quiescent):
+            return incomplete(
+                root, owner, branch, pending, reason="tool-child-not-quiescent",
+                message=f"the earlier {TOOL} child is {children}; a second tool "
+                "cannot be started beside it",
+                next_action="establish that the recorded child has exited (a reused "
+                "pid is not the child), then resume; --operator-quiescent confirms "
+                "it when the identity was never recorded",
+                reachable=None,
+            )
+        gate = retry_gate(owner, branch)
+        if not gate["ok"]:
+            return incomplete(
+                root, owner, branch, pending, reason="retry-gate-unsatisfied",
+                message=gate["reason"],
+                next_action="reconcile by hand: negative history alone does not "
+                "authorize a retry, and nothing was published by other means",
+                reachable=None,
+            )
     base = pending["message"] or default_message(document)
-    tool = run_publication_tool(
-        root, document, pending["approved_blob"], f"{base}\n\n{receipt_line(pending)}"
+    tool, pending = run_publication_tool(
+        root, pending, f"{base}\n\n{receipt_line(pending)}"
     )
     try:
-        git(["fetch", "origin", branch], cwd=root)
         pending, info = confirm_landing(root, branch, pending)
     except DocumentError as error:
-        # The push may have succeeded. The record is what a later run verifies
+        # The push may have succeeded. The intent is what a later run verifies
         # against, so it stays and the outcome says the answer is unknown.
-        return incomplete(
-            root, owner, branch, document, pending, tool, reachable=None,
+        return tool_incomplete(
+            root, owner, branch, pending, tool, reachable=None,
             landing_error=error.message,
         )
     if not info["landed"]:
-        return incomplete(root, owner, branch, document, pending, tool, reachable=False)
+        return tool_incomplete(root, owner, branch, pending, tool)
     cleared = settle_landed(root, owner, branch, document, pending, info)
     return published_outcome(
         root, owner, branch, document, pending, info, cleared,
@@ -1530,75 +2151,21 @@ def publish_recorded(
     )
 
 
-def validate_applied(root: Path, owner: str, document: str) -> str | None:
-    """The applied record, when there is one and it is usable.
-
-    A record names a blob of applied content. One naming anything else is
-    reported and left exactly where it is: replacing it would destroy the only
-    evidence of what wrote it, and clearing it later would do so silently.
-    """
-    ref = applied_ref(owner, document)
-    recorded = read_ref(root, ref)
-    if not recorded:
-        return None
-    kind = git(["cat-file", "-t", recorded], cwd=root, check=False)
-    if kind.stdout.decode().strip() != "blob":
-        raise DocumentError(
-            "applied-malformed",
-            f"the applied record {ref} names {recorded}, which is not a blob of "
-            "applied content; it cannot be interpreted and is left as it is "
-            "until it is resolved by hand",
-            applied_ref=ref,
-            applied_object=recorded,
-        )
-    return recorded
-
-
-def record_applied_content(root: Path, owner: str, document: str, blob: str) -> str:
-    if read_applied(root, owner, document) == blob:
-        return "recorded"
-    return "recorded" if record_applied(root, owner, document, blob) else "unrecorded"
-
-
-def upgrade_publisher_record(
-    root: Path, owner: str, document: str, pending: dict, message: str
-) -> dict:
-    """Re-seat the publisher's commit-shaped record as this module's own, so the
-    resumption has an attempt to mark. Bound to the value just read: a record
-    that changed in between is reported, not overwritten."""
-    fields = new_pending_fields(
-        owner, document, pending["approved_blob"],
-        blob_at(root, pending["rendered_tip"], document), pending["rendered_tip"],
-        message,
-    )
-    commit = build_pending_commit(root, document, fields)
-    proc = git(
-        ["update-ref", pending["ref"], commit, pending["commit"]], cwd=root, check=False
-    )
-    if proc.returncode != 0:
-        raise DocumentError(
-            "pending-changed",
-            f"the pending publication for {document} changed while it was being "
-            "resumed; it was left as it is",
-            pending_ref=pending["ref"],
-        )
-    reread = read_pending(root, owner, document)
-    if reread is None or reread["commit"] != commit:
-        raise DocumentError(
-            "pending-changed",
-            f"the pending publication for {document} could not be re-read after "
-            "it was resumed",
-            pending_ref=pending["ref"],
-        )
-    return reread
-
-
 def resume_pending(
     root: Path, owner: str, branch: str, document: str, pending: dict,
-    approved_blob: str, content: bytes, message: str,
+    approved_blob: str, content: bytes, message: str, operator_quiescent: bool,
 ) -> dict:
     """An earlier run recorded a mutation of this document. Finish it, or stop
     with a report: never write something else over it."""
+    if pending["branch"] not in (None, branch):
+        raise DocumentError(
+            "branch-mismatch",
+            f"the pending publication was recorded for {pending['branch']}, not "
+            f"{branch}; it was left as it is",
+            pending_ref=pending["ref"],
+        )
+    if pending["capture"] is not None:
+        pending = recover_capture(root, pending)
     pending, info = confirm_landing(root, branch, pending)
     if pending["approved_blob"] != approved_blob:
         # The caller is approving a different disposition from the one the
@@ -1623,7 +2190,7 @@ def resume_pending(
             root, owner, branch, document, pending, info, cleared,
             resumed="already-landed", tool=None,
         )
-    current = working_blob(root, document)
+    state, current = file_state(root / document)
     resumed = "applied"
     if current != approved_blob:
         baseline = (
@@ -1631,7 +2198,7 @@ def resume_pending(
             if pending["form"] == FORM_HELPER
             else blob_at(root, pending["rendered_tip"], document)
         )
-        if baseline is None or current != baseline:
+        if state != "file" or baseline is None or current != baseline:
             raise DocumentError(
                 "document-not-baseline",
                 f"{document} is neither the baseline the pending publication was "
@@ -1643,27 +2210,30 @@ def resume_pending(
                 pending_ref=pending["ref"],
                 pending_commit=pending["commit"],
                 preserved_blob=_preserve(root, (root / document).read_bytes())
-                if (root / document).is_file()
+                if state == "file"
                 else None,
             )
-        require_unstaged(root, document)
-        verify_and_write(root, document, baseline, content)
+    if pending["version"] != PENDING_VERSION or pending["form"] == FORM_PUBLISHER:
+        # Validated first, migrated second, and only when something is about to
+        # be written: an unusable situation leaves the original record exactly
+        # as it was. The original stays rooted in the replacement.
+        pending = rewrite_pending(root, pending, branch=branch, root_id=root)
+    if current != approved_blob:
+        pending = apply_over_baseline(root, pending, content)
         resumed = "applied-on-resume"
-    if pending["form"] == FORM_PUBLISHER:
-        pending = upgrade_publisher_record(root, owner, document, pending, message)
-        resumed = f"{resumed}; publisher record re-seated"
-    record_applied_content(root, owner, document, approved_blob)
+    record_applied_content(root, owner, pending)
     return publish_recorded(
-        root, owner, branch, document, pending, resumed=f"resumed: {resumed}"
+        root, owner, branch, document, pending, resumed=f"resumed: {resumed}",
+        operator_quiescent=operator_quiescent,
     )
 
 
 def start_fresh(
     root: Path, owner: str, branch: str, tip: str, document: str, approved_blob: str,
     content: bytes, message: str, expected_working_copy: str | None,
-    expected_tip: str | None,
+    expected_tip: str | None, operator_quiescent: bool,
 ) -> dict:
-    """No record exists: bind the content to its baseline, record the intent,
+    """No intent exists: bind the content to its baseline, record the intent,
     replace the document, record the application, then publish."""
     if not expected_working_copy:
         # Not optional, and absent does not mean "skip the check": a caller that
@@ -1675,20 +2245,22 @@ def start_fresh(
             "preflight reported, so the approved content is written only over the "
             "bytes it was rendered from",
         )
-    current = working_blob(root, document)
-    if current is None:
+    state, current = file_state(root / document)
+    if state == "absent":
         raise DocumentError(
             "no-baseline",
             f"{document} does not exist under {root}; this module never creates a "
             "document, so nothing was written",
         )
-    if current != expected_working_copy:
+    if state != "file" or current != expected_working_copy:
         raise DocumentError(
             "document-changed-before-write",
             f"{document} is no longer the content the preflight observed "
-            f"({expected_working_copy[:12]}, now {current[:12]}); nothing was "
-            "written and nothing was published",
-            preserved_blob=_preserve(root, (root / document).read_bytes()),
+            f"({expected_working_copy[:12]}, now {(current or state)[:12]}); nothing "
+            "was written and nothing was published",
+            preserved_blob=_preserve(root, (root / document).read_bytes())
+            if state == "file"
+            else None,
         )
     require_unstaged(root, document)
     if approved_blob == current:
@@ -1700,11 +2272,9 @@ def start_fresh(
     rendered_tip = tip
     if expected_tip is not None:
         if (
-            git(
-                ["cat-file", "-e", f"{expected_tip}^{{commit}}"], cwd=root, check=False
-            ).returncode
+            git(["cat-file", "-e", f"{expected_tip}^{{commit}}"], cwd=root, check=False).returncode
             != 0
-            or not is_ancestor(root, expected_tip, remote_ref(branch))
+            or not is_ancestor(root, expected_tip, tip)
         ):
             raise DocumentError(
                 "tip-unverifiable",
@@ -1714,44 +2284,67 @@ def start_fresh(
                 expected_tip=expected_tip,
             )
         rendered_tip = expected_tip
-    fields = new_pending_fields(
-        owner, document, approved_blob, current, rendered_tip, message
-    )
-    commit = build_pending_commit(root, document, fields)
-    ref = pending_ref(owner, document)
-    # Recoverable intent first, create-only: from here an interruption at any
-    # point leaves a record whose tree retains the approved bytes.
-    if git(["update-ref", ref, commit, ""], cwd=root, check=False).returncode != 0:
+    # The baseline must be an object before a record can root it; a novel
+    # document was never hashed into the object database.
+    if _preserve(root, (root / document).read_bytes()) != current:
         raise DocumentError(
-            "pending-exists",
-            f"a pending publication appeared for {document} while this run held "
-            "its lock; it was left as it is",
-            pending_ref=ref,
+            "document-changed-before-write",
+            f"{document} changed while its baseline was being recorded; nothing "
+            "was moved or written",
         )
-    try:
-        verify_and_write(root, document, current, content)
-    except DocumentError:
-        # Nothing was applied, so no obligation exists. When the document is
-        # the approved content (an unmodelled failure after the swap) the record
-        # is exactly what recovery needs and stays.
-        if working_blob(root, document) != approved_blob:
-            git(["update-ref", "-d", ref, commit], cwd=root, check=False)
-        raise
+    payloads = {"approved": approved_blob, "baseline": current}
+    predecessor = validate_applied(root, owner, document)
+    if predecessor is not None and predecessor != approved_blob:
+        payloads["predecessor"] = predecessor
+    fields = new_pending_fields(
+        owner, branch, document, approved_blob, current, rendered_tip, message, root
+    )
+    # The initial intent, created absent-only: from here every error keeps it.
+    pending = create_pending(root, owner, fields, payloads)
+    pending = apply_over_baseline(root, pending, content)
+    applied = record_applied_content(root, owner, pending)
+    outcome = publish_recorded(
+        root, owner, branch, document, pending, resumed=None,
+        operator_quiescent=operator_quiescent,
+    )
+    return outcome | {"applied_record": applied, "write_outcome": "applied-over-baseline"}
+
+
+def abandon_intent(root: Path, owner: str, document: str) -> dict:
+    """Explicit operator recovery: set aside an intent whose content has been
+    accounted for. Refused while a capture is unresolved or a tool was ever
+    handed the document; the record is moved to an abandoned reference (which
+    keeps every rooted payload), never simply deleted."""
     pending = read_pending(root, owner, document)
     if pending is None:
         raise DocumentError(
-            "pending-changed", f"the pending record for {document} vanished", pending_ref=ref
+            "no-pending-publication", f"no pending publication is recorded for {document}"
         )
-    applied = record_applied_content(root, owner, document, approved_blob)
-    outcome = publish_recorded(root, owner, branch, document, pending, resumed=None)
-    return outcome | {"applied_record": applied, "write_outcome": "applied-over-baseline"}
+    if pending["capture"] is not None or pending["handoff"] is not None:
+        raise DocumentError(
+            "abandon-refused",
+            "an intent with an unresolved capture or a tool handoff is not "
+            "abandoned: settle the capture and establish what landed first",
+            pending_ref=pending["ref"],
+        )
+    kept = ABANDONED_NAMESPACE + "/" + pending["ref"].rsplit("/", 1)[1]
+    git(["update-ref", kept, pending["commit"]], cwd=root)
+    if not delete_ref(root, pending["ref"], pending["commit"]):
+        raise DocumentError(
+            "record-retained", "the intent could not be set aside", pending_ref=pending["ref"]
+        )
+    return {
+        "status": "abandoned", "document": document, "abandoned_ref": kept,
+        "approved_blob": pending["approved_blob"], "baseline": pending["baseline"],
+    }
 
 
 def locked_sequence(
     *, root: Path, owner: str, branch: str, tip: str, document: str,
     content: bytes | None, message: str | None, expected_working_copy: str | None,
-    expected_tip: str | None,
+    expected_tip: str | None, operator_quiescent: bool,
 ) -> dict:
+    check_supported_name(document)
     pending = read_pending(root, owner, document)
     validate_applied(root, owner, document)
     if content is None:
@@ -1764,9 +2357,7 @@ def locked_sequence(
             )
         # The record's tree retains the approved bytes; resuming needs nothing
         # from the caller.
-        content = git(
-            ["cat-file", "blob", pending["approved_blob"]], cwd=root
-        ).stdout
+        content = git(["cat-file", "blob", pending["approved_blob"]], cwd=root).stdout
     approved_blob = git_blob_hash(content)
     # The bytes go into the object database before anything else can fail, so a
     # refusal below does not lose the approved mutation.
@@ -1782,11 +2373,12 @@ def locked_sequence(
     )
     if pending is not None:
         return resume_pending(
-            root, owner, branch, document, pending, approved_blob, content, message
+            root, owner, branch, document, pending, approved_blob, content, message,
+            operator_quiescent,
         )
     return start_fresh(
         root, owner, branch, tip, document, approved_blob, content, message,
-        expected_working_copy, expected_tip,
+        expected_working_copy, expected_tip, operator_quiescent,
     )
 
 
@@ -1804,6 +2396,7 @@ def apply_and_publish(
     *, repository: str, branch: str, root: Path, document: str,
     content: bytes | None, message: str | None = None,
     expected_working_copy: str | None = None, expected_tip: str | None = None,
+    operator_quiescent: bool = False,
 ) -> dict:
     """Apply one approved mutation and publish it through `docs-push`, or report
     why it was not published. `content=None` resumes the recorded mutation.
@@ -1815,8 +2408,7 @@ def apply_and_publish(
     try:
         resolved = resolve_write_root(root)
         owner = verify_owner(resolved, repository)
-        git(["fetch", "origin", branch], cwd=resolved)
-        tip = git_out(["rev-parse", remote_ref(branch)], cwd=resolved)
+        tip = fresh_tip(resolved, branch)
         lock = lock_ref(owner, document)
         held = acquire_lock(resolved, lock, tip, owner, document)
         try:
@@ -1824,6 +2416,7 @@ def apply_and_publish(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message,
                 expected_working_copy=expected_working_copy, expected_tip=expected_tip,
+                operator_quiescent=operator_quiescent,
             )
         except BaseException as error:
             # The lock must come off for anything that leaves this block,
@@ -1864,6 +2457,25 @@ def apply_and_publish(
         raise error
 
 
+def clear_stale_lock_checked(root: Path, repository: str, document: str) -> dict:
+    """`clear_stale_lock`, refused while the tool's child may still be running: a
+    dead helper alone does not prove its publication child has stopped."""
+    resolved = resolve_write_root(root)
+    owner = verify_owner(resolved, repository)
+    try:
+        pending = read_pending(resolved, owner, document)
+    except DocumentError:
+        pending = None
+    if pending is not None and child_state(pending["handoff"]) in ("live", "unknown"):
+        raise DocumentError(
+            "lock-child-not-quiescent",
+            "the tool's child process is not known to have exited, so the lock "
+            "stays; establish quiescence first",
+            pending_ref=pending["ref"],
+        )
+    return clear_stale_lock(resolved, lock_ref(owner, document))
+
+
 # ---------------------------------------------------------------- preflight --
 
 
@@ -1872,11 +2484,10 @@ def tracker_transaction_module():
 
     A plain `import` would need `tools/` on `sys.path`, which it is when this
     module runs as a script from the repository and is not when a bundled copy
-    runs from a plugin install. The dependency is one-way: that module never
-    loads this one, so two independently invocable tools do not become
-    mutually dependent, at the cost of each keeping its own copy of the
-    (repository, document) digest. tools/test_approved_document.py pins them
-    equal.
+    runs from a plugin install. That module loads this one only on its local
+    resolution path, which this module never reaches, so the two loads do not
+    recur. tools/test_approved_document.py pins the shared (repository,
+    document) digest equal.
     """
     source = Path(__file__).resolve().parent / "tracker_transaction.py"
     try:
@@ -1899,15 +2510,39 @@ def tracker_transaction_module():
     return module
 
 
+def orphan_captures(root: Path, document: str, record: dict | None) -> list[str]:
+    """Populated capture directories beside the document that no intent names.
+
+    A leftover from a record that predates the descriptor (or a deleted one) is
+    custody of a real file nobody is tracking: it is reported for manual
+    binding or restoration, never guessed to belong to a new approval and never
+    deleted. An empty reservation is harmless and is not reported."""
+    owned = None
+    if record is not None and record.get("capture"):
+        owned = record["capture"]["directory"]
+    found = []
+    try:
+        for entry in sorted((root / document).parent.glob(".kanban-attempt-*")):
+            if entry.name == owned or entry.is_symlink() or not entry.is_dir():
+                continue
+            files = sorted(child.name for child in entry.iterdir())
+            if files:
+                found.append(str(entry))
+    except OSError:
+        return [str((root / document).parent / ".kanban-attempt-*") + " (unreadable)"]
+    return found
+
+
 def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
     """Whether an earlier approved mutation of this document is outstanding —
     its publication, its tracker mutations, or both.
 
     Callers mutate the tracker before they publish, so this has to be askable
-    before they do. It writes nothing and takes no lock. `status` is exactly
-    `clear` or `pending`, `publication_tip` is the freshly fetched tip, and
-    `working_copy_blob` is the baseline the caller passes back as
-    `--expected-working-copy`.
+    before they do. It repairs nothing and takes no lock (its fetch is the one
+    Git update it makes); the mutating entry point revalidates under the lock.
+    `status` is exactly `clear` or `pending`, `publication_tip` is the freshly
+    fetched tip, and `working_copy_blob` is the baseline the caller passes back
+    as `--expected-working-copy`. Unknown is reported as null, never as false.
 
     A tool or module that cannot be read fails closed, with the records already
     read attached: the caller's reason for asking is whether it may mutate the
@@ -1916,6 +2551,7 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
+    check_supported_name(document)
     pending_name = pending_ref(owner, document)
     module = tracker_transaction_module()
     try:
@@ -1925,76 +2561,107 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
             "status": "outstanding",
             "message": getattr(error, "message", str(error)),
         } | module.observed_report(resolved, module.transaction_ref(owner, document))
-    record, record_fault = None, None
+    record, fault = None, None
     try:
         record = read_pending(resolved, owner, document)
         validate_applied(resolved, owner, document)
     except DocumentError as error:
-        record_fault = error
+        fault = error
     kinds = []
-    if record is not None or record_fault is not None:
+    if record is not None or fault is not None:
         kinds.append("publication")
     if tracker["status"] != "clear":
         kinds.append("tracker-transaction")
+    orphans = orphan_captures(resolved, document, record)
+    if orphans:
+        kinds.append("capture")
     try:
         # Not check=False: the tip this returns becomes the caller's binding,
         # and one minted from a stale cached ref reads as current.
-        git(["fetch", "origin", branch], cwd=resolved)
-        observed_tip = git_out(["rev-parse", remote_ref(branch)], cwd=resolved)
+        fresh = fresh_tip(resolved, branch)
+        try:
+            working = file_state(resolved / document)[1]
+        except DocumentError as error:
+            working, fault = None, fault or error
         outcome = {
             "status": "pending" if kinds else "clear",
             "document": document,
             "pending_ref": pending_name,
-            "publication_tip": observed_tip,
-            "working_copy_blob": working_blob(resolved, document),
+            "publication_tip": fresh,
+            "working_copy_blob": working,
             "pending_kinds": kinds,
             "tracker_transaction": tracker,
+            "orphan_captures": orphans,
         }
-        if record_fault is not None:
+        if fault is not None:
             outcome |= {
                 "pending_commit": read_ref(resolved, pending_name),
-                "record_fault": {
-                    "status": record_fault.status, "message": record_fault.message,
-                },
+                "record_fault": {"status": fault.status, "message": fault.message},
+                "already_landed": None,
                 "resolution": (
-                    f"{record_fault.message}. Stop: no further disposition of this "
+                    f"{fault.message}. Stop: no further disposition of this "
                     "document is permitted until the record is resolved by hand"
                 ),
             }
         elif record is not None:
+            landed, info, landing_fault = None, None, None
             try:
-                info = landing(resolved, branch, record)
-                fault = None
+                info = landing(resolved, branch, record, fresh)
+                landed = info["landed"]
             except DocumentError as error:
-                info, fault = None, error
-            landed = None if info is None else info["landed"]
+                landing_fault = error
             outcome |= {
                 "pending_commit": record["commit"],
                 "record_form": record["form"],
+                "record_version": record["version"],
                 "recorded_blob": record["approved_blob"],
                 "already_landed": landed,
-                "published_blob": None if info is None else info["published_blob"],
-                "applied_blob": read_applied(resolved, owner, document),
+                "published_blob": None if not info or not landed else info["published_blob"],
+                "evidence": None if not info or not landed else {
+                    "via": info["via"], "commit": info["evidence_commit"],
+                },
+                "applied_blob": read_ref(resolved, applied_ref(owner, document)) or None,
+                "handoff": None if record["handoff"] is None else {
+                    "state": record["handoff"]["state"],
+                    "child": child_state(record["handoff"]),
+                },
                 "resolution": (
                     "the recorded publication reached the branch; run --resume to "
                     "verify it and clear the record"
                     if landed
-                    else f"{fault.message}. Stop: resolve the record by hand"
-                    if fault is not None
+                    else f"{landing_fault.message}. Stop: resolve the record by hand"
+                    if landing_fault is not None
                     else "run --resume to retry the recorded publication through "
-                    f"{TOOL}, or clear the record deliberately; do not approve a "
-                    "different disposition for this document first"
+                    f"{TOOL}, or set the intent aside with --abandon-intent; do not "
+                    "approve a different disposition for this document first"
                 ),
             }
-            if fault is not None:
+            if record["capture"] is not None:
+                try:
+                    seen = inspect_capture(resolved, record)
+                    outcome["capture"] = {
+                        "aside": str(seen["aside_path"]),
+                        "states": {
+                            "aside": seen["aside"][0], "scratch": seen["scratch"][0],
+                            "target": seen["target"][0],
+                        },
+                    }
+                except DocumentError as error:
+                    outcome["capture"] = {"fault": error.message}
+                outcome["resolution"] = (
+                    "an interrupted capture of the document is recorded; run "
+                    "--resume to settle it from what is on disk"
+                )
+            if landing_fault is not None:
                 outcome["record_fault"] = {
-                    "status": fault.status, "message": fault.message,
+                    "status": landing_fault.status, "message": landing_fault.message,
                 }
     except Exception as error:  # noqa: BLE001 - the report survives the failure
         if not isinstance(error, DocumentError):
             error = DocumentError("internal-error", f"{type(error).__name__}: {error}")
         error.detail.setdefault("pending_kinds", kinds)
         error.detail.setdefault("tracker_transaction", tracker)
+        error.detail.setdefault("already_landed", None)
         raise error
     tool = publication_tool()
     outcome["publication_tool"] = tool
@@ -2039,6 +2706,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="finish the recorded mutation from its retained content",
     )
+    parser.add_argument(
+        "--operator-quiescent",
+        action="store_true",
+        help="the operator has established that no earlier tool child is running "
+        "(for a handoff whose child identity was never recorded)",
+    )
+    parser.add_argument(
+        "--abandon-intent",
+        action="store_true",
+        help="set aside an intent whose content has been accounted for",
+    )
     parser.add_argument("--clear-stale-lock", action="store_true")
     parser.add_argument(
         "--new-content-file",
@@ -2056,6 +2734,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.new_content_file:
             root = resolve_write_root(args.root)
             verify_owner(root, args.repo)
+            check_supported_name(args.path)
             print(new_content_file(root, args.path))
             return 0
         if not args.branch:
@@ -2067,16 +2746,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
             return 0 if outcome["status"] == "clear" else 1
         if args.clear_stale_lock:
+            if args.operator_quiescent:
+                root = resolve_write_root(args.root)
+                owner = verify_owner(root, args.repo)
+                outcome = clear_stale_lock(root, lock_ref(owner, args.path))
+            else:
+                outcome = clear_stale_lock_checked(args.root, args.repo, args.path)
+        elif args.abandon_intent:
             root = resolve_write_root(args.root)
-            owner = verify_owner(root, args.repo)
-            outcome = clear_stale_lock(root, lock_ref(owner, args.path))
+            outcome = abandon_intent(root, verify_owner(root, args.repo), args.path)
         else:
             content = None
             if not args.resume:
                 if args.content is None:
                     parser.error(
-                        "--content is required unless --resume or "
-                        "--clear-stale-lock is given"
+                        "--content is required unless --resume, --abandon-intent "
+                        "or --clear-stale-lock is given"
                     )
                 try:
                     content = args.content.read_bytes()
@@ -2095,6 +2780,7 @@ def main(argv: list[str] | None = None) -> int:
                 message=args.message,
                 expected_working_copy=args.expected_working_copy or None,
                 expected_tip=args.expected_tip or None,
+                operator_quiescent=args.operator_quiescent,
             )
     except Exception as error:  # noqa: BLE001 - the boundary is the point
         if not isinstance(error, DocumentError):
@@ -2111,7 +2797,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 1
     print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
-    return 0 if outcome.get("status") in ("published", "cleared", "no-lock") else 1
+    return 0 if outcome.get("status") in ("published", "cleared", "no-lock", "abandoned") else 1
 
 
 if __name__ == "__main__":

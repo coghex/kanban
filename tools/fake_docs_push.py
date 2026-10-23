@@ -32,6 +32,7 @@ behavior beyond a clean landing:
     pushed-but-failed          publishes, then exits 2 with an error
     racing-edit                the file changes before the tool reads it
     dies-before-keep           publishes, then stops before `--keep` settles the file
+    hang                       never returns (the caller's timeout must stop it)
     lacks-expect, lacks-keep   `--help` omits that flag
 """
 
@@ -96,6 +97,10 @@ def main(args):
         print("docs-push: --expect takes exactly one path to land", file=sys.stderr)
         return 2
     path = paths[0]
+    if MODE == "hang":
+        import time
+        time.sleep(120)
+        return 0
     if MODE == "refuse":
         print(f"docs-push: {path}: counts as code (docs/*.md: tests read it); "
               "use a pull request", file=sys.stderr)

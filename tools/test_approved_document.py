@@ -95,6 +95,39 @@ def blob_of(text: str) -> str:
     return approved.git_blob_hash(text.encode())
 
 
+
+FAKE_GH = r"""
+import json, os, sys
+mode = os.environ.get("FAKE_GH_MODE", "rules")
+log = os.environ.get("FAKE_GH_LOG")
+args = sys.argv[1:]
+if log:
+    with open(log, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(args) + "\n")
+path = args[-1]
+if mode == "error" or path.startswith("-"):
+    print("HTTP 403: forbidden", file=sys.stderr)
+    sys.exit(1)
+if "/rules/branches/" in path:
+    if mode == "rules":
+        # two pages back to back, the rule on the second, as --paginate prints them
+        print(json.dumps([{"type": "deletion"}]))
+        print(json.dumps([{"type": "non_fast_forward"}]))
+    elif mode in ("no-rule", "classic-ok", "classic-open"):
+        print(json.dumps([{"type": "deletion"}]))
+    sys.exit(0)
+if "/protection" in path:
+    if mode == "classic-ok":
+        print(json.dumps({"allow_force_pushes": {"enabled": False}}))
+        sys.exit(0)
+    if mode == "classic-open":
+        print(json.dumps({"allow_force_pushes": {"enabled": True}}))
+        sys.exit(0)
+    print("HTTP 404", file=sys.stderr)
+    sys.exit(1)
+sys.exit(1)
+"""
+
 class SimulatedCrash(BaseException):
     """A process dying between two steps: not an Exception, so nothing in the
     helper that catches Exception can mistake it for an outcome."""
@@ -224,6 +257,8 @@ class ApprovedFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
                 "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                 "FAKE_DOCS_PUSH_LOG": str(self.log_path),
                 "FAKE_DOCS_PUSH_MODE": "land",
+                "FAKE_GH_MODE": "rules",
+                "FAKE_GH_LOG": str(self.bin / "gh-calls.jsonl"),
                 # The real tool's configuration is never read: pointed nowhere,
                 # and the fake does not read it either.
                 "DOCS_PUSH_CONFIG": str(self.bin / "no-such-config.json"),
@@ -237,6 +272,15 @@ class ApprovedFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
         source = (TOOLS / "fake_docs_push.py").read_text(encoding="utf-8")
         target.write_text(f"#!{sys.executable}\n" + source.split("\n", 1)[1], encoding="utf-8")
         target.chmod(0o755)
+        gh = self.bin / "gh"
+        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
+        gh.chmod(0o755)
+        self.gh_log = self.bin / "gh-calls.jsonl"
+
+    def gh_calls(self):
+        if not self.gh_log.exists():
+            return []
+        return [json.loads(line) for line in self.gh_log.read_text().splitlines()]
 
     def mode(self, name):
         os.environ["FAKE_DOCS_PUSH_MODE"] = name
@@ -673,9 +717,21 @@ class WriteProtocolTests(ApprovedFixture):
         self.assertTrue(error.detail["restored"])
         self.assertEqual(self.fx.read(self.fx.work), outside)
         self.assertEqual(error.detail["preserved_blob"], blob_of(outside))
-        # Nothing was applied, so no obligation is left behind.
-        self.assertIsNone(self.fx.pending())
+        # The intent is kept on every error once it is durable, with the captured
+        # edit rooted in it and the custody directory gone.
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(record["payloads"]["captured"], blob_of(outside))
+        self.assertIsNone(record["capture"])
+        self.assertEqual(sorted((self.fx.work / "docs").glob(".kanban-attempt-*")), [])
         self.assertIsNone(self.fx.applied())
+        # It cannot be resumed over the outside edit; the operator sets it aside
+        # explicitly, which keeps everything it rooted, and a new approval works.
+        self.assertEqual(self.failure(self.resume).status, "document-not-baseline")
+        code, outcome = self.cli("--branch", "master", "--abandon-intent")
+        self.assertEqual((code, outcome["status"]), (0, "abandoned"))
+        self.assertIsNotNone(self.fx.ref(outcome["abandoned_ref"]))
+        self.assertIsNone(self.fx.pending())
+        self.assertEqual(self.approve(EDITED)["status"], "published")
 
     def test_a_write_that_lost_a_race_leaves_the_winner_in_place(self):
         winner = "# the winner\n"
@@ -776,7 +832,93 @@ class WriteProtocolTests(ApprovedFixture):
         self.assertEqual(run(["git", "ls-files", "--stage"], work), index)
 
 
-class InterruptionTests(ApprovedFixture):
+class RecordSeedingMixin:
+    """Plant the records a run could have left, by the same means the helper
+    and the publisher use, so the cases below start from a state those tools
+    really produce rather than from one a test invented."""
+
+    def helper_record(self, *, document=DOC, text=EDITED, baseline=None, **overrides):
+        """The helper's own version-2 intent, as a run that died right after
+        creating it leaves it: the approved bytes and the baseline rooted, the
+        document untouched."""
+        root = self.fx.work
+        stored = approved._preserve(root, text.encode())
+        base = baseline or approved.working_blob(root, document)
+        fields = approved.new_pending_fields(
+            REPOSITORY, "master", document, stored, base, self.fx.origin_tip(),
+            approved.default_message(document), root,
+        )
+        fields.update(overrides)
+        payloads = {"approved": stored, "baseline": base}
+        commit = approved.build_pending_commit(root, fields, payloads)
+        run(["git", "update-ref", approved.pending_ref(REPOSITORY, document), commit], root)
+        return commit
+
+    def reseed(self, record, **changes):
+        """The same intent with fields replaced outright, bypassing the
+        helper's own compare-and-swap, to plant what a damaged repository
+        could hold."""
+        fields = {
+            "version": 2, "repository": record["repository"], "branch": record["branch"],
+            "document": record["document"], "attempt": record["attempt"],
+            "root": record["root"], "baseline": record["baseline"],
+            "approved_blob": record["approved_blob"], "rendered_tip": record["rendered_tip"],
+            "message": record["message"], "capture": record["capture"],
+            "handoff": record["handoff"], "landing": record["landing_evidence"],
+        }
+        fields.update(changes)
+        payloads = dict(record["payloads"])
+        commit = approved.build_pending_commit(self.fx.work, fields, payloads)
+        run(["git", "update-ref", record["ref"], commit], self.fx.work)
+        return commit
+
+    def v1_record(self, *, document=DOC, text=EDITED, **overrides):
+        """The paused branch's version-1 record: the document rooted at its own
+        path, no branch, root, capture or handoff."""
+        root = self.fx.work
+        stored = approved._preserve(root, text.encode())
+        fields = {
+            "version": 1, "repository": REPOSITORY, "document": document,
+            "approved_blob": stored, "baseline": approved.working_blob(root, document),
+            "rendered_tip": self.fx.origin_tip(), "attempt": os.urandom(16).hex(),
+            "message": approved.default_message(document),
+        }
+        fields.update(overrides)
+        return self.raw_record(approved.PENDING_SUBJECT, json.dumps(fields), document=document, text=text)
+
+    def raw_record(self, subject, body, *, document=DOC, text=EDITED):
+        """A record under the given subject with a body of the test's choosing,
+        whose tree holds the document at its own path (the v1 / publisher shape)."""
+        root = self.fx.work
+        stored = approved._preserve(root, text.encode())
+        tree = run(
+            ["git", "mktree"], root,
+            input=f"100644 blob {stored}\t{document.split('/')[-1]}\n",
+        )
+        if "/" in document:
+            tree = run(
+                ["git", "mktree"], root,
+                input=f"040000 tree {tree}\t{document.split('/')[0]}\n",
+            )
+        commit = run(["git", "commit-tree", tree, "-m", f"{subject}\n\n{body}\n"], root)
+        run(["git", "update-ref", approved.pending_ref(REPOSITORY, document), commit], root)
+        return commit
+
+    def publisher_record(self, text=EDITED, *, land=False, document=DOC):
+        """The publisher's commit-shaped record, built the way it builds one: a
+        child of the tip whose tree differs from the tip's by the one document."""
+        root = self.fx.work
+        tip = self.fx.origin_tip()
+        stored = approved._preserve(root, text.encode())
+        commit = publisher.build_commit(root, tip, document, stored, "docs: publisher commit")
+        run(["git", "update-ref", publisher.pending_ref(REPOSITORY, document), commit], root)
+        if land:
+            run(["git", "push", "-q", "origin", f"{commit}:refs/heads/master"], root)
+            run(["git", "fetch", "-q", "origin", "master"], root)
+        return commit
+
+
+class InterruptionTests(RecordSeedingMixin, ApprovedFixture):
     """Requirement 5: a run that dies at any point leaves a record the next run
     resumes through the tool, or reconciles as already landed, without writing
     twice, pushing twice or repeating a tracker mutation."""
@@ -811,6 +953,8 @@ class InterruptionTests(ApprovedFixture):
                 "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                 "FAKE_DOCS_PUSH_LOG": str(self.log_path),
                 "FAKE_DOCS_PUSH_MODE": os.environ.get("FAKE_DOCS_PUSH_MODE", "land"),
+                "FAKE_GH_MODE": "rules",
+                "FAKE_GH_LOG": str(self.bin / "gh-calls.jsonl"),
                 "DOCS_PUSH_CONFIG": str(self.bin / "no-such-config.json"),
             },
         )
@@ -818,7 +962,7 @@ class InterruptionTests(ApprovedFixture):
         self.addCleanup(patcher.stop)
 
     def test_dying_before_application_resumes_by_applying_then_publishing(self):
-        self.die("verify_and_write")
+        self.die("apply_over_baseline")
         self.assertEqual(self.fx.read(self.fx.work), NOTES)
         self.assertIsNotNone(self.fx.pending())
         self.assertIsNone(self.fx.applied())
@@ -835,7 +979,7 @@ class InterruptionTests(ApprovedFixture):
         self.assertEqual(len(self.calls()), 1)
 
     def test_resuming_needs_no_content_because_the_record_retains_it(self):
-        self.die("verify_and_write")
+        self.die("apply_over_baseline")
         outcome = self.resume()
         self.assertEqual(outcome["status"], "published")
         self.assertEqual(self.fx.origin_text(), EDITED.rstrip("\n"))
@@ -1041,14 +1185,19 @@ class InterruptionTests(ApprovedFixture):
         self.assert_recovered_without_the_tool(1)
 
     def test_a_failed_evidence_write_does_not_lose_a_noop_landing(self):
-        def failing(root, pending, info):
-            raise approved.DocumentError("pending-changed", "the write failed")
+        real = approved.rewrite_pending
+
+        def failing(root, pending, **changes):
+            if "landing" in changes:
+                raise approved.DocumentError("pending-changed", "the write failed")
+            return real(root, pending, **changes)
 
         self.concurrent_publication()
-        with unittest.mock.patch.object(approved, "record_landing", failing):
+        with unittest.mock.patch.object(approved, "rewrite_pending", failing):
             outcome = self.approve(EDITED)
         self.assertEqual(outcome["status"], "incomplete-publication")
         self.assertEqual(outcome["reason"], "landing-unverifiable")
+        self.assertIn("publication outcome unknown", outcome["message"])
         self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["landing_evidence"])
         unittest.mock.patch.stopall()
         self.setUpEnvironment()
@@ -1096,14 +1245,7 @@ class InterruptionTests(ApprovedFixture):
         mode = "land"
         for name, evidence in cases:
             with self.subTest(case=name):
-                fields = {
-                    "version": 1, "repository": REPOSITORY, "document": DOC,
-                    "approved_blob": record["approved_blob"], "baseline": record["baseline"],
-                    "rendered_tip": record["rendered_tip"], "attempt": record["attempt"],
-                    "message": record["message"], "landing": evidence,
-                }
-                commit = approved.build_pending_commit(self.fx.work, DOC, fields)
-                run(["git", "update-ref", record["ref"], commit], self.fx.work)
+                commit = self.reseed(record, landing=evidence)
                 calls = len(self.calls())
                 self.fx.write(self.fx.work, EDITED)
                 report = self.preflight()
@@ -1116,6 +1258,33 @@ class InterruptionTests(ApprovedFixture):
                 self.assertEqual(self.fx.applied(), blob_of(EDITED))
                 self.assertEqual(len(self.calls()), calls)
                 self.assertEqual(self.fx.read(self.fx.work), EDITED)
+
+    def test_saved_evidence_older_than_the_recorded_tip_is_never_trusted(self):
+        # PR #836 round 8. The approved bytes existed on the branch before this
+        # attempt and were since reverted; evidence pointing at that older
+        # occurrence is outside the publication interval, so it neither lands
+        # the mutation nor is replaced by a fallback search.
+        self.fx.upstream_edit(EDITED)
+        older = self.fx.origin_tip()
+        self.revert_document()
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        baseline = approved.working_blob(self.fx.work, DOC)
+        self.mode("refuse")
+        self.approve(EDITED, baseline=baseline)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertNotEqual(record["rendered_tip"], older)
+        commit = self.reseed(record, landing={
+            "via": "already-present", "published_blob": record["approved_blob"],
+            "receipt_commit": None, "evidence_commit": older,
+        })
+        calls = len(self.calls())
+        self.mode("land")
+        error = self.failure(self.resume)
+        self.assertEqual(error.status, "landing-evidence-unverifiable")
+        self.assertIn("outside the publication interval", error.message)
+        self.assertEqual(self.fx.pending(), commit)
+        self.assertEqual(len(self.calls()), calls)
+        self.assertEqual(self.fx.read(self.fx.work), EDITED)
 
     def test_a_receipt_landing_is_recorded_before_cleanup(self):
         self.die("settle_landed")
@@ -1136,14 +1305,7 @@ class InterruptionTests(ApprovedFixture):
              "landing-evidence-unverifiable"),
         ):
             with self.subTest(case=name):
-                fields = {
-                    "version": 1, "repository": REPOSITORY, "document": DOC,
-                    "approved_blob": record["approved_blob"], "baseline": record["baseline"],
-                    "rendered_tip": record["rendered_tip"], "attempt": record["attempt"],
-                    "message": record["message"], "landing": evidence,
-                }
-                commit = approved.build_pending_commit(self.fx.work, DOC, fields)
-                run(["git", "update-ref", record["ref"], commit], self.fx.work)
+                commit = self.reseed(record, landing=evidence)
                 calls = len(self.calls())
                 report = self.preflight()
                 self.assertEqual(report["status"], "pending")
@@ -1330,57 +1492,6 @@ class InterruptionTests(ApprovedFixture):
 
 
 
-class RecordSeedingMixin:
-    """Plant the records a run could have left, by the same means the helper
-    and the publisher use, so the cases below start from a state those tools
-    really produce rather than from one a test invented."""
-
-    def helper_record(self, *, document=DOC, text=EDITED, baseline=None, **overrides):
-        """The helper's own pending record, as a run that died before
-        replacing the document leaves it."""
-        root = self.fx.work
-        stored = approved._preserve(root, text.encode())
-        fields = approved.new_pending_fields(
-            REPOSITORY, document, stored,
-            baseline or approved.working_blob(root, document),
-            self.fx.origin_tip(), approved.default_message(document),
-        )
-        fields.update(overrides)
-        commit = approved.build_pending_commit(root, document, fields)
-        run(["git", "update-ref", approved.pending_ref(REPOSITORY, document), commit], root)
-        return commit
-
-    def raw_record(self, subject, body, *, document=DOC, text=EDITED):
-        """A record under the helper's subject with a body of the test's choosing."""
-        root = self.fx.work
-        stored = approved._preserve(root, text.encode())
-        tree = run(
-            ["git", "mktree"], root,
-            input=f"100644 blob {stored}\t{document.split('/')[-1]}\n",
-        )
-        if "/" in document:
-            tree = run(
-                ["git", "mktree"], root,
-                input=f"040000 tree {tree}\t{document.split('/')[0]}\n",
-            )
-        commit = run(["git", "commit-tree", tree, "-m", f"{subject}\n\n{body}\n"], root)
-        run(["git", "update-ref", approved.pending_ref(REPOSITORY, document), commit], root)
-        return commit
-
-    def publisher_record(self, text=EDITED, *, land=False, document=DOC):
-        """The publisher's commit-shaped record, built the way it builds one: a
-        child of the tip whose tree differs from the tip's by the one document."""
-        root = self.fx.work
-        tip = self.fx.origin_tip()
-        stored = approved._preserve(root, text.encode())
-        commit = publisher.build_commit(root, tip, document, stored, "docs: publisher commit")
-        run(["git", "update-ref", publisher.pending_ref(REPOSITORY, document), commit], root)
-        if land:
-            run(["git", "push", "-q", "origin", f"{commit}:refs/heads/master"], root)
-            run(["git", "fetch", "-q", "origin", "master"], root)
-        return commit
-
-
 class ReceiptBindingTests(RecordSeedingMixin, ApprovedFixture):
     """A landing is bound to the recorded document and attempt, never to bytes
     two documents can share."""
@@ -1449,7 +1560,7 @@ class ReceiptBindingTests(RecordSeedingMixin, ApprovedFixture):
         run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
         error = self.failure(self.resume)
         self.assertEqual(error.status, "receipt-unverifiable")
-        self.assertEqual(error.detail["changed_paths"], sorted([DOC, OTHER]))
+        self.assertIn("does not change", error.message)
         self.assertIsNotNone(self.fx.pending())
 
     def test_a_tip_that_left_the_branch_history_cannot_verify_a_landing(self):
@@ -1504,8 +1615,8 @@ class InvalidRecordTests(RecordSeedingMixin, ApprovedFixture):
 
     def test_a_record_whose_tree_does_not_hold_its_approved_blob_is_malformed(self):
         fields = approved.new_pending_fields(
-            REPOSITORY, DOC, blob_of("something else\n"), blob_of(NOTES),
-            self.fx.origin_tip(), "m",
+            REPOSITORY, "master", DOC, blob_of("something else\n"), blob_of(NOTES),
+            self.fx.origin_tip(), "m", self.fx.work,
         )
         self.raw_record(approved.PENDING_SUBJECT, json.dumps(fields))
         self.assertEqual(
@@ -1514,7 +1625,8 @@ class InvalidRecordTests(RecordSeedingMixin, ApprovedFixture):
 
     def test_a_record_keyed_under_another_document_is_malformed(self):
         fields = approved.new_pending_fields(
-            REPOSITORY, OTHER, blob_of(EDITED), blob_of(NOTES), self.fx.origin_tip(), "m",
+            REPOSITORY, "master", OTHER, blob_of(EDITED), blob_of(NOTES),
+            self.fx.origin_tip(), "m", self.fx.work,
         )
         self.raw_record(approved.PENDING_SUBJECT, json.dumps(fields))
         report = self.preflight_report()
@@ -1582,7 +1694,6 @@ class LegacyRecordTests(RecordSeedingMixin, ApprovedFixture):
         self.assertFalse(report["already_landed"])
         outcome = self.resume()
         self.assertEqual(outcome["status"], "published")
-        self.assertIn("publisher record re-seated", outcome["resumed"])
         self.assertEqual(self.fx.origin_blob(), blob_of(EDITED))
         self.assertIsNone(self.fx.pending())
         self.assertEqual(len(self.calls()), 1)
@@ -1645,7 +1756,6 @@ class LegacyRecordTests(RecordSeedingMixin, ApprovedFixture):
         report = publisher.check_pending(self.fx.work, REPOSITORY, "master", DOC)
         self.assertEqual(report["status"], "pending")
         self.assertIn("publication", report["pending_kinds"])
-        self.assertEqual(report["recorded_blob"], blob_of(EDITED))
 
     def test_a_local_checkpoint_cannot_hide_the_helpers_outstanding_publication(self):
         # The tracker resolves against the locally applied document, and says
@@ -1763,7 +1873,7 @@ class ReviewRegressionTests(RecordSeedingMixin, ApprovedFixture):
         self.assertEqual(outcome["landed_via"], "receipt")
 
 
-class LocalCheckpointTests(ApprovedFixture):
+class LocalCheckpointTests(RecordSeedingMixin, ApprovedFixture):
     """The tracker half resolves against what the helper applied and recorded,
     and says it is not published."""
 
@@ -1864,7 +1974,7 @@ class LocalCheckpointTests(ApprovedFixture):
         with self.assertRaises(tracker.TransactionError) as caught:
             self.resolve_local(ref)
         self.assertEqual(caught.exception.status, "local-resolution-refused")
-        self.assertIn("already carried the applied content", caught.exception.message)
+        self.assertIn("landed on master", caught.exception.message)
         self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
         with self.assertRaises(tracker.TransactionError) as caught:
             tracker.action_resolve(
@@ -1914,12 +2024,7 @@ class LocalCheckpointTests(ApprovedFixture):
 
     def helper_replacement_for(self, record, rendered_tip):
         """The same record, now naming a tip outside the branch's history."""
-        fields = approved.new_pending_fields(
-            REPOSITORY, DOC, record["approved_blob"], record["baseline"],
-            rendered_tip, "m",
-        )
-        commit = approved.build_pending_commit(self.fx.work, DOC, fields)
-        run(["git", "update-ref", record["ref"], commit], self.fx.work)
+        self.reseed(record, rendered_tip=rendered_tip)
 
     def test_a_legacy_applied_only_landing_behind_a_merge_resolves_on_the_branch_only(self):
         # PR #836 round 4. The publisher applied the disposition locally and

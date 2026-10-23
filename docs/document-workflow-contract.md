@@ -933,115 +933,110 @@ defect this rule exists to have caught.
 mechanism. It is added by issue #830 (slice B of #775: A → B → C → D), changes no
 asset, and leaves the publisher in place and working; slice C points the
 processing, drafting and note-problem assets at it and deletes the publisher,
-and slice D retires the §7 lane. It owns, and only owns:
+and slice D retires the §7 lane. Its recovery contract — states, interruption
+points, evidence rules — is `docs/designs/approved_document_recovery_design.md`,
+and every `T-NN` row of that design is a named regression in
+`tools/test_approved_document_faults.py`. It owns, and only owns:
 
-1. **Approved-content application.** The caller supplies the complete approved
-   document through a scratch path the helper mints (`--new-content-file`); it
-   never supplies a pre-edited file. The helper binds the content to the verified
-   repository (the write root's own `origin`, never the argument), the
-   repository-relative path, the baseline the caller's preflight observed
-   (`working_copy_blob`, passed back as `--expected-working-copy`) and the exact
+1. **Approved-content application with custody.** The caller supplies the
+   complete approved document through a scratch path the helper mints
+   (`--new-content-file`) and keeps it until the intent below is durable. The
+   helper binds the content to the verified repository (the write root's own
+   `origin`, never the argument), the path, the baseline the preflight observed
+   (`working_copy_blob`, passed back as `--expected-working-copy`) and the
    approved blob, and replaces the document only while it still holds those
-   baseline bytes. The replacement is the publisher's capture-and-refuse
-   protocol and not a read followed by a write: an outside edit is preserved in
-   the object database and put back, a staged target is refused, and a write
-   that lost a race leaves the winner in place. The write root is the owning
-   repository's current isolated worktree; `docs-wip` is neither required nor
-   selected, and the helper never checks out, resets, switches or stages
-   anything.
+   baseline bytes. The replacement keeps custody at every step: a capture
+   descriptor (an exclusively reserved directory beside the document, its
+   scratch and aside files, the worktree) is persisted and read back before the
+   document moves; custody begins at the rename, before any read; files are
+   installed and restored by exclusive link only; and a captured file is
+   unlinked only after its restoration or its retention is verified. An outside
+   edit captured in the swap is rooted in the intent and put back; a writer who
+   recreated the document in the gap keeps their file. A file that cannot be read
+   is neither absent nor empty. The write root is the owning repository's
+   current isolated worktree; `docs-wip` is neither required nor selected, and
+   the helper never checks out, resets, switches or stages anything.
 2. **Per-document serialization.** One lock per (repository, document), keyed by
-   the same digest as the publisher's, so the two exclude each other.
-3. **The pending and applied records**, in the publisher's own namespaces with
-   the same key: `refs/kanban/pending-publication/<key>` and
-   `refs/kanban/applied-locally/<key>`. The pending record is a parentless
-   commit whose tree holds the document at the approved blob and whose message
-   carries the repository, document, baseline, approved blob, the tip it was
-   rendered against and a fresh attempt identifier, so the approved bytes are
-   retained by object reachability and not by a name in metadata. It is written
-   before the document is replaced. The applied record is a blob reference
-   naming the exact content written. The helper reads both record forms: its
-   own, and the publisher's commit-shaped one, which it resumes by re-seating it
-   as its own under compare-and-swap.
+   the publisher's own digest, so the two exclude each other. A lock whose owner
+   is dead is cleared only when the tool's child is also known to have exited.
+3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
+   parentless version-2 commit: the repository, branch, path, attempt id, write
+   root, baseline `B`, approved blob `A`, the tip `R` it was prepared against, the
+   capture descriptor, the tool handoff and any landing evidence travel in its
+   message, and its tree roots `A`, `B`, any captured foreign edit and any
+   predecessor under a fixed internal directory, so the bytes are retained by
+   reachability. It is created absent-only before the document is touched,
+   rewritten and deleted only by compare-and-swap with a read-back, and never
+   discarded because something later failed. `refs/kanban/applied-locally/<key>`
+   is the blob the protocol applied, never proof of publication. The helper also
+   reads the paused branch's version-1 record and the publisher's commit-shaped
+   one, validating first and migrating only when something is about to be
+   written, with the original rooted in the replacement. An operator sets an
+   intent aside with `--abandon-intent`, which refuses while a capture is
+   unresolved or a tool ever had the document and moves the record to
+   `refs/kanban/abandoned-publication/<key>`, never deleting what it rooted.
 4. **The preflight** (`--check-pending`), which keeps the publisher's contract:
    `status` is `clear` or `pending`; `publication_tip` is a freshly fetched tip;
    `working_copy_blob`, `pending_kinds` and the `tracker_transaction` report are
    present; and it stops a run that has a pending publication or an unresolved
-   tracker transaction before any further tracker mutation. A tracker module
-   that cannot be read, or a publication tool that is missing or lacks `--expect`
-   or `--keep`, fails the preflight closed with the records already read
-   attached, because learning that nothing can land the document after the first
-   irreversible tracker step is the failure the preflight exists to prevent.
+   tracker transaction before any further tracker mutation. It adds the capture,
+   handoff and evidence state, reports unknown as null and never as false, and
+   fails closed (with the records already read attached) on an unreadable
+   tracker module or a publication tool that is missing or lacks `--expect` or
+   `--keep`.
 5. **The one call to `docs-push`**, from the write root, naming that one path:
-   `docs-push --expect <approved_blob> --keep -m <message> <document>`. The
-   commit message carries a trailer naming the repository, document, approved
-   blob and attempt. A missing tool, a tool lacking either flag, a refusal (a path
-   the tool's configuration lists as code), a conflict, or a file changed
-   between the write and `--expect` is an **`incomplete-publication`** outcome
-   carrying the tool's exact message. The helper never falls back to a raw
-   `git push` or another publisher, never retries by other means, and leaves the
-   approved content and its records in place.
+   `docs-push --expect <approved_blob> --keep -m <message> <document>`, with a
+   trailer in the message naming the repository, document, approved blob and
+   attempt. A handoff marker is persisted before the spawn, then the child's
+   pid, operating-system start time and exact argv; quiescence means that exact
+   identity no longer exists (a reused pid with another start time is not the
+   child; a missing identity, a changed argv or a failed inspection is
+   unknown). A missing tool, a tool lacking either flag, a refusal, a conflict, or
+   a file changed between the write and `--expect` is an
+   **`incomplete-publication`** outcome carrying the tool's exact message and the
+   next safe action. The helper never falls back to a raw `git push` or another
+   publisher.
 
-**Receipts decide landing, never output.** After the call the helper fetches
-`origin/<default>` and decides "published" from reachability alone: a commit
-carrying this attempt's trailer, touching only this document, lies in the history
-since the recorded tip; or the default branch already carries the approved blob
-at this path (the tool's "nothing to land"). A trailer for another attempt or
-another document, or the same bytes at another path, is not a landing. The
-published blob is the receipt commit's own blob for the document, not a later
-tip's, so a same-document advance after the push changes neither the verdict nor
-the blob. Misleading output in either direction decides nothing.
+**Landing is decided by evidence, in the interval from the recorded tip.** After
+a successful fetch of `origin/<default>`, with that commit object name used
+throughout, a mutation has landed only if valid evidence lies in
+`I(R, F) = {R} ∪ (Anc(F) ∖ Anc(R))`, inspected over every commit in the range —
+merges and their second parents included, with no path limit and no first-parent
+filter: a receipt (a single-parent commit with the exact whole-line trailer,
+changing exactly the document, whose tree holds the published blob `M`, which
+may differ from `A` after a three-way merge) or the approved blob at the
+document's path in a commit of the interval. `R` must exist and be reachable
+from `F` before anything is accepted. Saved evidence is validated by the same
+rules, takes precedence, and stops the run when invalid — it is never discarded
+to enable a search; without saved evidence the complete interval is searched
+and the finding is saved by compare-and-swap before any cleanup. Several
+receipts for one attempt are an inconsistency, not a choice. A shallow history,
+a missing object or any unreadable step is *unknown*, and unknown never
+publishes. The tool's output decides nothing, and "historically landed" is
+reported apart from the current branch blob.
 
-**A verified landing is retained, and the record is trusted over history.** The
-first time a landing is verified (a receipt, or the approved bytes already on the
-default branch, whether at the fresh tip or at the tip the record was made
-against), the helper writes that evidence into the pending record — how it was
-established and the commit where the content was seen — under compare-and-swap
-and before any cleanup. Resume, the preflight and the tracker's local-resolution
-check then trust the record, re-verifying only that the named commit is still in
-the history of `origin/<default>` and still carries the published blob. A later
-edit that moves the document away from the landed bytes, however it arrives,
-cannot make a resume run `docs-push` again for a mutation already known to have
-landed. Evidence is also held to the publication it sits in: an already-present landing
-must name the approved blob, and a receipt must be this attempt's own marked
-commit changing the document alone. Evidence that is malformed, inconsistent with
-its record, or names a revision that is gone or no longer
-carries the content, stops with a specific report and keeps the record.
-
-**When no evidence was saved, history is the fallback.** An interruption before
-the landing check, a failed fetch after the tool, or a failed evidence write
-leaves a record with no saved evidence. The helper then searches every commit
-reachable from `origin/<default>` and not from the recorded tip, at the
-document's path and with no history simplification, for the approved blob, and
-treats a hit as the landing; the saved record stays the fast path and history is
-consulted only without it. The search is bounded to what happened after the
-record was made, so an older revision that merely holds the same bytes is not a
-landing, and a history that cannot be read is undecided and never publishes. Clearing the
-pending record requires the write root to still hold the published blob; when it
-does not, the record stays and the outcome is `landed-but-divergent`.
-
-**Recovery points.** An interruption (a) before application, (b) after
-application and before the tool, (c) after publication and before cleanup —
-including after a successful three-way merge — or (d) between a tracker
-checkpoint and its resolution, each resumes the recorded mutation through
-`docs-push`, or reconciles content that already landed, without writing twice,
-pushing twice or repeating a confirmed tracker mutation. `--resume` finishes the
-recorded mutation from its retained content, and re-running with the same
-content does the same. A record that is stale (its tip left the branch's
-history), changed (the document is neither the baseline nor the approved
-content), malformed or unverifiable stops with a specific report; the helper
-never ignores or deletes one to proceed, and a different disposition is refused
-until the recorded one is resolved.
+**An automatic retry is gated on a rule.** After a handoff that did not land, a
+retry needs the earlier child to be gone and a fresh, affirmative
+`non_fast_forward` rule on the publication branch
+(`GET /repos/{owner}/{repo}/rules/branches/{branch}`, branch URL-encoded, all
+pages read), or readable classic protection with `allow_force_pushes.enabled`
+false. The rule is the gate: bypass actors are not read and the pushing
+identity's permissions are not proven — an accepted residual risk, so an
+administrator can still erase an unsaved landing. A missing, inactive,
+unreadable or ambiguous answer stops for operator reconciliation, an earlier
+positive is never reused, and a positive landing reconciles with no gate.
 
 **Shipped as a unit.** The helper is a byte-identical copy in both bundles beside
 `tracker_transaction.py`, which it loads from beside itself, resolved from the
 installed bundle and never from the consuming repository or a personal path.
-`tools/test_approved_document.py` drives it against temporary repositories with a
-controlled `docs-push` first on `PATH` (`tools/fake_docs_push.py`); the fake
-implements the contract above and claims nothing about the owner's own git
-engine, whose behavioral coverage (`--get` and edit, three-way merge, the
-lost-push-race retry) belongs to its owner and is documented, not copied. No copy
-of `docs-push` ships in any bundle, and the helper reads neither the tool's
-configuration nor `~/.config/docs-push.json`.
+`tools/test_approved_document.py` and `tools/test_approved_document_faults.py`
+drive it against temporary repositories with a controlled `docs-push` and `gh`
+first on `PATH` (`tools/fake_docs_push.py`); the fake implements the contract
+above and claims nothing about the owner's own git engine, whose behavioral
+coverage (`--get` and edit, three-way merge, the lost-push-race retry) belongs
+to its owner and is documented, not copied. No copy of `docs-push` ships in any
+bundle, and the helper reads neither the tool's configuration nor
+`~/.config/docs-push.json`.
 
 ### 9.5 What "published" means, and the three-state failure report
 
@@ -1391,21 +1386,25 @@ unreadable transaction reads as no transaction.
 `tools/tracker_transaction.py` no longer loads the publisher, and so no longer
 asks whether a document has a direct-publication lane. `--resolve --source branch`
 is unchanged: it verifies the approved disposition and the artifact identity in
-the document reachable from a freshly fetched `origin/<default>`.
+the document reachable from a freshly fetched `origin/<default>`; a historic
+receipt alone never resolves an entry that a later edit removed.
 `--resolve --source local` is permitted only for content the helper's exact
 applied record shows was applied and has not landed: the reference must name a
-blob, the working copy must still be that blob, no revision of the document on
-the branch's history may carry that blob, and the helper's recorded publication,
-when there is one, must have no verified landing (a receipt, for a merged
-publication whose blob differs from the approved one). A landing that cannot be
-verified refuses rather than permits. A hand edit permits nothing, and neither does the mere absence of an
-old lane. The checkpoint is a **local** one: the result reports `published:
-false` and, from the helper's pending record, `publication_obligation`. A
-successful local checkpoint resolves the tracker half only; it does not clear
-the publication obligation, which stays until a landing is verified on the
-branch, and the preflight keeps stopping the next disposition until it is. A
-missing or failing `docs-push` leaves the approved content and its record in
-place for exactly that reason.
+blob, the working copy must still be that blob, and landing must be a verified
+*no*. For a pending attempt that verdict is the helper's own landing validator
+(the same interval, receipts and saved evidence), and an unresolved capture, a
+tool child not known to have exited, or any unreadable evidence refuses. For a
+legacy applied-only record, which has no recorded tip, the tracker searches the
+branch's complete reachable history for the applied blob and any occurrence
+refuses — deliberately broader than a pending attempt's interval, and never used
+to certify a new attempt's publication. A hand edit permits nothing, and neither
+does the mere absence of an old lane. The checkpoint is a **local** one: the
+result reports `published: false` and, from the helper's pending record,
+`publication_obligation`. A successful local checkpoint resolves the tracker
+half only; it does not clear the publication obligation, which stays until a
+landing is verified on the branch, and the preflight keeps stopping the next
+disposition until it is. A missing or failing `docs-push` leaves the approved
+content and its record in place for exactly that reason.
 
 ## 10. The end of an arc: removing the processing apparatus
 

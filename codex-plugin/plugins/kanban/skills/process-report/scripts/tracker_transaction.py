@@ -1394,6 +1394,15 @@ def recorded_publication_landed(root: Path, record: dict, branch: str):
     try:
         module = approved_document_module()
         pending = module.read_pending(root, record["repository"], record["document"])
+        if pending["capture"] is not None:
+            return None, (
+                f"a capture of {record['document']} recorded at {ref} is unresolved"
+            )
+        if module.child_state(pending["handoff"]) in ("live", "unknown"):
+            return None, (
+                f"the tool child of the publication recorded at {ref} is not known "
+                "to have exited"
+            )
         info = module.landing(root, branch, pending)
     except Exception as error:  # noqa: BLE001 - reported, never raised bare
         return None, (
@@ -1479,6 +1488,23 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     # through its second. So the content's blob is looked for at the document's
     # path in every reachable commit, and a history that cannot be read
     # refuses rather than guesses.
+    pending_exists = git(
+        ["rev-parse", "--verify", "--quiet",
+         pending_publication_ref(record["repository"], document)],
+        cwd=root, check=False,
+    ).stdout.decode().strip()
+    if pending_exists:
+        # A pending attempt has its own recorded interval and one validator, the
+        # helper's: a second, weaker heuristic here would only disagree with it.
+        landed, why = recorded_publication_landed(root, record, branch)
+        if landed is None:
+            return False, why
+        if landed:
+            return False, (
+                f"{why}, so {document} is landed rather than locally applied and is "
+                "verified on the branch"
+            )
+        return True, f"{document} was applied locally and has not landed on {branch}"
     if "\n" in document:
         return False, f"{document} has a newline in its name, so its history cannot be searched"
     commits = git(["rev-list", f"origin/{branch}"], cwd=root, check=False)
@@ -1505,14 +1531,6 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
             f"origin/{branch} already carried the applied content of "
             f"{document} at some revision, so it is landed rather than "
             "locally applied and is verified on the branch"
-        )
-    landed, why = recorded_publication_landed(root, record, branch)
-    if landed is None:
-        return False, why
-    if landed:
-        return False, (
-            f"{why}, so {document} is landed rather than locally applied and is "
-            "verified on the branch"
         )
     return True, f"{document} was applied locally and has not landed on {branch}"
 

@@ -43,6 +43,9 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+from test_approved_document import FAKE_GH  # noqa: E402  (a constant, not the tests)
 
 # The owner is deliberately not this repository: §7 classifies coghex/kanban and
 # nothing else, so a fixture that reused the slug would take the one branch this
@@ -685,11 +688,14 @@ class ConsumingRepositoryTests(unittest.TestCase):
         source = (REPO_ROOT / "tools" / "fake_docs_push.py").read_text(encoding="utf-8")
         fake.write_text(f"#!{sys.executable}\n" + source.split("\n", 1)[1], encoding="utf-8")
         fake.chmod(0o755)
+        gh = bin_dir / "gh"
+        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
+        gh.chmod(0o755)
         return dict(
             os.environ, HOME=str(self.home), XDG_CONFIG_HOME=str(self.config_home),
             PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             DOCS_PUSH_CONFIG=str(self.root / "no-such-config.json"),
-            FAKE_DOCS_PUSH_MODE=mode,
+            FAKE_DOCS_PUSH_MODE=mode, FAKE_GH_MODE="rules",
             FAKE_DOCS_PUSH_LOG=str(self.root / "docs-push-calls.jsonl"),
         )
 
