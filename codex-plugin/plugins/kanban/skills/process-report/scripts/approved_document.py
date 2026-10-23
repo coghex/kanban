@@ -75,6 +75,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -118,6 +119,8 @@ RECEIPT_TRAILER = "Kanban-Approved-Document"
 TOOL = "docs-push"
 TOOL_CAPABILITIES = ("--expect", "--keep")
 TOOL_TIMEOUT_SECONDS = 600
+# How long a killed tool's pipes are awaited before something is taken to be holding them.
+DESCENDANT_GRACE_SECONDS = 10
 
 OID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 ATTEMPT_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -811,7 +814,9 @@ def handoff_fault(handoff) -> str | None:
         return "a running handoff names no child"
     result = handoff.get("result")
     if result is not None and (
-        not isinstance(result, dict) or not isinstance(result.get("returncode"), (int, type(None)))
+        not isinstance(result, dict)
+        or not isinstance(result.get("returncode"), (int, type(None)))
+        or not isinstance(result.get("unresolved", ""), str)
     ):
         return "its handoff result is unusable"
     return None
@@ -1131,15 +1136,22 @@ def require_applied_matches_document(root: Path, document: str, applied: str | N
         )
 
 
-def record_applied_content(root: Path, owner: str, pending: dict) -> str:
-    """Record the applied bytes, under compare-and-swap against what was read.
-    A different valid predecessor is replaced only when the intent roots it."""
-    document, blob = pending["document"], pending["approved_blob"]
+def require_applied_agrees_with_pending(
+    root: Path, owner: str, pending: dict, applied: str | None = None
+) -> str | None:
+    """An intent and an applied record that name unrelated content contradict one
+    another, and the contradiction is found before anything is recovered,
+    migrated, persisted or applied: the applied record is absent, the intent's
+    own approved blob, or the predecessor the intent rooted. Returns the applied
+    blob it validated."""
+    document = pending["document"]
     ref = applied_ref(owner, document)
-    current = validate_applied(root, owner, document)
-    if current == blob:
-        return "recorded"
-    if current is not None and current != pending["payloads"].get("predecessor"):
+    current = applied if applied is not None else validate_applied(root, owner, document)
+    if (
+        current is not None
+        and current != pending["approved_blob"]
+        and current != pending["payloads"].get("predecessor")
+    ):
         raise DocumentError(
             "applied-conflict",
             f"the applied record {ref} names other content than this attempt "
@@ -1147,6 +1159,17 @@ def record_applied_content(root: Path, owner: str, pending: dict) -> str:
             applied_ref=ref,
             applied_object=current,
         )
+    return current
+
+
+def record_applied_content(root: Path, owner: str, pending: dict) -> str:
+    """Record the applied bytes, under compare-and-swap against what was read.
+    A different valid predecessor is replaced only when the intent roots it."""
+    document, blob = pending["document"], pending["approved_blob"]
+    ref = applied_ref(owner, document)
+    current = require_applied_agrees_with_pending(root, owner, pending)
+    if current == blob:
+        return "recorded"
     git(["update-ref", ref, blob, current or ""], cwd=root, check=False)
     return "recorded" if read_ref(root, ref) == blob else "unrecorded"
 
@@ -1940,6 +1963,10 @@ def child_state(handoff: dict | None) -> str:
         return "none"
     if handoff["state"] == "finished":
         return "gone"
+    if (handoff.get("result") or {}).get("unresolved"):
+        # The tool's own process ended but what it started was not known to be
+        # gone: only the operator can say it is.
+        return "unknown"
     child = handoff.get("child")
     if child is None:
         return "unknown"
@@ -2018,11 +2045,31 @@ def retry_gate(repository: str, branch: str) -> dict:
     return {"ok": False, "reason": "; ".join(reasons)}
 
 
-def run_publication_tool(root: Path, pending: dict, message: str):
+def recheck_before_spawn(root: Path, document: str, approved_blob: str) -> None:
+    """The last look before the tool is started: the index entry is not staged
+    and the document still holds the approved bytes. Everything slow (the
+    capability probe, the gate, the fresh history read, the handoff write) has
+    already happened, so what this sees is what the tool will be handed."""
+    require_unstaged(root, document)
+    state, blob = file_state(root / document)
+    if state != "file" or blob != approved_blob:
+        raise DocumentError(
+            "document-not-applied",
+            f"{document} no longer holds the approved content, so it is not handed "
+            "to the tool",
+            working_blob=blob,
+        )
+
+
+def run_publication_tool(root: Path, pending: dict, message: str, recheck=None):
     """Run `docs-push --expect <blob> --keep -m <message> <document>` from the
     write root, recording the handoff before and during. Returns (result,
     pending): the result describes what happened and does not say whether the
-    document landed; `pending` is the intent as last rewritten."""
+    document landed; `pending` is the intent as last rewritten.
+
+    The capability probe comes first, the marker second and `recheck` last, so
+    nothing between the check and the spawn can move what the tool is handed.
+    A refused recheck takes the marker back: no tool was started."""
     tool = publication_tool()
     if not tool["available"]:
         return {"ran": False} | tool, pending
@@ -2030,14 +2077,22 @@ def run_publication_tool(root: Path, pending: dict, message: str):
         tool["path"], "--expect", pending["approved_blob"], "--keep", "-m", message,
         pending["document"],
     ]
+    previous = pending["handoff"]
     # Marker first: once it is written the tool may run, whatever happens next.
     pending = persist_handoff(root, pending, {
         "state": "marker", "host": socket.gethostname(), "argv": argv,
         "child": None, "result": None,
     })
+    if recheck is not None:
+        try:
+            recheck()
+        except DocumentError:
+            persist_handoff(root, pending, previous)
+            raise
     try:
         proc = subprocess.Popen(
-            argv, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            argv, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as error:
         pending = persist_handoff(root, pending, dict(
@@ -2059,13 +2114,36 @@ def run_publication_tool(root: Path, pending: dict, message: str):
         # stays, and a later retry is blocked until the operator establishes
         # quiescence. This run still waits for it.
         pass
-    timed_out = False
+    timed_out, abandoned = False, False
     try:
         stdout, stderr = proc.communicate(timeout=TOOL_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
-        stdout, stderr = proc.communicate()
+        stop_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=DESCENDANT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # Something that was not stopped still holds the tool's pipes.
+            stdout, stderr, abandoned = b"", b"", True
+            try:
+                proc.wait(timeout=DESCENDANT_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+    if abandoned or group_alive(proc.pid, DESCENDANT_GRACE_SECONDS):
+        # The tool's own process is reaped but part of what it started is not
+        # known to be gone, so it may still publish. The handoff stays
+        # unresolved until the operator establishes quiescence.
+        pending = persist_handoff(root, pending, dict(
+            pending["handoff"], result={"returncode": None, "unresolved": "descendants"},
+        ))
+        return {
+            "ran": False, "path": tool["path"], "reason": "tool-not-quiescent",
+            "message": f"{TOOL} left processes running; whether it published is unknown "
+            "until they are gone",
+        }, pending
     pending = persist_handoff(root, pending, dict(
         pending["handoff"], state="finished",
         result={"returncode": None if timed_out else proc.returncode},
@@ -2079,6 +2157,33 @@ def run_publication_tool(root: Path, pending: dict, message: str):
     return {
         "ran": True, "path": tool["path"], "returncode": proc.returncode, "message": output,
     }, pending
+
+
+def stop_group(proc) -> None:
+    """Kill the tool's whole process group (it was started as a session leader),
+    then the process itself; killing only the leader strands whatever it forked."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    proc.kill()
+
+
+def group_alive(pgid: int, settle: float = 0.0) -> bool:
+    """Whether any process is still in the group the tool led, allowing `settle`
+    seconds for processes that were just killed to be reaped. A permission error
+    means one exists that cannot be signalled, which is alive."""
+    deadline = time.monotonic() + settle
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        if time.monotonic() >= deadline:
+            return True
+        time.sleep(0.05)
 
 
 # ----------------------------------------------------------------- outcomes --
@@ -2343,20 +2448,10 @@ def publish_recorded(
                 root, owner, branch, document, pending, info, cleared,
                 resumed=resumed or "already-landed", tool=None,
             )
-    # Immediately before the call, again: the gate and the fresh history read
-    # above can be slow, and the document or the index may have moved meanwhile.
-    require_unstaged(root, document)
-    state, blob = file_state(root / document)
-    if state != "file" or blob != pending["approved_blob"]:
-        raise DocumentError(
-            "document-not-applied",
-            f"{document} no longer holds the approved content, so it is not handed "
-            "to the tool",
-            working_blob=blob,
-        )
     base = pending["message"] or default_message(document)
     tool, pending = run_publication_tool(
-        root, pending, f"{base}\n\n{receipt_line(pending)}"
+        root, pending, f"{base}\n\n{receipt_line(pending)}",
+        recheck=lambda: recheck_before_spawn(root, document, pending["approved_blob"]),
     )
     try:
         pending, info = confirm_landing(root, branch, pending)
@@ -2586,6 +2681,8 @@ def locked_sequence(
     applied = validate_applied(root, owner, document)
     if pending is None:
         require_applied_matches_document(root, document, applied)
+    else:
+        require_applied_agrees_with_pending(root, owner, pending, applied)
     if content is None:
         if pending is None:
             raise DocumentError(

@@ -1287,6 +1287,120 @@ class ReworkRoundFour(FaultFixture):
                 self.assertIsNotNone(self.fx.ref(lock))
 
 
+class ReworkRoundFive(FaultFixture):
+    """Reproduced by the fifth rereview of the reworked branch (PR #836)."""
+
+    def child_pid_file(self):
+        path = self.fx.dir / "child.pid"
+        os.environ["FAKE_DOCS_PUSH_CHILD_PID"] = str(path)
+        self.addCleanup(os.environ.pop, "FAKE_DOCS_PUSH_CHILD_PID", None)
+
+        def stop():
+            try:
+                os.kill(int(path.read_text()), 9)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(stop)
+        return path
+
+    def hung(self, mode):
+        self.mode(mode)
+        pid_file = self.child_pid_file()
+        with unittest.mock.patch.object(approved, "TOOL_TIMEOUT_SECONDS", 2), \
+                unittest.mock.patch.object(approved, "DESCENDANT_GRACE_SECONDS", 1):
+            outcome = self.approve(EDITED)
+        return outcome, pid_file
+
+    def test_a_timed_out_tool_takes_its_whole_process_group_with_it(self):
+        outcome, pid_file = self.hung("hang-with-child")
+        self.assertEqual(outcome["reason"], "tool-failed")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(record["handoff"]["state"], "finished")
+        with self.assertRaises(OSError):
+            os.kill(int(pid_file.read_text()), 0)
+
+    def test_a_descendant_that_outlives_a_timed_out_tool_keeps_the_handoff_open(self):
+        outcome, pid_file = self.hung("hang-with-escapee")
+        self.assertEqual(outcome["reason"], "tool-not-quiescent")
+        os.kill(int(pid_file.read_text()), 0)  # still running: nothing killed it
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertNotEqual(record["handoff"]["state"], "finished")
+        self.assertEqual(approved.child_state(record["handoff"]), "unknown")
+        calls = len(self.calls())
+        self.mode("land")
+        again = self.resume()
+        self.assertEqual(again["reason"], "tool-child-not-quiescent")
+        self.assertEqual(len(self.calls()), calls)
+        self.assertIsNotNone(self.fx.pending())
+        # Only the operator's statement of quiescence reopens it.
+        final = approved.apply_and_publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=None, operator_quiescent=True,
+        )
+        self.assertEqual(final["status"], "published")
+        self.assertEqual(len(self.calls()), calls + 1)
+
+    def stage_after(self, name, count=None):
+        """Wrap approved.<name> so a mode-only staged change lands right after it."""
+        real = getattr(approved, name)
+        seen = [0]
+
+        def wrapped(*args, **kwargs):
+            result = real(*args, **kwargs)
+            seen[0] += 1
+            if count is None or seen[0] == count:
+                run(["git", "update-index", "--cacheinfo",
+                     f"100755,{blob_of(EDITED)},{DOC}"], self.fx.work)
+            return result
+
+        return unittest.mock.patch.object(approved, name, wrapped)
+
+    def test_a_change_staged_during_the_capability_probe_is_caught_before_the_spawn(self):
+        with self.stage_after("publication_tool"):
+            error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "document-staged")
+        self.assertEqual(self.calls(), [])
+        self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["handoff"])
+
+    def test_a_change_staged_while_the_handoff_is_recorded_is_caught_before_the_spawn(self):
+        with self.stage_after("persist_handoff", count=1):
+            error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "document-staged")
+        self.assertEqual(self.calls(), [])
+        # The marker was taken back: no tool was started, so no child is owed.
+        self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["handoff"])
+
+    def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
+        self.crash([self.fault("record_applied_content.after", "R5.applied")])
+        run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)
+        record = {"repository": REPOSITORY, "document": DOC}
+        permitted, _ = tracker.local_resolution_permitted(self.fx.work, record, "master")
+        self.assertTrue(permitted)
+        permitted, why = tracker.local_resolution_permitted(self.fx.work, record, "other")
+        self.assertFalse(permitted)
+        self.assertIn("for master", why)
+
+    def test_a_conflicting_applied_record_stops_a_capture_recovery_before_it_mutates(self):
+        self.crash([self.fault("rename_aside.after", "R5.capture")])
+        other = approved._preserve(self.fx.work, b"somebody else's applied content\n")
+        run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), other], self.fx.work)
+        before = self.facts()
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "applied-conflict")
+        self.assertEqual(self.facts(), before)
+        self.assertFalse((self.fx.work / DOC).exists())
+
+    def test_a_conflicting_applied_record_stops_a_v1_migration_before_it_rewrites(self):
+        self.v1_record()
+        other = approved._preserve(self.fx.work, b"somebody else's applied content\n")
+        run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), other], self.fx.work)
+        pending = self.fx.pending()
+        error = self.failure(self.resume)
+        self.assertEqual(error.status, "applied-conflict")
+        self.assertEqual(self.fx.pending(), pending)
+
+
 class NegativeControls(FaultFixture):
     """Each guard must fail its test when removed: the tests have teeth."""
 

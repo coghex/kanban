@@ -1460,6 +1460,13 @@ def recorded_publication_landed(root: Path, record: dict, branch: str, applied: 
     try:
         module = approved_document_module()
         pending = module.read_pending(root, record["repository"], record["document"])
+        if pending["branch"] not in (None, branch):
+            # The attempt's interval is on the branch it was recorded against; a
+            # negative about some other branch's history is not about it.
+            return None, (
+                f"the publication recorded at {ref} is for {pending['branch']}, not "
+                f"{branch}; it is kept until it is reconciled"
+            )
         if applied is not None and pending["approved_blob"] != applied:
             # The negative landing result below is about the pending attempt's
             # content; it says nothing about some other blob the applied record

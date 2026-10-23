@@ -33,6 +33,10 @@ behavior beyond a clean landing:
     racing-edit                the file changes before the tool reads it
     dies-before-keep           publishes, then stops before `--keep` settles the file
     hang                       never returns (the caller's timeout must stop it)
+    hang-with-child            hangs with a child in its own process group
+    hang-with-escapee          hangs with a child in a session of its own that
+                               keeps the output pipes open (pid in
+                               $FAKE_DOCS_PUSH_CHILD_PID)
     lacks-expect, lacks-keep   `--help` omits that flag
 """
 
@@ -99,6 +103,16 @@ def main(args):
     path = paths[0]
     if MODE == "hang":
         import time
+        time.sleep(120)
+        return 0
+    if MODE in ("hang-with-child", "hang-with-escapee"):
+        import time
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=MODE == "hang-with-escapee",
+        )
+        if os.environ.get("FAKE_DOCS_PUSH_CHILD_PID"):
+            Path(os.environ["FAKE_DOCS_PUSH_CHILD_PID"]).write_text(str(child.pid))
         time.sleep(120)
         return 0
     if MODE == "refuse":
