@@ -94,6 +94,7 @@ NAMESPACE = "refs/kanban/tracker-transaction"
 # never written: the helper owns them.
 APPLIED_NAMESPACE = "refs/kanban/applied-locally"
 PENDING_PUBLICATION_NAMESPACE = "refs/kanban/pending-publication"
+FETCHED_NAMESPACE = "refs/kanban/fetched"
 
 # The record travels as a blob in the reference's tree rather than in its commit
 # subject. A subject is a message, and `commit-tree` is entitled to clean one
@@ -1446,7 +1447,21 @@ def approved_document_module():
     return module
 
 
-def recorded_publication_landed(root: Path, record: dict, branch: str, applied: str | None = None):
+def fetched_tip(root: Path, branch: str) -> str:
+    """The commit the remote's `<branch>` names right after a successful fetch,
+    read from the fetch's own destination (the same private reference the
+    approved-document helper uses) rather than from `origin/<branch>`, which a
+    narrowed or remapped refspec leaves stale after a successful fetch."""
+    destination = (
+        f"{FETCHED_NAMESPACE}/{hashlib.sha256(branch.encode()).hexdigest()[:16]}"
+    )
+    git(["fetch", "origin", f"+refs/heads/{branch}:{destination}"], cwd=root)
+    return git_out(["rev-parse", "--verify", f"{destination}^{{commit}}"], cwd=root)
+
+
+def recorded_publication_landed(
+    root: Path, record: dict, branch: str, applied: str | None = None, fresh: str | None = None
+):
     """(landed, why) for the publication the helper recorded, if it recorded one.
 
     Fails closed: a record that cannot be read, a module that cannot be loaded,
@@ -1485,7 +1500,7 @@ def recorded_publication_landed(root: Path, record: dict, branch: str, applied: 
                 f"the tool child of the publication recorded at {ref} is not known "
                 "to have exited"
             )
-        info = module.landing(root, branch, pending)
+        info = module.landing(root, branch, pending, fresh)
     except Exception as error:  # noqa: BLE001 - reported, never raised bare
         return None, (
             f"whether the publication recorded at {ref} landed could not be "
@@ -1532,7 +1547,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     fetched first, so "not landed" is a statement about the branch now rather
     than about a cached ref.
     """
-    git(["fetch", "origin", branch], cwd=root)
+    fresh = fetched_tip(root, branch)
     document = record["document"]
     applied = applied_ref(record["repository"], document)
     recorded = ref_value(root, applied)
@@ -1572,7 +1587,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     if pending_exists:
         # A pending attempt has its own recorded interval and one validator, the
         # helper's: a second, weaker heuristic here would only disagree with it.
-        landed, why = recorded_publication_landed(root, record, branch, recorded)
+        landed, why = recorded_publication_landed(root, record, branch, recorded, fresh)
         if landed is None:
             return False, why
         if landed:
@@ -1583,7 +1598,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
         return True, f"{document} was applied locally and has not landed on {branch}"
     if "\n" in document:
         return False, f"{document} has a newline in its name, so its history cannot be searched"
-    commits = git(["rev-list", f"origin/{branch}"], cwd=root, check=False)
+    commits = git(["rev-list", fresh], cwd=root, check=False)
     if commits.returncode != 0:
         return False, (
             f"the history of origin/{branch} could not be read, so whether the "
@@ -1650,10 +1665,8 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
                 "disposition cannot be verified",
             )
         return target.read_text(encoding="utf-8", errors="replace")
-    git(["fetch", "origin", branch], cwd=root)
-    proc = git(
-        ["show", f"origin/{branch}:{document}"], cwd=root, check=False
-    )
+    fresh = fetched_tip(root, branch)
+    proc = git(["show", f"{fresh}:{document}"], cwd=root, check=False)
     if proc.returncode != 0:
         raise TransactionError(
             "document-unreadable",

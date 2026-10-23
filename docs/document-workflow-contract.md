@@ -1007,9 +1007,11 @@ and every `T-NN` row of that design is a named regression in
    trailer in the message naming the repository, document, approved blob and
    attempt. A handoff marker is persisted before the spawn, then the child's
    pid, operating-system start time and exact argv; quiescence means that exact
-   identity no longer exists (a reused pid with another start time is not the
-   child; a missing identity, a changed argv or a failed inspection is
-   unknown). The tool is started as the leader of its own process group; the
+   identity no longer exists and its process group is empty (a reused pid with
+   another start time is not the child; a missing identity, a changed argv or a
+   failed inspection is unknown, and so is an exited leader whose group still
+   has members, including after a crash between the tool's exit and the check).
+   The tool is started as the leader of its own process group; the
    capability probe, the marker and then the last check of the index entry and
    the document's bytes all precede the spawn, in that order, and a refused
    check takes the marker back. A tool that times out is stopped with its whole
@@ -1023,8 +1025,10 @@ and every `T-NN` row of that design is a named regression in
    publisher.
 
 **Landing is decided by evidence, in the interval from the recorded tip.** After
-a successful fetch of `origin/<default>`, with that commit object name used
-throughout, a mutation has landed only if valid evidence lies in
+a successful fetch of the default branch into a private reference of the fetch's
+own (`refs/kanban/fetched/...`, so the answer does not depend on how, or whether,
+the repository's configured refspec maps the branch onto `origin/<default>`;
+the tracker does the same), with that commit object name used throughout, a mutation has landed only if valid evidence lies in
 `I(R, F) = {R} ∪ (Anc(F) ∖ Anc(R))`, inspected over every commit in the range —
 merges and their second parents included, with no path limit and no first-parent
 filter: a receipt (a single-parent commit with the exact whole-line trailer,

@@ -1371,6 +1371,65 @@ class ReworkRoundFive(FaultFixture):
         # The marker was taken back: no tool was started, so no child is owed.
         self.assertIsNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["handoff"])
 
+    def test_a_descendant_left_by_an_exited_tool_blocks_recovery_after_a_crash(self):
+        self.mode("leaves-child")
+        pid_file = self.child_pid_file()
+        self.crash([self.fault("group_alive.before", "R6.group")])
+        os.kill(int(pid_file.read_text()), 0)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(record["handoff"]["state"], "running")
+        self.assertEqual(approved.child_state(record["handoff"]), "unknown")
+        calls = len(self.calls())
+        self.mode("land")
+        # The lock its dead owner left stays while the group is not empty.
+        code, stop, _ = self.child([], "--branch", "master", "--clear-stale-lock")
+        self.assertEqual(stop["status"], "lock-child-not-quiescent")
+        self.assertIsNotNone(self.fx.ref(approved.lock_ref(REPOSITORY, DOC)))
+        self.assertEqual((len(self.calls()), self.fx.pending() is not None), (calls, True))
+        # Only the operator's confirmation reopens it.
+        code, cleared, _ = self.child([], "--branch", "master", "--clear-stale-lock",
+                                      "--operator-quiescent")
+        self.assertEqual(cleared["status"], "cleared")
+        code, final, _ = self.child([], "--branch", "master", "--resume", "--operator-quiescent")
+        self.assertEqual(final["status"], "published", final)
+        self.assertEqual(len(self.calls()), calls + 1)
+
+    def test_an_exited_tool_with_an_empty_group_is_gone(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        running = dict(record["handoff"], state="running", child={
+            "pid": 2**22 + 77, "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push"],
+        })
+        with unittest.mock.patch.object(approved, "process_identity", lambda pid: None):
+            self.assertEqual(approved.child_state(running), "gone")
+
+    def narrowed(self):
+        """A clone whose configured refspec no longer maps the default branch."""
+        run(["git", "config", "remote.origin.fetch",
+             "+refs/heads/elsewhere:refs/remotes/origin/elsewhere"], self.fx.work)
+
+    def test_a_narrowed_refspec_does_not_hide_the_fetched_tip(self):
+        self.narrowed()
+        stale = run(["git", "rev-parse", "origin/master"], self.fx.work)
+        self.fx.upstream_edit("# upstream moved on\n", message="upstream moved")
+        tip = self.fx.origin_tip()
+        self.assertNotEqual(stale, tip)
+        self.assertEqual(approved.fresh_tip(self.fx.work, "master"), tip)
+        self.assertEqual(tracker.fetched_tip(self.fx.work, "master"), tip)
+
+    def test_a_landing_is_found_when_the_refspec_does_not_map_the_branch(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        self.narrowed()
+        self.fx.upstream_edit(EDITED, message="the approved content lands")
+        report = self.preflight()
+        self.assertTrue(report["already_landed"])
+        record = {"repository": REPOSITORY, "document": DOC}
+        permitted, why = tracker.local_resolution_permitted(self.fx.work, record, "master")
+        self.assertFalse(permitted)
+        self.assertIn("landed", why)
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

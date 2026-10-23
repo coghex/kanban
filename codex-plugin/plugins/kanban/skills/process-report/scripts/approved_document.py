@@ -89,6 +89,7 @@ from pathlib import Path, PurePosixPath
 LOCK_NAMESPACE = "refs/kanban/publish-lock"
 PENDING_NAMESPACE = "refs/kanban/pending-publication"
 ABANDONED_NAMESPACE = "refs/kanban/abandoned-publication"
+FETCHED_NAMESPACE = "refs/kanban/fetched"
 
 # What this module applied to a document and has not yet landed. A working tree
 # is equally what a hand edit produces, so this reference is the difference: it
@@ -1583,11 +1584,21 @@ def apply_over_baseline(root: Path, pending: dict, content: bytes) -> dict:
 
 
 def fresh_tip(root: Path, branch: str) -> str:
-    """The commit `origin/<branch>` names right after a *successful* fetch.
+    """The commit the remote's `<branch>` names right after a *successful* fetch.
 
-    Every check in one classification uses this object name, not the moving
-    symbolic ref, and a failed fetch cannot certify a cached ref as fresh."""
-    fetched = git(["fetch", "origin", branch], cwd=root, check=False)
+    The fetch names its own destination, a private reference, so the answer is
+    the object that fetch brought and does not depend on how (or whether) the
+    repository's configured refspec maps the branch onto `origin/<branch>`: a
+    narrowed or remapped refspec leaves that cached name stale after a
+    successful fetch. Every check in one classification uses this object name,
+    not a moving symbolic ref, and a failed fetch cannot certify a cached ref
+    as fresh."""
+    destination = (
+        f"{FETCHED_NAMESPACE}/{hashlib.sha256(branch.encode()).hexdigest()[:16]}"
+    )
+    fetched = git(
+        ["fetch", "origin", f"+refs/heads/{branch}:{destination}"], cwd=root, check=False
+    )
     if fetched.returncode != 0:
         raise DocumentError(
             "fetch-failed",
@@ -1595,7 +1606,7 @@ def fresh_tip(root: Path, branch: str) -> str:
             f"({fetched.stderr.decode(errors='replace').strip()}), so nothing "
             "about its history can be concluded",
         )
-    return git_out(["rev-parse", f"{remote_ref(branch)}^{{commit}}"], cwd=root)
+    return git_out(["rev-parse", "--verify", f"{destination}^{{commit}}"], cwd=root)
 
 
 def interval_commits(root: Path, fresh: str, recorded_tip: str) -> list[str]:
@@ -1955,7 +1966,8 @@ def child_state(handoff: dict | None) -> str:
     """'none', 'gone', 'live' or 'unknown' for the tool a handoff started.
 
     The identity is the pid, the operating-system start time and the exact argv,
-    never the pid alone: a reused pid is a different process, and neither blocks
+    never the pid alone, and a leader that has exited is gone only when its
+    process group is empty too: a reused pid is a different process, and neither blocks
     this one nor may be touched. A marker with no child recorded (the crash
     between spawning and recording it), a changed argv for the same live
     process, and any failed inspection are unknown, which is not quiescent."""
@@ -1968,14 +1980,18 @@ def child_state(handoff: dict | None) -> str:
         # gone: only the operator can say it is.
         return "unknown"
     child = handoff.get("child")
-    if child is None:
+    if child is None or child["pid"] <= 1:
         return "unknown"
     try:
         identity = process_identity(child["pid"])
     except DocumentError:
         return "unknown"
     if identity is None or identity["start"] != child["start"]:
-        return "gone"
+        # The leader is gone. What it started may not be: the tool was the
+        # leader of its own process group, so any member left in that group
+        # (a reused pid that leads a group of its own reads the same way, which
+        # errs toward waiting) means quiescence is not established.
+        return "unknown" if group_alive(child["pid"]) else "gone"
     return "live" if identity["args"] == " ".join(child["argv"]) else "unknown"
 
 
@@ -2371,7 +2387,7 @@ def published_outcome(
         "landed_via": info["via"],
         "receipt_commit": info["receipt_commit"],
         "evidence_commit": info["evidence_commit"],
-        "current_branch_blob": blob_at(root, remote_ref(branch), document),
+        "current_branch_blob": blob_at(root, info["fresh_tip"], document),
         "remote_contains_commit": True,
         "resumed": resumed,
         "records": cleared,
