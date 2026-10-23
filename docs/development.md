@@ -249,7 +249,7 @@ workflows `solve`, `pr-review`, `pr-rereview`, `pr-revise`, `issue`,
 generated outputs; edit the source and re-render, never the output. The
 Claude/Codex pairs still hand-authored are the five document workflows
 (`design-epic`, `process-design-doc`, `process-report`, `note-problem`,
-`draft-report`) and `repair`, plus the Claude-only `draft-issues`, which has no
+`draft-report`), plus the Claude-only `draft-issues`, which has no
 Codex pair. The external `solve` and `autosolve`, authored under
 `tools/command_sources/external/`, render into the Grok, Kimi, Google and
 Claude-on-Copilot bundles and neither of those two, whose own `solve` and
