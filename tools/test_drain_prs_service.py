@@ -1609,7 +1609,7 @@ class InstalledJobIdentityTests(RedirectedControllerTestCase):
 
 
 class DiscoveryRecordTests(RedirectedControllerTestCase):
-    """The record `src/Kanban/Drainer.hs` resolves each LaunchAgent through."""
+    """The record each LaunchAgent is resolved through."""
 
     def setUp(self):
         super().setUp()

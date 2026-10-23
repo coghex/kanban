@@ -191,8 +191,8 @@ depending on the [Codex plugin](../codex-plugin/README.md) being installed at
 all — this plugin bundles its own copy of the same coordinator logic so it is
 fully self-sufficient on a Claude-only machine. The same `pr-review:v2`
 marker/label state machine runs regardless of which command an agent session
-starts from. The coordinator resolves the canonical issue-review backend the same way
-`Kanban.Review.resolveCanonicalIssueReviewer` does: a non-empty
+starts from. The coordinator resolves the canonical issue-review backend the way the
+bundled `scripts/resolve_issue_review_backend.py` does for the workflows: a non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path
 `tools/install_issue_review.py` recorded in its discovery record, then — only
 when that record names none — the directory the record lives in; it never
@@ -209,6 +209,17 @@ names both. None of the packaged commands set their own
 model, reasoning effort, permission mode, or working directory — the session
 that runs a command is started with those, and `tools/test_claude_plugin.py`
 asserts none of the packaged manifests override them.
+
+`/solve`, `/issue-review`, `/issue-rereview`, `/triage` and `/retriage` find the
+canonical issue-review backend through one more bundled script,
+`scripts/resolve_issue_review_backend.py`, a byte-identical copy of
+`tools/resolve_issue_review_backend.py` that prints the resolved path, or one
+diagnostic and a non-zero exit. Each command calls it at
+`${CLAUDE_PLUGIN_ROOT}/scripts/resolve_issue_review_backend.py`, like the
+coordinator above, so none embeds the probe and none can be satisfied by a copy
+inside the repository being worked. The coordinator keeps its own Python probe;
+`tools/test_packaged_issue_review_probe.py` drives the script, each command's
+call to it, and the coordinator's `approver_path()` against the same cases.
 
 `/solve` bundles a second script, `scripts/trusted_issue_spec.py`, and reads the
 issue's effective spec through nothing else. It fetches the complete paginated

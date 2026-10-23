@@ -355,50 +355,60 @@ brand, so drift from the parser's accepted format fails CI.
 
 The packaged issue-review and issue-rereview workflows — including
 `autoissue`'s immediate review handoff — resolve the canonical backend the
-same way the packaged `solve` workflows do:
+same way the packaged `solve`, `triage` and `retriage` workflows do: through
+one bundled script, `resolve_issue_review_backend.py` (source
+`tools/resolve_issue_review_backend.py`), which prints the backend's path and
+nothing else. No asset embeds the probe. A Claude command calls the copy in
+its plugin's `scripts/`, which Claude Code substitutes with the plugin's
+install location whatever directory the workflow runs from:
 
 ```bash
-RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
-BACKEND="$(python3 - "$RECORD" <<'PY'
-import json, os, sys
-from pathlib import Path
-
-record = Path(sys.argv[1])
-override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
-if override and override.strip():
-    resolved = Path(override).expanduser() / "approve_issues.py"
-else:
-    if not os.path.lexists(record):
-        document = {}
-    else:
-        try:
-            document = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
-    if not isinstance(document, dict):
-        raise SystemExit(f"The install record at {record} is not a JSON object.")
-    if "backend_path" not in document:
-        resolved = record.parent / "approve_issues.py"
-    else:
-        recorded = document["backend_path"]
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
-            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
-        resolved = Path(recorded)
-if not resolved.is_file():
-    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {record}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
-print(resolved)
-PY
-)"
+BACKEND="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/resolve_issue_review_backend.py")"
 ```
 
-The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the
-backend path `tools/install_issue_review.py` recorded in that document, then
-— only when the record names none, which is what an installation predating
-the record looks like — the directory the record itself lives in. The
-document's own location is fixed even when `--install-dir` moves everything
-else, because a workflow that inherits no environment still has to find an
-installation made anywhere; see
+A Codex skill carries its own copy in the skill's `scripts/` and locates the
+installed one under `$CODEX_HOME`, the way it locates its other helpers:
+
+```bash
+RESOLVER="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/issue-review/scripts/resolve_issue_review_backend.py' 2>/dev/null | head -n1)"
+BACKEND="$(python3 "${RESOLVER:?resolve_issue_review_backend.py was not found under the installed Kanban plugin}")"
+```
+
+The copies are byte-identical to the `tools/` source, one for the Claude
+bundle, one in each Codex skill that resolves the backend, and one beside the
+trusted-comment helper in each external `solve` skill, and
+`tools/test_packaged_issue_review_probe.py` holds them to it. A copy inside
+the repository being worked is never what runs. The asset keeps its later
+steps unchanged: it uses `$BACKEND`, and if the call fails or leaves
+`$BACKEND` empty it stops and reports exactly the message the script printed.
+
+The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, which names
+the installation directory outright; otherwise the backend path
+`tools/install_issue_review.py` recorded in its discovery record, which sits
+in one of two places probed in one order on every platform — first
+`$XDG_DATA_HOME/kanban/issue-review/config.json` (`~/.local/share/kanban/issue-review/config.json`
+when that variable is unset or empty), then
+`~/Library/Application Support/kanban/issue-review/config.json` — and
+then, only when the record names none, which is what an installation predating
+the record looks like, the directory the record itself lives in. A location is
+occupied when anything exists at its path, a dangling link included, and the
+first occupied one is the installation, so nothing decides which platform it
+is on; when neither exists the XDG candidate supplies the answer and the
+diagnostic names both. The document's own location is fixed even when
+`--install-dir` moves everything else, because a workflow that inherits no
+environment still has to find an installation made anywhere; see
 [agent-workflow-contract.md §5](agent-workflow-contract.md#5-portable-install-policy).
+
+Every failure exits non-zero with one message on standard error: an
+unreadable record, a record that is not a JSON object, a `backend_path` that
+is not an absolute string, and a selected backend that is not a file each name
+the record or backend they refused, and the last also names the record or
+records consulted and the repair, `python3 tools/install_issue_review.py`
+from the Kanban checkout, adding `--install-dir` if it belongs elsewhere. The
+six pull-request coordinators keep their own Python probe, `approver_path()`,
+which reaches the same answers and formats its failures through
+`WorkflowError`; the same test drives it beside the script.
+
 No packaged workflow reconstructs the install path from its parts, and none
 may reference `~/work/approve-issues.py` — the optional pre-migration
 compatibility launcher — or any other user-local workflow path.

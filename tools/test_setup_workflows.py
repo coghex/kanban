@@ -1148,8 +1148,8 @@ class DryRunPurityTests(unittest.TestCase):
 
 
 class ListingParsingTests(unittest.TestCase):
-    """The listing readers are shared with Kanban.Preflight's own parsing,
-    so both providers' envelopes are pinned here directly."""
+    """The listing readers parse both providers' envelopes, so each is pinned
+    here directly."""
 
     def test_reads_the_codex_envelope(self):
         payload = {

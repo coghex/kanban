@@ -27,7 +27,7 @@ import kanban_models
 
 
 # Identity marker for this tracked asset. tools/install_issue_review.py and
-# src/Kanban/Preflight.hs both read this literal out of an installed file to
+# tools/setup_workflows.py both read this literal out of an installed file to
 # confirm a link at the managed install path really resolves to this
 # backend before replacing or trusting it -- identity, not location, since a
 # path that merely looks right is not proof of what it holds.
@@ -81,7 +81,7 @@ LEGACY_CLAUDE_MODEL = "claude-fable-5"
 # (D-8/D-10), and a provider outside it is a routing fact rather than a defect:
 # a Claude-only host must review with Claude, not refuse because it cannot name
 # a Codex reviewer it will never spawn. OPERATING_MODE is that same list read
-# as a mode, in the vocabulary Kanban.Models.operatingModeLabel uses.
+# as a mode, in the vocabulary kanban_models.OPERATING_MODES spells.
 #
 # A roster file that is present and unusable is a different thing entirely and
 # stays one: it resolves to no assignment at all, is remembered in

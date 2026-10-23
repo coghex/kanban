@@ -1,10 +1,10 @@
-"""The Python model-roster reader, against the behavior src/Kanban/Models.hs
-defines.
+"""The Python model-roster reader, against the behavior it owns.
 
-That module is the authoritative implementation and this one mirrors it, so the
-cases here are its vocabulary rather than a fresh invention: the compiled
+The Haskell reader this module once mirrored was removed with the application's
+agent control (epic #794), so these cases are the contract now, and they keep the
+vocabulary that reader fixed rather than a fresh invention: the compiled
 defaults cell for cell, the absent-versus-unusable split D-3 fixes, every defect
-constructor `RosterDefect` names, and the XDG path resolution both sides share.
+`RosterError` names, and the XDG path resolution `kanban_config` shares.
 A reader that quietly answered "the defaults" for a file it could not read
 would let an operator who edited a model go on running agents on the old one,
 which is the single failure this whole layer exists to prevent.
@@ -40,8 +40,7 @@ def roster_file(directory: Path, text: str) -> Path:
 class CompiledDefaultsTests(unittest.TestCase):
     """`DEFAULT_ROSTER` equals the tracked example, cell for cell.
 
-    The same hold `Spec.Config.Models` puts on the Haskell defaults, from this
-    side: the example is what an operator copies to start editing, and a reader
+    The example is what an operator copies to start editing, and a reader
     whose compiled answer differed from it would change models the moment
     someone saved an unmodified copy.
     """
@@ -97,7 +96,7 @@ class CompiledAssignmentTests(unittest.TestCase):
     checks against the roster itself.
 
     `CompiledDefaultsTests` holds these same values against the tracked
-    example, and `Spec.Config.Models` holds them from the Haskell side. This is
+    example. This is
     the third, independent statement of them -- a mistake made identically in
     the compiled roster and the example still fails here.
 
@@ -199,7 +198,7 @@ class CompiledAssignmentTests(unittest.TestCase):
 
 class RosterPathTests(unittest.TestCase):
     """`models.toml` under the XDG configuration root, resolved exactly as
-    `Kanban.Models.rosterPath` and `kanban_config.default_config_path` do."""
+    `kanban_config.default_config_path` does."""
 
     def test_xdg_config_home_decides_when_it_is_set(self):
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/somewhere/xdg"}):
@@ -305,7 +304,7 @@ class UnreadableFileTests(unittest.TestCase):
 
     def test_a_dangling_symlink_refuses_rather_than_reading_as_absent(self):
         # The link itself exists, so this is present-but-unusable. Resolving it
-        # is what fails, exactly as `getFileStatus` does on the Haskell side --
+        # is what fails --
         # so the refusal names that failure rather than the file's kind.
         link = self.root / "models.toml"
         link.symlink_to(self.root / "gone.toml")
@@ -432,7 +431,7 @@ class ForeignVersionTests(unittest.TestCase):
 
 
 class DefectVocabularyTests(unittest.TestCase):
-    """Every constructor `Kanban.Models.RosterDefect` names, driven here.
+    """Every defect `RosterError` can name, driven here.
 
     Unknown keys are defects at every level rather than warnings: silently
     skipping a misspelled `[roles.pr_reveiw.codex]` is how an operator ships
@@ -751,8 +750,8 @@ class ExampleAgreementTests(unittest.TestCase):
 
     def test_the_reader_carries_its_managed_asset_marker(self):
         # The issue-review installer links this module beside approve_issues.py
-        # and both it and Kanban.Preflight recognize an installed file by this
-        # marker rather than by path.
+        # and the installers recognize an installed file by this marker rather
+        # than by path.
         self.assertEqual(
             kanban_models.KANBAN_MANAGED_ASSET,
             "kanban-managed-asset:issue-review/kanban_models.py",

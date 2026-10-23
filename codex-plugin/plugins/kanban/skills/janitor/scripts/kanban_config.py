@@ -153,8 +153,8 @@ def installed_issue_review_dir() -> Path:
     still selects that installation. Silently reading such a candidate as
     absent and resolving the lower-precedence one is the fail-closed hole
     tools/approve_issues_service.py's resolve_backend and
-    src/Kanban/Review/Canonical.hs avoid on the record's contents; this probe
-    avoids it on the record's location, and leaves them to report what is
+    tools/resolve_issue_review_backend.py avoid on the record's contents; this
+    probe avoids it on the record's location, and leaves them to report what is
     wrong with the record they then read.
     """
     for candidate in (
@@ -173,8 +173,8 @@ def issue_review_record_path() -> Path:
     inherits no environment still has to find it, so the record's own path is
     the one thing that cannot move -- neither `--install-dir` nor
     ISSUE_REVIEW_INSTALL_DIR_ENV relocates it. Read by
-    src/Kanban/Review/Canonical.hs and by both packaged PR coordinators;
-    written only by tools/install_issue_review.py."""
+    tools/resolve_issue_review_backend.py, tools/approve_issues_service.py and
+    the packaged PR coordinators; written only by tools/install_issue_review.py."""
     return installed_issue_review_dir() / _ISSUE_REVIEW_RECORD_NAME
 
 
@@ -324,8 +324,8 @@ def drainer_record_path() -> Path:
     discovers an `--install-dir` installation it never saw the option for.
     Fixed rather than install-dir-relative on purpose: a dashboard that
     inherits no environment still has to find it, so neither `--install-dir`
-    nor DRAINER_INSTALL_DIR_ENV relocates it. Read by src/Kanban/Drainer.hs;
-    written by tools/install_drainer.py and tools/drain_prs_service.py."""
+    nor DRAINER_INSTALL_DIR_ENV relocates it. Written by tools/install_drainer.py
+    and tools/drain_prs_service.py, which also read it back."""
     return installed_drainer_dir() / _DRAINER_RECORD_NAME
 
 

@@ -353,7 +353,13 @@ BACKEND_DEFAULT_PATH = "Library/Application Support/kanban/issue-review"
 # Naming the record is what lets a workflow find an install made with
 # --install-dir; reconstructing the default could not.
 BACKEND_RECORD_PATH = BACKEND_DEFAULT_PATH + "/config.json"
+BACKEND_XDG_RECORD_PATH = ".local/share/kanban/issue-review/config.json"
 BACKEND_RECORD_FIELD = "backend_path"
+# Since issue #841 no asset embeds that resolution: each calls one bundled
+# script, whose tools/ source holds the record paths and the precedence.
+BACKEND_RESOLVER_NAME = "resolve_issue_review_backend.py"
+BACKEND_RESOLVER_SOURCE = "tools/" + BACKEND_RESOLVER_NAME
+DRAFTING_CONTRACT = "docs/drafting-workflow-contract.md"
 FORBIDDEN_BACKEND_PATHS = ("~/work/approve-issues", "$HOME/work/")
 
 DECLARED_ASSET_ROW_RE = re.compile(
@@ -1256,19 +1262,81 @@ class PortableBackendTests(unittest.TestCase):
     rule — they reach the same backend for gate state and resubmission, so a
     second resolution convention there would be a second contract."""
 
-    def test_issue_review_assets_resolve_the_kanban_managed_install_path(self):
+    def test_issue_review_assets_resolve_through_the_bundled_script(self):
+        # Claude commands call the plugin's scripts/ through the substituted
+        # root; Codex skills locate their own skill's installed copy under
+        # $CODEX_HOME. Neither may name a path inside the repository being
+        # worked, which is what the "unrelated directory" tests in
+        # test_packaged_issue_review_probe.py execute.
         for path in BACKEND_RESOLVING_ASSETS:
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
             self.assertIn(BACKEND_ENV_OVERRIDE, text, path)
-            self.assertIn(BACKEND_DEFAULT_PATH, text, path)
-            self.assertIn("approve_issues.py", text, path)
-            self.assertIn("python3 tools/install_issue_review.py", text, path)
+            self.assertIn("`tools/install_issue_review.py`", text, path)
+            if path.startswith("claude-plugin/"):
+                self.assertIn(
+                    f'python3 "${{CLAUDE_PLUGIN_ROOT}}/scripts/{BACKEND_RESOLVER_NAME}"',
+                    text,
+                    path,
+                )
+            else:
+                skill = Path(path).parent.name
+                self.assertIn(
+                    f"-path '*/kanban/*/skills/{skill}/scripts/{BACKEND_RESOLVER_NAME}'",
+                    text,
+                    path,
+                )
+                self.assertIn(
+                    f'python3 "${{RESOLVER:?{BACKEND_RESOLVER_NAME} was not found under the installed Kanban plugin}}"',
+                    text,
+                    path,
+                )
 
-    def test_issue_review_assets_resolve_through_the_installer_record(self):
+    def test_issue_review_assets_embed_no_probe(self):
         for path in BACKEND_RESOLVING_ASSETS:
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
-            self.assertIn(BACKEND_RECORD_PATH, text, path)
-            self.assertIn(BACKEND_RECORD_FIELD, text, path)
+            for fragment in (
+                "XDG_RECORD",
+                BACKEND_RECORD_PATH,
+                BACKEND_XDG_RECORD_PATH,
+                "does not name an absolute backend_path",
+            ):
+                self.assertNotIn(fragment, text, f"{path}: {fragment}")
+
+    def test_the_bundled_script_resolves_through_the_installer_record(self):
+        # The record paths, the field and the repair the assets used to carry
+        # inline, now held once by the script every asset calls.
+        text = (REPO_ROOT / BACKEND_RESOLVER_SOURCE).read_text(encoding="utf-8")
+        self.assertIn(BACKEND_ENV_OVERRIDE, text)
+        self.assertIn("/" + BACKEND_DEFAULT_PATH, text)
+        self.assertIn(BACKEND_RECORD_PATH, text)
+        self.assertIn(BACKEND_XDG_RECORD_PATH, text)
+        self.assertIn(BACKEND_RECORD_FIELD, text)
+        self.assertIn("approve_issues.py", text)
+        self.assertIn("python3 tools/install_issue_review.py", text)
+        self.assertLess(
+            text.index(BACKEND_XDG_RECORD_PATH), text.index(BACKEND_RECORD_PATH)
+        )
+
+    def test_section_six_describes_the_script_and_the_xdg_first_probe(self):
+        document = (REPO_ROOT / DRAFTING_CONTRACT).read_text(encoding="utf-8")
+        start = document.index("## 6. Portable canonical backend")
+        section = document[start : document.index("\n## 7.", start)]
+        self.assertIn(BACKEND_RESOLVER_SOURCE, section)
+        self.assertIn(BACKEND_ENV_OVERRIDE, section)
+        self.assertIn("kanban/issue-review/config.json", section)
+        self.assertIn("~/Library/Application Support/kanban/issue-review/config.json", section)
+        self.assertLess(
+            section.index("$XDG_DATA_HOME/kanban/issue-review/config.json"),
+            section.index("~/Library/Application Support/kanban/issue-review/config.json"),
+        )
+        # The single-record Library-only probe this section used to show.
+        self.assertNotIn('RECORD="$HOME/Library', section)
+        self.assertNotIn("<<'PY'", section)
+        # The section's claims about the assets hold the assets' own wording.
+        for path in BACKEND_RESOLVING_ASSETS:
+            asset = (REPO_ROOT / path).read_text(encoding="utf-8")
+            self.assertIn(BACKEND_RESOLVER_NAME, asset, path)
+        self.assertIn(BACKEND_RESOLVER_NAME, section)
 
     def test_autoissue_assets_defer_to_the_documented_backend_contract(self):
         for path in AUTOISSUE_ASSETS:

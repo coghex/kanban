@@ -1469,7 +1469,10 @@ class TriageAssetTests(unittest.TestCase):
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", text)
-                self.assertIn("kanban/issue-review/config.json", text)
+                # Since issue #841 the asset calls the bundled resolver, which
+                # holds the record paths; none embeds the probe.
+                self.assertIn("resolve_issue_review_backend.py", text)
+                self.assertNotIn("XDG_RECORD", text)
 
     def test_no_asset_names_a_candidate_approval_label(self):
         # The label belongs to the repository. An asset that named one would
@@ -1583,7 +1586,10 @@ class RetriageAssetTests(unittest.TestCase):
             with self.subTest(asset=path.name):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", text)
-                self.assertIn("kanban/issue-review/config.json", text)
+                # Since issue #841 the asset calls the bundled resolver, which
+                # holds the record paths; none embeds the probe.
+                self.assertIn("resolve_issue_review_backend.py", text)
+                self.assertNotIn("XDG_RECORD", text)
                 lines = [
                     line
                     for line in text.splitlines()
@@ -1766,9 +1772,11 @@ class ManifestCoverageTests(unittest.TestCase):
             with self.subTest(row=row):
                 self.assertIn(row, rows)
                 for asset in RENDERED_TRIAGE:
-                    self.assertIn(
-                        asset.relative_to(REPO_ROOT).as_posix(), rows[row]
-                    )
+                    declared = asset.relative_to(REPO_ROOT).as_posix() in rows[row]
+                    # Since issue #841 the discovery record's paths live in the
+                    # bundled resolver the assets call, so the assets owe the
+                    # python3 row and are not declared against the record row.
+                    self.assertEqual(declared, row == "python3-cli", asset)
 
     def test_both_rendered_retriage_paths_are_declared(self):
         # Issue #427 requirement 8. Retriage resolves the discovery record and
@@ -1778,9 +1786,8 @@ class ManifestCoverageTests(unittest.TestCase):
             with self.subTest(row=row):
                 self.assertIn(row, rows)
                 for asset in RENDERED_RETRIAGE:
-                    self.assertIn(
-                        asset.relative_to(REPO_ROOT).as_posix(), rows[row]
-                    )
+                    declared = asset.relative_to(REPO_ROOT).as_posix() in rows[row]
+                    self.assertEqual(declared, row == "python3-cli", asset)
 
     def test_the_contract_documents_the_reconciliation_authority(self):
         text = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(encoding="utf-8")

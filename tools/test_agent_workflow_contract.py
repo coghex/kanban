@@ -203,6 +203,11 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "codex-plugin/plugins/kanban/skills/issue-review/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/triage/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/retriage/scripts/resolve_issue_review_backend.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/approved_document.py",
@@ -242,6 +247,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/autosolve.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
+    "claude-plugin/plugins/kanban/scripts/resolve_issue_review_backend.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/approved_document.py",
@@ -257,6 +263,7 @@ GROK_PLUGIN_SURFACE_FILES = [
     "grok-plugin/plugins/kanban/scripts/review_pr.py",
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
 ]
 
 KIMI_PLUGIN_SURFACE_FILES = [
@@ -265,6 +272,7 @@ KIMI_PLUGIN_SURFACE_FILES = [
     "kimi-plugin/plugins/kanban/scripts/review_pr.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
     "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
 ]
 
 GOOGLE_PLUGIN_SURFACE_FILES = [
@@ -273,16 +281,18 @@ GOOGLE_PLUGIN_SURFACE_FILES = [
     "google-plugin/plugins/kanban/scripts/review_pr.py",
     "google-plugin/plugins/kanban/scripts/kanban_models.py",
     "google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "google-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
 ]
 
 # Issue #722's Claude-on-Copilot bundle: the Claude brand packaged for the
-# Copilot CLI, shipping the same five files the Kimi and Google bundles do.
+# Copilot CLI, shipping the same six files the Kimi and Google bundles do.
 CLAUDE_COPILOT_PLUGIN_SURFACE_FILES = [
     "claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md",
     "claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "claude-copilot-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-copilot-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+    "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
 ]
 
 # Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
@@ -298,6 +308,28 @@ TRUSTED_SPEC_SURFACE_FILES = {
     "google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
 }
+
+# Issue #841's issue-review backend resolver: one tools/ source and ten
+# byte-identical copies, one for the Claude bundle, one in each Codex skill that
+# resolves the backend, and one beside each external solve skill's trusted
+# helper. Each copy is a member of its brand's surface list above, so it is
+# reconciled against the manifest like any other vendored script; its row is
+# the empty set because it reads a record and spawns nothing. The empty set is
+# pinned rather than left implicit so a resolver that grew a subprocess call
+# fails the declaration instead of passing as "nothing discovered".
+ISSUE_REVIEW_RESOLVER_SURFACE_FILES = {
+    "claude-plugin/plugins/kanban/scripts/resolve_issue_review_backend.py": set(),
+    "codex-plugin/plugins/kanban/skills/issue-review/scripts/resolve_issue_review_backend.py": set(),
+    "codex-plugin/plugins/kanban/skills/issue-rereview/scripts/resolve_issue_review_backend.py": set(),
+    "codex-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py": set(),
+    "codex-plugin/plugins/kanban/skills/triage/scripts/resolve_issue_review_backend.py": set(),
+    "codex-plugin/plugins/kanban/skills/retriage/scripts/resolve_issue_review_backend.py": set(),
+    "grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py": set(),
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py": set(),
+    "google-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py": set(),
+    "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py": set(),
+}
+
 
 # Issue #370's vendored document mechanism, covered exactly the way the
 # trusted-comment helper above is. Each bundle carries a byte-identical copy of
@@ -1684,6 +1716,29 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
 
+    def test_every_issue_review_resolver_is_scanned_and_spawns_nothing(self):
+        # Issue #841's counterpart of the trusted-spec pin above, for the
+        # resolver the fourteen workflow assets now call instead of embedding.
+        self.assertEqual(len(ISSUE_REVIEW_RESOLVER_SURFACE_FILES), 10)
+        source = (REPO_ROOT / "tools/resolve_issue_review_backend.py").read_bytes()
+        for relative_path, expected in sorted(ISSUE_REVIEW_RESOLVER_SURFACE_FILES.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_COPILOT_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_bytes()
+            self.assertEqual(content, source, f"{relative_path} has drifted from its tools/ source")
+            found = discovered_commands_for_plugin_file(
+                relative_path, content.decode("utf-8")
+            )
+            self.assertEqual(found, expected, relative_path)
+            self.assertNotIn("subprocess", content.decode("utf-8"), relative_path)
+
     def test_the_vendored_document_mechanism_is_scanned_and_declared(self):
         # Issue #370's counterpart of the trusted-spec pin above. Each bundle's
         # copy of the mechanism is a member of its brand's surface list, so its
@@ -2651,20 +2706,27 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(discovered_plugin_commands(snippet), {"cp", "git", "grep"})
 
     def test_markdown_home_path_extraction_finds_the_backend_install_path(self):
-        # Pins the extractor against the actual packaged issue-review assets
-        # rather than a synthetic snippet, so a rewrite that stops naming the
-        # Kanban-managed install path fails here instead of leaving the
-        # completeness check with nothing to discover. The discovery record is
-        # the only user-scoped path these assets name now: the backend itself
-        # is read out of that record rather than composed from a default, so
-        # there is no `$HOME`-anchored approve_issues.py left to find.
+        # Pins the extractor against the actual packaged assets rather than a
+        # synthetic snippet, so a rewrite that stops naming the Kanban-managed
+        # install path fails here instead of leaving the completeness check
+        # with nothing to discover. The discovery record is the only
+        # user-scoped path the resolver names: the backend itself is read out
+        # of that record rather than composed from a default.
         #
-        # Both spellings, since issue #445: each fence probes the XDG record
+        # Both spellings, since issue #445: the script probes the XDG record
         # and then the `~/Library` one, so recovering only the macOS segment
-        # would pass against an asset that had lost half the probe. `triage`
-        # and `retriage` are listed here too -- they reach no other
-        # home-relative scan, so without them the manifest's `files`
-        # grounding is their only pin.
+        # would pass against a copy that had lost half the probe. The script
+        # is Python, so its literals are read from its text; the extractor
+        # that reads Markdown is pointed at the fourteen assets that call it
+        # as the negative control, since issue #841 none of them embeds
+        # either record path and a probe pasted back in would reappear here.
+        for relative_path in list(ISSUE_REVIEW_RESOLVER_SURFACE_FILES):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for token in (
+                "/Library/Application Support/kanban/issue-review/config.json",
+                "/.local/share/kanban/issue-review/config.json",
+            ):
+                self.assertIn(token, content, relative_path)
         for relative_path in MARKDOWN_RECORD_RESOLVER_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = markdown_home_relative_segments(content)
@@ -2672,7 +2734,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "/Library/Application Support/kanban/issue-review/config.json",
                 "/.local/share/kanban/issue-review/config.json",
             ):
-                self.assertIn(token, found, relative_path)
+                self.assertNotIn(token, found, relative_path)
 
     def test_heredoc_bodies_are_read_as_data_rather_than_commands(self):
         # The issue-review workflows feed a Python resolver to `python3 -` as
@@ -3043,19 +3105,24 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and twenty consumers across
-        # two languages read it, none of which can see each other's
+        # tools/install_issue_review.py writes it and sixteen files read it
+        # (the six coordinators' own probes and the ten copies of the bundled
+        # resolver script), none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
         # tools/kanban_config.py instead of restating it. The Haskell reader
         # that once resolved this record is gone.
         #
-        # Both platform rows are pinned to the *same* twenty files, and
+        # Both platform rows are pinned to the *same* sixteen files, and
         # against the same list rather than against each other: since issue
         # #445 every one of these readers probes both locations, so each
         # spells both literals. Asserting one row alone would let the XDG
-        # spelling be reverted in an asset while the macOS half still passed,
-        # which is the half-blind gate requirement 10 forbids.
+        # spelling be reverted in a reader while the macOS half still passed,
+        # which is the half-blind gate requirement 10 forbids. Since issue
+        # #841 the sixteen are the six coordinators and the ten copies of
+        # tools/resolve_issue_review_backend.py; the fourteen workflow assets
+        # call that script and spell neither literal, which the markdown-path
+        # extraction test below holds from the other side.
         by_id = {row["id"]: row for row in self.manifest}
         expected_files = [
             "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
@@ -3064,21 +3131,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "kimi-plugin/plugins/kanban/scripts/review_pr.py",
             "google-plugin/plugins/kanban/scripts/review_pr.py",
             "claude-copilot-plugin/plugins/kanban/scripts/review_pr.py",
-            "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/issue-review.md",
-            "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/solve.md",
-            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/issue-rereview.md",
-            "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/triage.md",
-            "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
-            "claude-plugin/plugins/kanban/commands/retriage.md",
-            "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
-            "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
-            "google-plugin/plugins/kanban/skills/solve/SKILL.md",
-            "claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md",
-        ]
+        ] + list(ISSUE_REVIEW_RESOLVER_SURFACE_FILES)
         for row_id in (
             "issue-review-discovery-record",
             "issue-review-discovery-record-xdg",
@@ -3149,8 +3202,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
             (
                 # Issue #444 gave the record its XDG sibling, and issue #445
-                # gave both rows the eighteen packaged readers that probe them
-                # (thirteen markdown resolvers plus five coordinators).
+                # gave both rows the packaged readers that probe them, and
+                # issue #841 replaced the markdown resolvers among them with
+                # the ten copies of the one script they now call (sixteen
+                # readers with the six coordinators).
                 # Neither spelling is tools/kanban_config.py's: that module
                 # composes the record path from the install directory above
                 # and a separate file name, so it carries neither literal

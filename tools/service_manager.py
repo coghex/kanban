@@ -98,9 +98,9 @@ class NoServiceManagerError(ServiceManagerError):
 # `tools/drain_prs_service.py` and `tools/install_drainer.py` both derive
 # theirs through this module, as do `tools/approve_issues_service.py` and
 # `tools/install_issue_approval.py`, and `tools/mission_runner_service.py` and
-# `tools/install_mission_runner.py`, and `src/Kanban/Drainer.hs` derives none
-# at all — it reads an installed job's label and plist path out of the
-# per-repository discovery record the controller writes.
+# `tools/install_mission_runner.py`. No other reader derives one: an
+# installed job's label and plist path are read out of the per-repository
+# discovery record the controller writes.
 #
 # There is one label, and one of every mutable runtime path, per canonical
 # GitHub repository *per service*: that partitioning is what lets several
