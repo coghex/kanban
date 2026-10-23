@@ -15,11 +15,14 @@ alone does not prove: a shared-policy edit in that source reaches exactly the
 external `solve` assets -- four since issue #722 added the Claude-on-Copilot
 bundle -- and each brand's runtime text reaches only its own.
 
-The Claude and Codex `solve` pair stays hand-edited (design D-5), so it is the
-negative control for the reach test, in the shape
-`tools/test_drafting_workflow_contract.py`'s `WriteLocationTests` uses: a
-planted edit that reached every asset in the tree would otherwise pass while
-proving nothing about where the source's text goes.
+Unlike the external `solve`, the Claude and Codex `solve` pair is itself
+rendered -- from `tools/command_sources/solve.md`, a separate source (issue
+#837) that deliberately is not merged with this one -- so the negative control
+is stronger than "not rendered at all": the pair is in the render set, and the
+planted edit must leave it unchanged. That is the shape
+`tools/test_drafting_workflow_contract.py`'s `WriteLocationTests` uses, so an
+edit that reached every rendered asset cannot pass while proving nothing about
+where this source's text goes.
 """
 
 from __future__ import annotations
@@ -43,7 +46,9 @@ ASSETS = {
 # The Copilot-hosted bundles, each keyed by its brand-table entry and the
 # origin brand its session stamps.
 COPILOT_BUNDLES = {"kimi": "kimi", "google": "google", "claude-copilot": "claude"}
-# Hand-edited, and deliberately outside this source's reach.
+# Rendered from tools/command_sources/solve.md, and deliberately outside this
+# source's reach.
+CANONICAL_SOURCE = "tools/command_sources/solve.md"
 CANONICAL_SOLVE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/solve.md",
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
@@ -101,6 +106,18 @@ class RegistrationTests(unittest.TestCase):
         for path, text in rendered.items():
             self.assertEqual(read(path), text, path)
 
+    def test_the_canonical_pair_keeps_its_own_source(self):
+        # Out of scope: the Claude and Codex solve keep rendering from their
+        # own source, exactly its two outputs.
+        canonical = [
+            item for item in renderer.COMMAND_SOURCES if item.source == CANONICAL_SOURCE
+        ]
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(
+            sorted(renderer.output_paths(canonical[0]).values()),
+            sorted(CANONICAL_SOLVE_ASSETS),
+        )
+
     def test_a_hand_edited_asset_is_reported_stale(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -132,7 +149,7 @@ class ReachTests(unittest.TestCase):
 
     def test_the_sentinel_is_new_to_the_tree(self):
         # Non-vacuous: nothing carries it before it is planted.
-        for path in (*ASSETS.values(), *CANONICAL_SOLVE_ASSETS, SOURCE):
+        for path in (*ASSETS.values(), *CANONICAL_SOLVE_ASSETS, SOURCE, CANONICAL_SOURCE):
             self.assertNotIn(SENTINEL, read(path), path)
 
     def test_a_shared_policy_edit_reaches_every_external_solve_asset_and_nothing_else(self):
@@ -141,13 +158,15 @@ class ReachTests(unittest.TestCase):
         for path in ASSETS.values():
             self.assertIn(f"{SHARED_ANCHOR}\n{SENTINEL}\n", rendered[path], path)
 
-    def test_the_canonical_solve_pair_is_outside_the_reach(self):
-        # The negative control: the Claude and Codex solve are no render of
-        # this source -- of any registered source -- so the edit cannot reach
-        # them however it is placed.
+    def test_the_canonical_solve_pair_is_rendered_but_untouched(self):
+        # The negative control. The pair is in the render set -- so the
+        # comparison above could have reported it -- and the planted edit
+        # leaves it byte-identical, because it renders from another source.
         rendered = render_with_source(plant(SHARED_ANCHOR))
         for path in CANONICAL_SOLVE_ASSETS:
-            self.assertNotIn(path, rendered, path)
+            self.assertIn(path, rendered, path)
+            self.assertEqual(rendered[path], self.baseline[path], path)
+            self.assertNotIn(SENTINEL, rendered[path], path)
             self.assertNotIn(SENTINEL, read(path), path)
 
     def test_a_grok_only_edit_reaches_grok_alone(self):
