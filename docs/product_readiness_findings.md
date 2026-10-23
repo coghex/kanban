@@ -570,9 +570,10 @@ that would have caught PROD-8 through PROD-11, applied to one section only.
   implementation by a test: `Spec.UI.Keys` compares the table's rows verbatim
   against `Kanban.UI.Keys`'s `bindingContract`, so a binding cannot drift from
   the document.
-- `CLAUDE.md` source-layout notes record that relationship deliberately: `UI.Keys`
+- The source-layout notes record that relationship deliberately (they moved from
+  `CLAUDE.md` to `docs/development.md#source-layout` under #844): `UI.Keys`
   is "the one declaration site for a board key binding, held against
-  `docs/design.md` §7 by a test."
+  [design.md](design.md) section 7 by a test."
 - No equivalent exists for sections 3 or 20. Four contradictions accumulated
   across roughly five weeks, two of them behind features that shipped and two
   ahead of planned work.
@@ -848,7 +849,8 @@ local checkout.
 
 - No `CONTRIBUTING.md` at the repository root or under `.github/`.
 - `CLAUDE.md:1-4` — addressed to "Claude Code sessions started at this
-  repository's root," not to contributors.
+  repository's root," not to contributors (as audited; #844 since reworded it to
+  address every agent session).
 - `AGENTS.md` is a tracked symlink to `CLAUDE.md` (git mode `120000`), held by
   `tools/test_repository_contract_alias.py` — so both instruction files are the
   same agent-facing document.
