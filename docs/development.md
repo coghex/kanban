@@ -241,10 +241,19 @@ every bundle, so nothing becomes invokable; it covers the Claude and Codex
 layouts plus a third brand, grok, which pairs the skill-directory layout with
 the `/` sigil and its own frontmatter keys. The vendored workflows render into
 `claude-plugin/.../commands/` and `codex-plugin/.../skills/`, so they ship and
-the bundle rules above apply to them. The external `solve` and `autosolve`,
-authored under `tools/command_sources/external/`, render into the Grok, Kimi,
-and Google bundles and neither of those two, whose own `solve` stays
-hand-edited and whose own `autosolve` renders from its separate source.
+the bundle rules above apply to them. Sixteen Claude/Codex sources are
+registered: `triage`, `retriage`, `backlog-review`, `fix`, `drain-prs`,
+`finalize`, `janitor`, `autosolve`, and the eight issue and pull-request
+workflows `solve`, `pr-review`, `pr-rereview`, `pr-revise`, `issue`,
+`autoissue`, `issue-review` and `issue-rereview`. Their bundle files are
+generated outputs; edit the source and re-render, never the output. The
+Claude/Codex pairs still hand-authored are the five document workflows
+(`design-epic`, `process-design-doc`, `process-report`, `note-problem`,
+`draft-report`) and `repair`, plus the Claude-only `draft-issues`, which has no
+Codex pair. The external `solve` and `autosolve`, authored under
+`tools/command_sources/external/`, render into the Grok, Kimi, Google and
+Claude-on-Copilot bundles and neither of those two, whose own `solve` and
+`autosolve` render from their separate sources.
 
 ## Source layout
 
