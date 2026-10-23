@@ -2,7 +2,7 @@
 
 Kanban's board is fully usable with nothing installed beyond `git` and a
 signed-in `gh`. The owner's workflow skills — canonical issue review, solve,
-auto-solve, and the PR review, rereview, revise, and repair flows — are
+auto-solve, and the PR review, rereview, revise, and fix flows — are
 separate: they run in your own Codex or Claude session, and they need workflow
 assets this repository tracks but does not install for you. The board starts
 none of them and checks none of them; each skill has its own dependency set,
@@ -76,8 +76,8 @@ four with `--all`.
 | Component | What it installs | Needed for |
 | --- | --- | --- |
 | `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` and `kanban_models.py` companions) under `~/Library/Application Support/kanban/issue-review/` on macOS or `$XDG_DATA_HOME/kanban/issue-review/` — `~/.local/share/kanban/issue-review/` when that variable is unset — on Linux, plus the discovery record naming that link | Canonical issue review/rereview, the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
-| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
-| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
+| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise` |
+| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
 
 There is deliberately no component here for the optional issue approval
@@ -204,7 +204,7 @@ ahead of that copy — a checkout that pulled a revision, or a newer release
 archive unpacked beside the one the bundle was added from — leaves every Codex
 session running the bundle as it was when it
 was last added: skills vendored since then simply do not exist there, and
-`$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` execute whatever
+`$pr-review`, `$pr-rereview`, `$pr-revise`, and `$fix` execute whatever
 shared coordinator that copy holds, because the tracked skills resolve it by
 searching that same cache.
 
@@ -266,7 +266,7 @@ these. What a skill needs follows what it spawns:
   with the opposite brand, so it needs both brands.
 - **PR review and rereview** run on the opposite brand from the PR's origin
   marker and are themselves the canonical reviewer, so they need that
-  brand's CLI and bundle. **PR revise** and **repair** run on the PR's *own*
+  brand's CLI and bundle. **PR revise** and **fix** run on the PR's *own*
   brand — each needs that brand's CLI, sign-in, and bundle — and then hand
   off to exactly one canonical rereview by spawning the opposite brand from
   inside that session, so each also needs that brand's CLI and
@@ -290,7 +290,7 @@ drainer is deliberately outside setup's scope and keeps its dedicated
 [install and status flow](pr-drainer.md).
 
 The tracked bundles are the supported source of the `solve`/`pr-review`/
-`pr-rereview`/`pr-revise`/`repair` workflows. If you previously relied on your own
+`pr-rereview`/`pr-revise` workflows. If you previously relied on your own
 unpackaged copies of those commands, install the bundle once with
 `setup_workflows.py`, which neither removes nor overrides anything else you have.
 
