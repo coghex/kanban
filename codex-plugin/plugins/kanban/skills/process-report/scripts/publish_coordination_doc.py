@@ -811,7 +811,7 @@ def link_into_place(scratch: Path, target: Path) -> None:
     os.link(scratch, target)
 
 
-def put_back(aside: Path, target: Path, data: bytes, mode: int) -> bool:
+def put_back(aside: Path, target: Path, data: bytes | None, mode: int) -> bool:
     """Return the captured document to its path without overwriting anything.
 
     `link` refuses when the path is occupied, which is the point: by the time a
@@ -824,7 +824,9 @@ def put_back(aside: Path, target: Path, data: bytes, mode: int) -> bool:
     the document deleted. When `link` is unavailable for some reason other than
     the path being taken, the document is recreated exclusively instead: that
     still refuses an occupied path, where a rename would check and then
-    overwrite — the very race this module declines to run anywhere else.
+    overwrite — the very race this module declines to run anywhere else. That
+    fallback needs the bytes; with `data` of None (the read of the aside
+    failed) only the link can restore, and a refusal leaves the aside in place.
     """
     try:
         link_into_place(aside, target)
@@ -833,6 +835,8 @@ def put_back(aside: Path, target: Path, data: bytes, mode: int) -> bool:
         return False
     except OSError:
         pass
+    if data is None:
+        return False
     try:
         descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
     except OSError:
@@ -871,8 +875,13 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
     target = root / document
     handle = scratch = aside = None
     captured, captured_mode, captured_blob = b"", 0o644, None
-    # Only a completed capture may be restored. Before it, `captured` is a
-    # placeholder rather than the document, and putting *that* back would
+    # Whether the rename completed is a different fact from whether the moved
+    # file was then read. Once it has, the aside holds the only copy of an
+    # untracked document, and nothing may delete it unless its bytes are
+    # restored or stored.
+    moved = False
+    # Only a completed read may supply bytes to restore. Before it, `captured`
+    # is a placeholder rather than the document, and putting *that* back would
     # invent a file rather than return one.
     captured_ok = False
     try:
@@ -902,6 +911,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             tempfile.mkdtemp(prefix=".kanban-publish-aside-", dir=str(target.parent))
         ) / target.name
         rename_aside(target, aside)
+        moved = True
 
         captured, _ = read_for_write(aside)
         captured_ok = True
@@ -947,6 +957,14 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             "document-unwritable",
             f"{document} could not be read or replaced: {error}",
         ) from error
+    except PublishError:
+        raise
+    except Exception as error:  # noqa: BLE001 - the aside's path must travel with it
+        # The boundary would report this as an internal error, which carries no
+        # detail; converting it here lets a retained aside be named.
+        raise PublishError(
+            "internal-error", f"{type(error).__name__}: {error}"
+        ) from error
     finally:
         # Cleanup runs after the document may already have been replaced, so
         # nothing in here may raise: an exception thrown from a `finally`
@@ -966,16 +984,35 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             # deletes the cursor it was trying to publish. Checked as an
             # invariant on the way out rather than repeated at each raise,
             # because the failure that matters here is the one not enumerated.
-            restored = True
-            if captured_ok and not _quietly(target.stat):
-                restored = put_back(aside, target, captured, captured_mode)
-            elif not captured_ok:
-                # The rename never completed, so nothing was taken and there is
-                # nothing to give back. A missing document here was removed by
-                # somebody else; recreating it from the placeholder would turn
-                # their deletion into an unapproved empty file.
-                restored = True
-            if restored:
+            #
+            # The aside is dropped only when its bytes are accounted for: the
+            # rename never happened, they were put back, or they are in the
+            # object database. The path existing at the target proves none of
+            # those, since another writer may have created it.
+            moved = moved or os.path.lexists(aside)
+            if not moved:
+                # Nothing was taken, so there is nothing to give back. A
+                # missing document here was removed by somebody else;
+                # recreating it from the placeholder would turn their deletion
+                # into an unapproved empty file.
+                safe = True
+            else:
+                if not captured_ok:
+                    # The read failed, so no bytes are in hand. Try once more:
+                    # they only serve the exclusive-create fallback, and the
+                    # link restores without them.
+                    try:
+                        captured, _ = read_for_write(aside)
+                        captured_ok = True
+                    except OSError:
+                        pass
+                if _quietly(target.stat):
+                    safe = captured_blob is not None
+                else:
+                    safe = put_back(
+                        aside, target, captured if captured_ok else None, captured_mode
+                    )
+            if safe:
                 _quietly(aside.unlink, missing_ok=True)
                 _quietly(aside.parent.rmdir)
             else:
@@ -986,6 +1023,12 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
                 if isinstance(in_flight, PublishError):
                     in_flight.detail.setdefault("captured_file", str(aside))
                     in_flight.detail.setdefault("captured_blob", captured_blob)
+                else:
+                    _quietly(
+                        print,
+                        f"the moved-aside document was kept at {aside}",
+                        file=sys.stderr,
+                    )
             # If it could not be put back, the temporary stays: the content is
             # in the object database either way, but deleting the only file
             # copy on the way out of a failure would be the worst thing this
