@@ -326,29 +326,25 @@ nothing**. Accept "all-safe", a group, or single item ids.
 
 ## 5. Apply approved items
 
-Rerun the census with the same two arguments before applying anything, so every
-gate is rechecked against current state rather than against the snapshot the
-report was written from:
+Rerun the census with the same two arguments before applying anything:
 
 ```bash
 python3 "$CENSUS" --repo "$ROOT" --fetch
 ```
 
 Recheck each item's gates immediately before its own command and skip anything
-that changed. **Every command below acts on one approved item and nothing else.**
-A partial approval is the normal result of §4, so a command that would also reach
-an item the user did not approve is refused rather than run. Apply items
-individually, recording deleted branch and ref SHAs in the result. Never delete
-an unmerged branch, drop unproved recovery state, force-push, reset, or
-hand-edit the drainer's locks, queue state, scheduler state, or incidents.
-Never use `rm -rf` and never force-remove a dirty worktree.
+that changed. **Every command below acts on one approved item and nothing
+else**; a command that would also reach an unapproved item is refused rather
+than run. Apply items individually, recording deleted branch and ref SHAs in the
+result. Never delete an unmerged branch, drop unproved recovery state,
+force-push, reset, or hand-edit the drainer's locks, queue state, scheduler
+state, or incidents. Never use `rm -rf` and never force-remove a dirty worktree.
 
-Each command is a template: every variable in it comes from the approved item,
-and `$DEFAULT` from the census's own `default_branch`.
+Each command is a template: every variable comes from the approved item, and
+`$DEFAULT` from the census's `default_branch`.
 
-**Per-item deletions.** Each names one target exactly and carries the value the
-report recorded for it, so a target another actor moved between the report and
-the apply is refused rather than deleted:
+**Per-item deletions.** Each names one target and its recorded value, so a
+target another actor moved since is refused:
 
 ```bash
 git -C "$ROOT" worktree remove "$WORKTREE"
@@ -369,69 +365,32 @@ git -C "$ROOT" update-ref -d "$REF" "$REF_SHA"
 git -C "$ROOT" update-ref -d "$TRACKING_REF" "$TRACKING_SHA"
 ```
 
-Remove a worktree by its exact registered path, never by a reconstructed one.
-Delete a remote branch one push per branch, and never with a bare `--delete`:
-that deletes whatever the branch points at *now*, so a branch someone pushed to
-after the `ls-remote` proof loses work nothing ever reviewed. The
-`--force-with-lease` naming the recorded SHA refuses that push instead, and the
-proof and the deletion then describe the same commit.
+Remove a worktree by its exact registered path. Delete a remote branch one push
+per branch, never with a bare `--delete`.
 
-**The lease binds the branch; nothing in it binds the destination.** `git push`
-does not necessarily write to the URL `ls-remote` read: `remote.origin.pushurl`
-replaces the fetch URL for pushes when it is set, it is multi-valued and every
-one of its values receives the same push, and a `url.<base>.pushInsteadOf` rule
-redirects the push with no `pushurl` in the configuration at all. So the
-deletion is a chain, and its push is reached only while
-`git remote get-url --push --all origin` — which reports the destinations after
-all of that rewriting — answers with exactly one entry equal to `origin`'s own
-effective fetch URL: the endpoint `$ENDPOINT` names, and the one `ls-remote`
-proved the branch on. Any other answer refuses the push, an empty one included.
-Nothing is deleted, the branch stays as visible cleanup debt, and the report
-names the destination that could not be proved. That comparison is made against
-the URLs Git reports rather than against the redacted `$ENDPOINT` or the
-reduced `$REPO`, because a redaction and a reduction each make two different
-endpoints look like one.
+**The lease binds the branch; nothing in it binds the destination.** The push
+is reached only while `git remote get-url --push --all origin` answers with
+exactly one entry equal to `origin`'s own effective fetch URL, the endpoint
+`$ENDPOINT` names. Any other answer refuses the push, an empty one included.
+Nothing is deleted: the branch stays as visible cleanup debt, and the report
+names the destination that could not be proved. Compare the URLs Git reports,
+never the redacted `$ENDPOINT` or the reduced `$REPO`.
 
-**A stash selector is a position in a reflog, not an identity**, which is why
-the drop above is three steps rather than one. Anyone who runs `git stash push`
-between the report and the apply — a person in another worktree, a drainer
-autostash — shifts every selector down by one, and a bare
-`git stash drop stash@{0}` then destroys work this run never inspected and the
-user never approved. Dropping highest selector index first covers only the
-shifts this run causes itself, as each drop moves every lower selector.
-
-Re-resolving the selector to its recorded object immediately before its own drop
-refuses the item when the shift already happened. It cannot refuse a shift that
-lands *between* that check and the drop, because those are two Git processes and
-nothing holds the reflog still across them — so the drop is verified afterwards
-as well. `git stash drop` names the object it dropped, and a dropped stash
-commit stays reachable through that id, so a mismatch is put straight back with
-`git stash store` and the item then fails. Nothing is lost either way, which is
-the invariant that matters; the restored stash returns at the top of the list,
-so re-run the census before touching stashes again rather than reusing the
-selectors the report was written with.
-
-Taking Git's index lock around both steps would close the window instead — a
-concurrent `git stash push` cannot write the index — and it is deliberately not
-done: creating that lock by hand blocks every other operation in the repository,
-strands the lock if the run dies, and is the same hand-editing of a lock file
-this workflow forbids for the drainer. A recoverable mistake is better than a
-wedged repository. Record each selector and its full object id in the report
-before anything is dropped.
+**A stash selector is a position in a reflog, not an identity**: drop the
+highest selector index first; the pre-drop re-resolve refuses an item a stash
+push already shifted; a drop that raced it is put back with `git stash store`
+and fails the item. Never take Git's index lock. Record each selector and its
+full object id before dropping, and re-run the census before touching stashes
+again.
 
 **The expected value on `update-ref -d` is mandatory, and must be the full SHA
-the report recorded.** It deletes the ref only while it still equals that value,
-which is what keeps a ref another actor moved from being deleted — and an
-all-zero value is not a weak guard but the opposite of one: Git reads it as
-"expect no ref" and deletes unconditionally. An empty or unrecorded value is a
-missing recheck, so stop and re-report rather than substituting anything for it.
-A stale origin-tracking ref is deleted the same way, one ref at a time:
-`git fetch --prune origin` would additionally remove every other ref that
-happens to be stale, including refs this run never reported and the user never
-saw.
+the report recorded.** An all-zero value deletes unconditionally: Git reads it
+as "expect no ref". An empty or unrecorded value is a missing recheck: stop and
+re-report. A stale origin-tracking ref goes the same way, one ref at a time,
+never with `git fetch --prune origin`.
 
-**The worktree metadata prune is the one operation Git offers no per-item form
-for**, so it is refused unless every record it would remove is approved:
+**The worktree metadata prune has no per-item form**, so it is refused unless
+every record it would remove is approved:
 
 ```bash
 LISTING="$(mktemp)"
@@ -445,32 +404,14 @@ rm -f "$LISTING"
 [ "$STATUS" = 0 ]
 ```
 
-`$APPROVED_RECORDS` is the newline-separated list of record names the user
-approved, and an empty one refuses every prune. A record the dry run names that
-is not on that list stops the prune: report the unapproved records and ask,
-rather than pruning them because they happened to be in the way.
-
-Three details in that block are load-bearing. **`2>&1` is not tidiness:** Git
-writes the `Removing worktrees/…` diagnostics to *stderr*, so a pipeline reading
-stdout alone sees an empty listing, subtracts nothing from it, and prunes every
-record including the ones nobody approved — a gate that reads as one and is not.
-**It is one `&&` chain** so the prune is unreachable unless the dry run
-succeeded and the subtraction came back empty; a plain sequence of lines would
-run the prune anyway in a shell without `set -e`, which is most of them. And the
-listing goes through `mktemp` rather than a pipe so the dry run's own exit status
-is what the chain tests: a failed dry run produces no matching lines either, and
-would otherwise read exactly like "nothing unapproved". The `|| :` is only for
-`grep`, which exits non-zero when it matches nothing — here the good case, since
-that means no record was named that the user did not approve. `rm -f` sits
-outside the chain so the temporary listing is removed on the refusing path too,
-and it is written outside the audited checkout, as `fix` and `finalize` write
-theirs — with the chain's own status carried around it in `$STATUS` and
-re-raised afterwards, so a cleanup that succeeds cannot report a refusal as a
-success. `$UNAPPROVED` still holds the offending record names at that point:
-name them.
+`$APPROVED_RECORDS` is the newline-separated list of approved record names; an
+empty one refuses every prune, and a record the dry run names that is not on it
+stops the prune: name the `$UNAPPROVED` records and ask. Keep the block exactly
+as written: `2>&1`, the single `&&` chain and the `mktemp` listing are what make
+it a gate.
 
 **Releasing a stale claim is two independent commands**, because a claim is an
-assignee *or* a `wip` label and may be either, both, or several assignees:
+assignee *or* a `wip` label:
 
 ```bash
 gh issue edit "$ISSUE" -R "$REPO" --remove-assignee "$ASSIGNEE"
@@ -478,15 +419,11 @@ gh issue edit "$ISSUE" -R "$REPO" --remove-label wip
 ```
 
 Run the first once per assignee the census recorded, and the second only when
-the issue actually carries `wip`. A label-only claim runs the second alone: a
-single combined command would pass an empty assignee and fail before it reached
-the label, leaving the claim exactly as it was. A claim with several assignees
-needs one removal each, rather than one call that drops the first and reports
-the claim released. Neither command touches issue content or approval labels.
+the issue actually carries `wip`. A claim with several assignees needs one
+removal each. Neither touches issue content or approval labels.
 
-The default fast-forward runs in the worktree that actually has the default
-branch checked out, resolved from the porcelain listing rather than assumed to
-be `$ROOT`:
+The default fast-forward runs where the default branch is checked out (from the
+porcelain listing, not assumed to be `$ROOT`):
 
 ```bash
 PRIMARY="$(git -C "$ROOT" worktree list --porcelain \
@@ -496,5 +433,4 @@ git -C "$PRIMARY" merge --ff-only "origin/$DEFAULT"
 ```
 
 After all approved actions, rerun the census and report applied, skipped,
-failed, and remaining items. Do not turn a partial failure into broader
-cleanup.
+failed, and remaining items; never turn a partial failure into broader cleanup.

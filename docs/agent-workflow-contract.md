@@ -2030,6 +2030,32 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   maintainers may modify the branch, which is neither necessary nor sufficient
   for the account running the workflow. A push rejected for lack of write
   access stops the run with nothing changed on the remote.
+- **Rollup reading, and why the workflow states it as it does** (rationale
+  moved out of the workflow text, #843). The rollup is fetched once with the
+  query and fields `src/Kanban/GitHub/Fetch.hs` uses, because
+  `gh pr view --json statusCheckRollup` omits the app slug and status creator
+  the context key needs, and the `totalCount` the completeness test compares
+  with the nodes returned. GitHub returns every context on the commit,
+  superseded ones included, so one check can appear twice — an old failure
+  beside the passing rerun that replaced it — and `src/Kanban/GitHub/Decode.hs`
+  keeps only the most recent context per key. The workflow does the same
+  before any branch applies, because the PR drainer reruns required checks on
+  its own schedule and a superseded failure is a state this repository
+  actually produces; reading it as current would edit and rereview an
+  already-green pull request for nothing, which is also why an entry that
+  cannot be keyed or ordered falls to the fail-closed rollup branch rather
+  than being deduplicated on a guess. A `null` or absent `statusCheckRollup`
+  is `ChecksNone` (`parseChecks`): GitHub is reporting no checks, so there is
+  no `contexts` object to compare, unlike a present rollup whose `contexts`,
+  `totalCount`, or nodes cannot be read, which still fails closed. An
+  incomplete rollup is never read as an absence, because that would turn "I
+  did not see one" into "there is none". The scratch file holding the rollup
+  comes from argument-free `mktemp`, portable across BSD/macOS and GNU/Linux,
+  lands outside the checkout, and is removed: CLAUDE.md's hygiene rule bars
+  scratch files in the tree, `tools/drain_prs.py` has to relocate any
+  untracked file before a fast-forward, and the worktree step preserves
+  untracked content in a reused worktree, so a stray artifact would be folded
+  into a focused commit.
 - **Required authority:** GitHub read on the pull request and its check rollup,
   and write to push to the pull request's head branch **in the head
   repository**. It never merges,
@@ -2224,6 +2250,41 @@ state.
   recreated under the same name between the merge and the cleanup is rejected
   rather than removed. There is no remote counterpart to that, by the decision
   recorded above.
+- **Gate and merge rationale** (moved out of the workflow text, #843). The
+  merge flags are load-bearing: `--merge` creates a merge commit so every
+  commit of the pull request reaches the default branch, where a squash or
+  rebase would discard that history and make the drainer's merges disagree
+  with this one about it; `--match-head-commit` names the reviewed commit as
+  an object, so a branch that moved between the gate and the call aborts the
+  merge; `--admin` uses whatever bypass the repository's branch ruleset grants
+  an administrator and is not a review bypass, because the gate is the review
+  and has already run twice. `mergeable` `CONFLICTING` is a real conflict and
+  `UNKNOWN` means GitHub has not finished computing mergeability; merging on
+  either is how an unresolved conflict lands. `mergeable` answers whether the
+  merge *would* be clean, never whether it *should* happen now: a `MERGEABLE`
+  pull request may be `BEHIND` (its head has not seen the base tip the
+  reviewed code lands on) or `UNSTABLE` (a check is failing), and `--admin`
+  would push past the branch update and fresh review the drainer would
+  require. `parseMergeState` and `mergeStateReady` are therefore mirrored
+  exactly: `CLEAN` is ready, and so is `BLOCKED` on a `MERGEABLE` pull
+  request, the branch-protection requirement the `MergeProtected` state models
+  and the one `--admin` is for; a `BEHIND` pull request is `fix`'s to update
+  and rereview. "No checks reported" is what a conflicted pull request looks
+  like, not a green one, and the success test is deliberately wider than the
+  drainer's single `required_ci_check`: a manual fallback merging outside the
+  daemon's audit should be more careful than it. The head comparison, not the
+  label, decides approval: `.github/workflows/review-gate.yml`'s
+  `dismiss-stale-approval` job removes `reviewed:approve` when a push touches a
+  file the pull request owns, but a marker whose head no longer matches is
+  stale whatever the label says. Logins compare case-insensitively because
+  GitHub does not preserve case in a way that may decide this. A repository
+  that renamed `reviewed:approve` would otherwise have every approval refused,
+  and one configured for `review` approval would look unapproved with a good
+  approval on it; a blocking label refuses like the changes-requested label
+  because `hasProblemLabel` treats the two alike and a blocking label is a
+  decision a human made. An empty `$PR` is refused for the same reason as a
+  branch name: the target must be the number the user confirmed, not the
+  absence that prompted the question.
 - **Mandatory/optional:** optional — user-invoked only, reached by asking for
   it, and spawned by no Kanban code path.
 
@@ -2280,6 +2341,59 @@ mutation reappear on the other (issues #544/#575, #608).
   machine-local keep decisions outside every worktree and is mutated only with
   explicit approval. It reads the PR drainer's managed state (§2.4) and writes
   none of it.
+- **Apply-step rationale** (moved out of the workflow text, #843). A remote
+  branch is deleted one push per branch and never with a bare `--delete`,
+  which would delete whatever the branch points at *now*, so a branch pushed
+  to after the `ls-remote` proof would lose work nothing reviewed; the lease
+  naming the recorded SHA refuses that push, and the proof and the deletion
+  then describe the same commit. The lease binds the branch and nothing in it
+  binds the destination, which is why the destination proof above exists.
+  A stash selector is a position in a reflog, not an identity: anyone who runs
+  `git stash push` between the report and the apply — a person in another
+  worktree, a drainer autostash — shifts every selector down by one, and a bare
+  `git stash drop stash@{0}` then destroys work this run never inspected and the
+  user never approved. Dropping the highest selector index first covers only the
+  shifts this run causes itself. Re-resolving the selector to its recorded
+  object immediately before its own drop refuses the item when the shift
+  already happened, but it cannot refuse one that lands between that check and
+  the drop, because those are two Git processes and nothing holds the reflog
+  still; so the drop is verified afterwards. `git stash drop` names the object
+  it dropped and a dropped stash commit stays reachable through that id, so a
+  mismatch is put straight back with `git stash store` and the item fails.
+  Nothing is lost either way, and the restored stash returns at the top of the
+  list, so the census is re-run before stashes are touched again. Taking Git's
+  index lock around both steps would close the window and is deliberately not
+  done: creating that lock by hand blocks every other operation in the
+  repository, strands the lock if the run dies, and is the same hand-editing of
+  a lock file the workflow forbids for the drainer; a recoverable mistake is
+  better than a wedged repository. The expected value on `update-ref -d` is
+  mandatory and must be the full recorded SHA: it deletes the ref only while it
+  still equals that value, an all-zero value is the opposite of a guard
+  because Git reads it as "expect no ref" and deletes unconditionally, and an
+  empty or unrecorded value is a missing recheck. A stale tracking ref is
+  deleted that way, one ref at a time, because `git fetch --prune origin` would
+  also remove every other stale ref, including refs this run never reported.
+  The worktree metadata prune is the one operation Git offers no per-item form
+  for, so it is refused unless every record it would remove is approved. Its
+  block is built the way it is on purpose: `2>&1`, because Git writes the
+  `Removing worktrees/…` diagnostics to stderr and a pipeline reading stdout
+  alone would see an empty listing, subtract nothing, and prune every record;
+  one `&&` chain, so the prune is unreachable unless the dry run succeeded and
+  the subtraction came back empty, where a plain sequence would run it anyway
+  in a shell without `set -e`; a `mktemp` listing rather than a pipe, so the
+  dry run's own exit status is what the chain tests, since a failed dry run
+  also produces no matching lines and would read as "nothing unapproved"; `|| :`
+  only for `grep`, which exits non-zero when it matches nothing, the good case
+  here; and `rm -f` outside the chain, with the chain's status carried in
+  `$STATUS` and re-raised, so the temporary listing, written outside the
+  audited checkout as `fix` and `finalize` write theirs, is removed on the
+  refusing path too and a cleanup that succeeds cannot report a refusal as a
+  success. Releasing a stale claim is two independent commands because a claim
+  is an assignee or a `wip` label and may be either, both, or several
+  assignees: a single combined command on a label-only claim would pass an
+  empty assignee and fail before it reached the label, leaving the claim as it
+  was, and one call cannot remove several assignees while reporting the claim
+  released.
 - **Mandatory/optional:** optional — user-invoked only, and spawned by no
   Kanban code path.
 
