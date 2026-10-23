@@ -17,16 +17,23 @@ created above it.
 
 - Added `tools/approved_document.py`, the document-write half of the
   coordination-document publisher made independent of its publication
-  mechanism, slice B of #775's consolidation (#830). It applies an approved
-  document only over the baseline the preflight observed, keeps the pending and
-  applied records and the `--check-pending` preflight, and hands the one named
-  path to the external `docs-push` (`--expect`, `--keep`), deciding landing from
-  a verified receipt on the freshly fetched default branch and never from the
-  tool's output. `tools/tracker_transaction.py` no longer loads the publisher:
-  local resolution is licensed only by the helper's applied record, reports
-  `published: false`, and leaves the publication obligation outstanding. Both
-  bundles ship the helper; no command invokes it yet, and the publisher is
-  unchanged until its retirement.
+  mechanism, slice B of #775's consolidation (#830), to the recovery contract in
+  `docs/designs/approved_document_recovery_design.md`. It applies an approved
+  document only over the baseline the preflight observed, keeping custody of the
+  original at every step (a capture descriptor persisted before the move, exclusive
+  links only, no unlink of a captured file until it is restored or retained);
+  keeps one retained version-2 intent record that roots the approved, baseline and
+  captured bytes; and hands the one named path to the external `docs-push`
+  (`--expect`, `--keep`), recording the handoff with the child's pid, start time
+  and argv. Landing is decided only by evidence in the freshly fetched default
+  branch over the interval from the recorded tip (a receipt, or the approved blob
+  at the path), saved in the intent and trusted over later history; an automatic
+  retry additionally needs an affirmative `non_fast_forward` rule from GitHub.
+  `tools/tracker_transaction.py` no longer loads the publisher: local resolution
+  is licensed only by the helper's applied record plus a verified negative
+  landing, reports `published: false`, and leaves the publication obligation
+  outstanding. Both bundles ship the helper; no command invokes it yet, and the
+  publisher is unchanged until its retirement.
 - Fixed `publish_coordination_doc.py` deleting the document it had moved aside
   when reading it back failed (#845). Cleanup treated an unread capture as proof
   the rename never happened and unlinked the aside, so an untracked document
