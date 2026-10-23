@@ -1086,6 +1086,67 @@ class FixCaseTests(HelperCase):
                 self.assertFalse(run.result["paths"]["review"]["met"])
                 self.assertEqual(run.result["paths"]["review"]["evidence"], "unreadable")
 
+    def test_an_unorderable_record_confines_its_failure_to_its_own_path(self):
+        # An id that is not a number cannot be ordered, and ordering is part of
+        # reading either feed. The failure belongs to the path reading that feed:
+        # it must neither veto an independently valid other path nor be guessed
+        # past.
+        either = '[workflow]\napproval_mode = "either"\n'
+        bad_comments = pages_of(
+            marker_comment(approve(), 1),
+            {**comment(2, "2026-08-02T00:00:00Z", "noise"), "id": "not-a-number"},
+        )
+        bad_reviews = [
+            [
+                review(1, "2026-08-01T00:00:00Z", "APPROVED", HEAD, login="alice"),
+                {**review(2, "2026-08-02T00:00:00Z", "APPROVED", HEAD), "id": {"n": 1}},
+            ]
+        ]
+        good_reviews = [[review(1, "2026-08-01T00:00:00Z", "APPROVED", HEAD)]]
+        state = state_of(review_decision="APPROVED")
+        # Unparseable comments: the label path is unmet, the native path approves.
+        run = self.fix(config=either, state=state, pages=bad_comments, reviews=good_reviews)
+        self.assertApproved(run)
+        self.assertFalse(run.result["paths"]["label"]["met"])
+        self.assertEqual(run.result["paths"]["label"]["evidence"], "unreadable")
+        self.assertTrue(run.result["paths"]["review"]["met"])
+        # Unparseable reviews: the native path is unmet, the label path approves.
+        run = self.fix(config=either, state=state, reviews=bad_reviews)
+        self.assertApproved(run)
+        self.assertTrue(run.result["paths"]["label"]["met"])
+        self.assertFalse(run.result["paths"]["review"]["met"])
+        self.assertEqual(run.result["paths"]["review"]["evidence"], "unreadable")
+        # Controls: with nothing valid on the other side the same failure is the
+        # decision, and under a single-path mode it is a refusal.
+        both_bad = self.fix(config=either, state=state, pages=bad_comments, reviews=bad_reviews)
+        self.assertRefused(both_bad, "either mode")
+        self.assertRefused(self.fix(pages=bad_comments), "could not be parsed")
+        self.assertRefused(
+            self.fix(
+                config='[workflow]\napproval_mode = "review"\n',
+                state=state_of(labels=(), review_decision="APPROVED"),
+                reviews=bad_reviews,
+            ),
+            "could not be parsed",
+        )
+
+    def test_a_malformed_record_id_refuses_finalize_outright(self):
+        bad = pages_of(
+            marker_comment(approve(), 1),
+            {**comment(2, "2026-08-02T00:00:00Z", "noise"), "id": "x"},
+        )
+        run = self.finalize(pages=bad)
+        self.assertRefused(run, "the pull request or its comment feed could not be read")
+        self.assertEqual(run.result["paths"]["canonical"]["evidence"], "unreadable")
+
+    def test_ordinary_empty_and_numeric_string_ids_still_order(self):
+        # `0`, missing and numeric-string ids keep the meaning they had.
+        pages = pages_of(
+            {**marker_comment(approve()), "id": "7"},
+            {**comment(0, "2026-08-02T00:00:00Z", "noise"), "id": None},
+        )
+        self.assertApproved(self.fix(pages=pages))
+
     def test_a_failure_that_leaves_the_decision_unapproved_still_exits_nonzero(self):
         # Under the single-path modes the same failure IS the decision.
         self.assertRefused(self.fix(pages=None), "the comment feed could not be read")

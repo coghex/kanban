@@ -195,6 +195,14 @@ EXTERNAL_ORIGIN_REVIEWERS = {
 }
 
 
+class EvidenceError(Exception):
+    """One evidence record cannot be read, so the path that needs it is unmet.
+
+    Never a veto of the other path: the caller catches it at the boundary of the
+    path that raised it and reports that path unmet.
+    """
+
+
 class Refusal(Exception):
     """The policy refuses. Carries the concrete reason the caller reports."""
 
@@ -217,6 +225,22 @@ def new_result(policy: str | None) -> dict:
         "config": {"path": None, "status": None},
         "paths": {},
     }
+
+
+def record_id(item: dict) -> int:
+    """A feed record's numeric id, the tie-break between equal timestamps.
+
+    A record whose id is not a number cannot be ordered, and guessing an order
+    could let the wrong marker or review speak, so it is an evidence failure of
+    the path reading the feed rather than a value to default.
+    """
+    value = item.get("id") or 0
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise EvidenceError("a record id is not a number")
+    try:
+        return int(value)
+    except ValueError:
+        raise EvidenceError("a record id is not a number") from None
 
 
 def path_outcome(met: bool, evidence: str, head: str | None, detail: str | None) -> dict:
@@ -431,7 +455,7 @@ def select_marker(comments: list[dict], publisher: str) -> tuple[Selection, bool
     """
     ordered = sorted(
         comments,
-        key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)),
+        key=lambda item: (str(item.get("created_at") or ""), record_id(item)),
         reverse=True,
     )
     history = False
@@ -555,7 +579,7 @@ def native_path(
             # An approval no author can be attached to cannot be superseded or
             # trusted: it is not evidence.
             continue
-        key = (str(review.get("submitted_at") or ""), int(review.get("id") or 0))
+        key = (str(review.get("submitted_at") or ""), record_id(review))
         held = newest.get(author)
         if held is None or key > held["key"]:
             newest[author] = {"key": key, "state": state, "review": review}
@@ -661,19 +685,39 @@ def evaluate_fix(repo: str, pr: str, brand: str, explicit_config: str, result: d
     attached = settings["approval_label"].casefold() in labels
     review_decision = str(state.get("reviewDecision") or "").upper() == "APPROVED"
 
+    def confine(name: str, build) -> dict:
+        # A parse failure in one path's evidence is that path's unmet outcome.
+        # It must never reach the outer handler, which would refuse the whole
+        # evaluation and veto a path that holds independently.
+        try:
+            return build()
+        except Exception as error:
+            return path_outcome(
+                False,
+                "unreadable",
+                None,
+                f"the {name} evidence could not be parsed ({type(error).__name__})",
+            )
+
     paths = result["paths"]
     if mode in ("label", "either"):
-        paths["label"] = label_path(
-            attached,
-            settings["approval_label"],
-            read_comments(repo, pr),
-            publisher,
-            head,
-            brand,
-            result,
+        paths["label"] = confine(
+            "label",
+            lambda: label_path(
+                attached,
+                settings["approval_label"],
+                read_comments(repo, pr),
+                publisher,
+                head,
+                brand,
+                result,
+            ),
         )
     if mode in ("review", "either"):
-        paths["review"] = native_path(read_reviews(repo, pr), head, review_decision)
+        paths["review"] = confine(
+            "review",
+            lambda: native_path(read_reviews(repo, pr), head, review_decision),
+        )
 
     met = [name for name, outcome in paths.items() if outcome["met"]]
     # Either path is enough under `either`; the others need their one path.
@@ -774,7 +818,13 @@ def evaluate_finalize(repo: str, pr: str, explicit_config: str, result: dict) ->
             False, "unreadable", None, "the comment feed could not be read"
         )
         raise Refusal("the pull request or its comment feed could not be read")
-    selection, history = select_marker(comments, publisher)
+    try:
+        selection, history = select_marker(comments, publisher)
+    except EvidenceError:
+        paths["canonical"] = path_outcome(
+            False, "unreadable", None, "the comment feed could not be parsed"
+        )
+        raise Refusal("the pull request or its comment feed could not be read") from None
     result["marker_history"] = history
     if not selection.ok:
         paths["canonical"] = path_outcome(False, selection.kind, None, selection.detail)

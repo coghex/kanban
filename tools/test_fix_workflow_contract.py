@@ -1599,12 +1599,15 @@ class HeadBoundApprovalTests(unittest.TestCase):
         helper = read(REPO_ROOT / "tools/pr_head_approval.py")
         self.assertIn(
             'key=lambda item: (str(item.get("created_at") or ""), '
-            'int(item.get("id") or 0)),',
+            'record_id(item)),',
             helper,
             "the helper no longer orders the feed by created_at then id",
         )
         self.assertIn("reverse=True,", helper)
         for source in (FINALIZE_SOURCE, FIX_SOURCE):
+            self.assertNotIn(
+                'record_id(item)', read(source), f"{source} re-implements it"
+            )
             self.assertNotIn(
                 'int(item.get("id") or 0)', read(source), f"{source} re-implements it"
             )
