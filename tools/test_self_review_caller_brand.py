@@ -457,15 +457,22 @@ class SelfReviewCallerBrandTests(unittest.TestCase):
                         module.parse_args()
 
 
-# The four bundle assets that document `self_review_refused` recovery, and
-# therefore owe the routed-reviewer rule. An asset is the program an agent
-# executes top to bottom, so a recovery step that names a reviewer the
-# coordinator will not spawn is a wrong instruction, not a stale comment.
+# The bundle assets that own the `self_review_refused` recovery, and therefore
+# owe the routed-reviewer rule. An asset is the program an agent executes top to
+# bottom, so a recovery step that names a reviewer the coordinator will not
+# spawn is a wrong instruction, not a stale comment. pr-rereview used to restate
+# it beside pr-review's copy and now follows pr-review for it (issue #839), so
+# the rule is stated once, at its owner, and SELF_REVIEW_FOLLOWING_ASSETS holds
+# the followers to following it.
 SELF_REVIEW_RECOVERY_ASSETS = (
     "claude-plugin/plugins/kanban/commands/pr-review.md",
-    "claude-plugin/plugins/kanban/commands/pr-rereview.md",
     "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
+)
+
+# Each follower with the brand and invocation sigil it must name.
+SELF_REVIEW_FOLLOWING_ASSETS = (
+    ("claude-plugin/plugins/kanban/commands/pr-rereview.md", "claude", "/"),
+    ("codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md", "codex", "$"),
 )
 
 # The negative control, in WriteLocationTests' pattern: assets that reach the
@@ -549,6 +556,23 @@ class SelfReviewRecoveryAssetTests(unittest.TestCase):
                     "operator's decision, never this session's.",
                     body,
                 )
+
+    def test_a_follower_follows_the_owner_and_restates_no_recovery(self):
+        # The follower keeps its own declaration, since the brand it declares is
+        # its own, and sends everything else to the owner. A follower that
+        # restated the recovery would be a second copy to drift; one that
+        # dropped the pointer would leave a rereview with no recovery at all.
+        for relative_path, brand, sigil in SELF_REVIEW_FOLLOWING_ASSETS:
+            with self.subTest(asset=relative_path):
+                body = self.read(relative_path)
+                self.assertIn(f"--self-review-as {brand}", body)
+                self.assertIn(
+                    f"read and follow the complete `{sigil}pr-review` workflow", body
+                )
+                self.assertIn("none of it is restated here", body)
+                self.assertNotIn('`"self_review_refused"`', body)
+                self.assertNotIn(ROUTED_RECOVERY, body)
+                self.assertNotIn('`"no_agent_mode"`', body)
 
     def test_the_delegating_assets_owe_and_carry_no_recovery_rule(self):
         # Non-vacuity in both directions: each control really is a delegator

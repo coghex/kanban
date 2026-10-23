@@ -310,8 +310,11 @@ that a particular comment should not.
   `pr-origin:google`, which are known origins
   whose cross-brand reviewer is Codex, never Claude, and never both.
   `pr-revise`
-  runs on the PR's own origin brand and internally invokes
-  exactly one canonical `pr-rereview` after pushing a fix. None of Grok,
+  runs on the PR's own origin brand, and says so itself: before it changes
+  anything it stops on a missing, malformed, repeated or opposite-brand
+  `pr-origin` marker (§2.9's rule for `fix`). It internally invokes
+  exactly one canonical `pr-rereview` immediately after pushing a fix, without
+  waiting for the pull request's checks. None of Grok,
   Kimi, or Google is a spawned provider, so revision and repair of a
   grok-origin, kimi-origin, or google-origin pull request are refused in
   every operating mode; the session that opened the pull request revises

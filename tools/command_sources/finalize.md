@@ -134,9 +134,9 @@ V2_RE = re.compile(
 # `<!-- PR-REVIEW:V2 ... -->` and let an older APPROVE win, which is the
 # fail-open the malformed-marker rule exists to close.
 MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
-# The origin markers, character for character as `originFromBody` spells
-# them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
-# these markers there and is not one here. Grok, Kimi, and Google are known
+# The origin markers, character for character as `origin_from_body` in the
+# bundled coordinator spells them. A different spacing is not one of these
+# markers there and is not one here. Grok, Kimi, and Google are known
 # origins Codex reviews; none is a spawned provider and none ever appears in
 # `reviewers=`.
 ORIGIN_MARKERS = {
@@ -324,7 +324,7 @@ if chosen is None:
 # Whose brand reviewed has to be read off the pull request, not assumed: an
 # approval published by the same brand that wrote the code is a self-review,
 # and the marker alone cannot tell you that. These are exactly the rules
-# originFromBody applies in src/Kanban/PullRequestFlow.hs -- one marker, of one
+# `origin_from_body` applies in the bundled coordinator -- one marker, of one
 # kind, as the final non-whitespace content of the body.
 body_text = str(state.get("body") or "")
 stripped = body_text.rstrip()
@@ -503,8 +503,8 @@ What that gate requires, and why each part is what it is:
   approval this workflow acts on is an *opposite-brand* approval, and the marker
   alone cannot say whether it is one: it names who reviewed, not who wrote. So
   the origin is read off the pull request body by exactly the rules
-  `originFromBody` applies in `src/Kanban/PullRequestFlow.hs` — one marker, of
-  one kind, as the body's final non-whitespace content — and a marker whose
+  the bundled coordinator's `origin_from_body` applies — one marker, of one
+  kind, as the body's final non-whitespace content — and a marker whose
   `reviewers=` names that same brand is refused as a self-review. Both markers
   present, the same marker twice, and a marker with trailing text after it are
   each refusals rather than defaults. A body with **no** marker is the

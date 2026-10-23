@@ -14,9 +14,38 @@ Repair one positive PR number. Treat the canonical review as the contract; do no
 
 Run this in a **Class A** session (see the `model-classes` skill).
 
-The canonical rereview route is fixed by brand: a Claude-origin PR uses the Codex reviewer; a Codex-origin PR uses the Claude reviewer; unknown or external origin uses both independently. Neither a specific model nor reasoning effort is pinned or verified; only the brand is selected, deferring to that installation's own configured default. This session runs on the PR's own origin brand (Kanban only ever resumes the original solver to revise); the rereview below therefore always hands off to the opposite brand's canonical reviewer identity, never to this session's own model.
+The bundled coordinator decides which reviewer the rereview goes to, from the pull request's origin marker and the roster; this workflow states no routing rule and pins neither a model nor a reasoning effort. Step 1 below stops this session before it changes anything unless the pull request belongs to this session's own brand, so the rereview never reaches the brand that authored the revision.
 
-## 1. Establish the review contract
+## 1. Require the pull request's origin to be this brand
+
+This workflow is user-invoked: the user chose which brand's session runs it, and nothing has checked that the choice matches the pull request, so it checks first, before any mutation — before a worktree, a push, or the rereview step 2 may run on a moved head.
+
+Fetch the pull request body (`gh pr view <pr> --json body`), read its `pr-origin` marker, and apply exactly the
+rules `origin_from_body` applies in the bundled coordinator's `review_pr.py`:
+the body must carry exactly ONE marker, of exactly one kind, as its final
+non-whitespace content. Both markers present, the same marker twice, a marker with trailing
+text after it, and no marker at all are each a refusal — not a default.
+
+<!-- brand:claude -->
+This is the Claude bundle, so the marker must be `<!-- pr-origin:claude -->`.
+A `pr-origin:codex` pull request belongs to the Codex bundle's own revise
+skill, not to this one.
+<!-- brand:codex -->
+This is the Codex bundle, so the marker must be `<!-- pr-origin:codex -->`.
+A `pr-origin:claude` pull request belongs to the Claude bundle's own revise
+command, not to this one.
+<!-- /brand -->
+
+**A missing, malformed, or opposite-brand marker stops the run with nothing
+changed.** The coordinator routes the rereview from that same marker, so
+revising a pull request whose origin names the OTHER brand would have this
+session author a change and then hand it to its own brand to review. An
+unknown-origin or external-origin pull request (a `grok`, `kimi` or `google`
+marker, or none) stops here too: it has no declared brand to match, and guessing
+one would invent the fact this check exists to read. Report what the marker said
+and which bundle owns the pull request.
+
+## 2. Establish the review contract
 
 Read the PR title, body, head SHA, labels, merge state, checks, linked issues, and all comments. Identify the newest authenticated-user `pr-review:v2` (or legacy `pr-review:v1`) marker and its verdict.
 
@@ -30,7 +59,7 @@ Record whether the PR has closing-issue references. A reviewed PR with none is a
 
 Capture every blocker with its file/line, required behavior, and any prior-blocker verification request. Inspect the actual code and tests before choosing a fix. Ask the user about a material product or scope decision; otherwise make the smallest complete fix.
 
-## 2. Use an isolated, current worktree
+## 3. Use an isolated, current worktree
 
 Never switch the repository's main checkout or reuse an unrelated dirty worktree.
 
@@ -41,7 +70,7 @@ Never switch the repository's main checkout or reuse an unrelated dirty worktree
 
 If the remote head moves at any point before push, stop: re-read the current PR and reconcile the new revision rather than overwriting it.
 
-## 3. Implement and validate
+## 4. Implement and validate
 
 Address every canonical blocker, including the previous review's requested regression coverage. Preserve the issue/PR scope; do not fold in unrelated cleanup.
 
@@ -49,14 +78,14 @@ Run the narrowest relevant tests while iterating, then the repository's required
 
 Commit the focused fix with a clear message. A fix to documentation that goes with the change is landed with `docs-push` and linked from the PR body as `Docs: <path> @ <commit>`, placed before the origin marker, instead of being committed to the branch — unless `docs-push` refuses the path as code, or this checkout's own `origin` is not the pull request's base repository (a fork checkout): `docs-push` publishes to `origin`, so in either case the documentation is committed to the branch like the code. Unless the spec names its path, a verdict or evidence write-up goes under `docs/archive/`, because it records finished work and repositories hide that directory from search; design notes and contracts are updated where they live. That decides only where the file goes, not how it lands. Before push, fetch the PR branch and verify its remote SHA still matches the recorded head. Push the new commit to that exact PR branch without force. If the verification fails, stop and report the competing update.
 
-## 4. Wait for CI and rerun canonical review
+## 5. Rerun canonical review
 
-Wait for the PR's required checks for the pushed head to complete successfully. If CI fails, diagnose and fix only when the failure is attributable to this revision; otherwise report the external failure and stop.
+Do not wait for, poll, or diagnose the pull request's checks: the rereview follows the push immediately. Local validation in step 4 is the evidence this workflow owes before it pushes; what the checks later report is the drainer's and the next review round's to act on.
 
 <!-- brand:claude -->
 Then invoke the coordinator exactly once. This plugin bundles its own copy of the coordinator at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`, so it never depends on the Codex plugin being installed. Do not pass `--self-review` here: unlike `{{cmd:pr-review}}`/`{{cmd:pr-rereview}}`, this session cannot review as the opposite brand itself, so the coordinator must spawn that nested reviewer.
 <!-- brand:codex -->
-Then invoke the coordinator exactly once. Kanban resumes this session with the *revised* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
+Then invoke the coordinator exactly once. This session's working directory is the *revised* repository, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 Do not pass `--self-review` here: unlike `{{cmd:pr-review}}`/`{{cmd:pr-rereview}}`, this session cannot review as the opposite brand itself, so the coordinator must spawn that nested reviewer.
 <!-- /brand -->
@@ -78,6 +107,6 @@ The standalone allowance does not bypass linked-issue review: if the PR has any 
 
 Do not independently review, comment, label, retry a failed model, or compensate for the coordinator's result. A `CHANGES_REQUESTED` verdict starts a new revision cycle only after inspecting its new feedback; an approved verdict leaves merging to the repository's normal merge/drainer process.
 
-## 5. Report and clean up
+## 6. Report and clean up
 
-Return the PR number, starting head and pushed head, fixed review items, validation and CI results, canonical rereview route/verdict, review-comment URL, and final labels. Remove only the temporary worktree created for this run after confirming it is clean; never remove a user-owned or `issue-<n>-*` worktree.
+Return the PR number, starting head and pushed head, fixed review items, local validation results, a statement that the pull request's checks were not awaited, canonical rereview route/verdict, review-comment URL, and final labels. Remove only the temporary worktree created for this run after confirming it is clean; never remove a user-owned or `issue-<n>-*` worktree.
