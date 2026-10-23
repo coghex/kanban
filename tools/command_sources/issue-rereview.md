@@ -1,9 +1,9 @@
 ---
 name: issue-rereview
 <!-- brand:claude -->
-description: Repair a changes-requested GitHub issue with explicit signoff, then rerun the canonical opposite-agent readiness gate until it approves
+description: Repair a changes-requested GitHub issue with explicit signoff, then rerun the canonical opposite-agent readiness gate until it approves — not drafting (use {{cmd:issue}}). Use only when the user invokes {{cmd:issue-rereview}} or explicitly asks to address issue-review feedback, or to revise and readiness-gate an issue labeled reviewed:changes.
 <!-- brand:codex -->
-description: Interactively repair a numbered GitHub issue after the canonical cross-agent gate returns CHANGES_REQUESTED, revise its specification with explicit user signoff, and rerun the canonical issue-review backend until it applies reviewed:approve. Use when the user invokes {{cmd:issue-rereview}}, asks to address issue-review feedback, or wants to revise and readiness-gate an issue labeled reviewed:changes.
+description: Interactively repair a numbered GitHub issue after the canonical cross-agent gate returns CHANGES_REQUESTED, revise its specification with explicit user signoff, and rerun the canonical issue-review backend until it applies reviewed:approve. It does not draft or create issues (use {{cmd:issue}}). Use when the user invokes {{cmd:issue-rereview}}, asks to address issue-review feedback, or wants to revise and readiness-gate an issue labeled reviewed:changes.
 <!-- /brand -->
 argument-hint: "[issue number]"
 ---
