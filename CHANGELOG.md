@@ -33,7 +33,10 @@ created above it.
   `Kanban.Review.*`, `Kanban.Models.*` or the Haskell modules epic #794 removed
   as the authority for a behavior; the comments in `kanban_models.py` (six
   copies), `kanban_config.py` (three), the six `review_pr.py` coordinators and
-  the installers now name the Python module that owns it.
+  the installers now name the Python module that owns it, and the present-tense
+  citations of the removed `Kanban.Drainer` and `Kanban.Preflight` in the same
+  files and in `drain_prs_service.py`, `service_manager.py` and
+  `approve_issues_service.py` are gone with them.
   `tools/test_packaged_issue_review_probe.py` drives the script, every case
   the fence drove, the exact diagnostics, and each asset's own call to it from
   an unrelated directory against an installed-bundle fixture.

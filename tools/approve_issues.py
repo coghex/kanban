@@ -27,7 +27,7 @@ import kanban_models
 
 
 # Identity marker for this tracked asset. tools/install_issue_review.py and
-# src/Kanban/Preflight.hs both read this literal out of an installed file to
+# tools/setup_workflows.py both read this literal out of an installed file to
 # confirm a link at the managed install path really resolves to this
 # backend before replacing or trusting it -- identity, not location, since a
 # path that merely looks right is not proof of what it holds.

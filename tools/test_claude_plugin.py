@@ -1475,7 +1475,7 @@ class BundledRosterReaderTests(unittest.TestCase):
 
     def test_the_bundled_reader_carries_the_managed_asset_marker(self):
         # The issue-review installer links the tracked original beside
-        # approve_issues.py and both it and Kanban.Preflight recognize an
+        # approve_issues.py and the installers recognize an
         # installed file by this marker rather than by path, so the identity
         # travels with the bytes into every copy.
         self.assertIn(

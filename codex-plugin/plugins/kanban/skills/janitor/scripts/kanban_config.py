@@ -324,8 +324,8 @@ def drainer_record_path() -> Path:
     discovers an `--install-dir` installation it never saw the option for.
     Fixed rather than install-dir-relative on purpose: a dashboard that
     inherits no environment still has to find it, so neither `--install-dir`
-    nor DRAINER_INSTALL_DIR_ENV relocates it. Read by src/Kanban/Drainer.hs;
-    written by tools/install_drainer.py and tools/drain_prs_service.py."""
+    nor DRAINER_INSTALL_DIR_ENV relocates it. Written by tools/install_drainer.py
+    and tools/drain_prs_service.py, which also read it back."""
     return installed_drainer_dir() / _DRAINER_RECORD_NAME
 
 

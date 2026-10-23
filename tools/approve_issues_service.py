@@ -140,8 +140,8 @@ GATE_APPROVED_EXIT = 0
 GATE_REFUSED_EXIT = 2
 
 # The runtime documents this controller owns. Both carry an explicit schema and
-# an integer version because `src/Kanban/Drainer.hs`'s successor for this
-# service (IAQ-4) decodes them, and a reader that cannot tell which shape it
+# an integer version because the readers of this service's state (IAQ-4)
+# decode them, and a reader that cannot tell which shape it
 # holds is a reader that guesses.
 STATUS_SCHEMA = "kanban-issue-approval-status"
 STATUS_VERSION = 1
