@@ -1,6 +1,6 @@
 ---
 name: autoissue
-description: Draft one verified, deduplicated GitHub issue with $issue, create it only after explicit user signoff, then immediately run the canonical $issue-review opposite-agent readiness gate. Use only when the user invokes $autoissue or explicitly asks for this combined draft-create-review workflow.
+description: Draft one verified, deduplicated GitHub issue with $issue, create it only after explicit user signoff, then immediately run the canonical $issue-review opposite-agent readiness gate — not drafting alone (use $issue), not review of an existing issue (use $issue-review). Use only when the user invokes $autoissue or explicitly asks for this combined draft-create-review workflow.
 ---
 
 # Autoissue With Opposite-Agent Review

@@ -1,5 +1,5 @@
 ---
-description: Draft one issue with /issue, create it after signoff, then run the canonical opposite-agent issue review
+description: Draft one issue with /issue, create it after signoff, then run the canonical opposite-agent issue review — not drafting alone (use /issue), not review of an existing issue (use /issue-review). Use only when the user invokes /autoissue or explicitly asks for this combined draft-create-review workflow.
 argument-hint: "[optional: symptom, area, or idea to investigate]"
 ---
 

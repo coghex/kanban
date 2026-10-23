@@ -1,5 +1,5 @@
 ---
-description: Repair a changes-requested GitHub issue with explicit signoff, then rerun the canonical opposite-agent readiness gate until it approves
+description: Repair a changes-requested GitHub issue with explicit signoff, then rerun the canonical opposite-agent readiness gate until it approves — not drafting (use /issue). Use only when the user invokes /issue-rereview or explicitly asks to address issue-review feedback, or to revise and readiness-gate an issue labeled reviewed:changes.
 argument-hint: "[issue number]"
 ---
 
