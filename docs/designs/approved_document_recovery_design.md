@@ -16,7 +16,8 @@ concrete precondition
 - [#830] REC-1. Rework the approved-document helper against this recovery contract.
 
 This ledger links existing work; it grants no permission to resume PR #836.
-The separate live-publisher repair proposed below is not a filed delivery slice.
+The separately authorized live-publisher repair is for the manager to file and
+route; it is not an additional delivery slice in this design.
 There is one existing delivery slice and no new tracker artifact to process.
 
 ## Contract and scope
@@ -87,13 +88,13 @@ only when `read_for_write` read the aside after successful rename. It returned
 file, and `git cat-file -e <baseline-blob>` failed. This is a reproduced loss,
 not merely similarity to the helper. No real document or held worktree was used.
 
-**Proposal P-3:** repair the live publisher separately before #831 removes it.
+**P-3, approved as D-6:** repair the live publisher separately before #831 removes it.
 Deletion later does not protect today's callers. Keep the repair narrowly
 focused on preserving/restoring the captured file on every post-rename failure,
 including failed reads and restoration, with the regression in all delivered
-copies. #830 currently expressly excludes publisher changes: the manager must
-authorize a separate fix or an explicit scope amendment. This design files
-nothing and changes no code. The broader helper journal below should not be
+copies. #830 expressly excludes publisher changes: the owner authorized a
+separate fix, which the manager will file and route. #830/REC-1's scope stays
+unchanged. This design files nothing and changes no code. The broader helper journal below should not be
 backported merely to prolong a publisher being retired.
 
 ## Decisions already authorized
@@ -121,12 +122,39 @@ by `xm5n9phjsisd8wejzfc7k6qyk6`, permits complete reachable-history fallback whe
 no evidence was saved. Both require failure to close the gate when evidence
 cannot be verified. They do not authorize ignoring invalid saved evidence.
 
-Everything below extending these decisions is **proposed**, pending Q-1/Q-2.
-Normative wording describes the proposed contract, not approval already given.
+### D-4. Retain intent and make capture recovery durable
 
-## Proposed design
+Q-1 is resolved: the manager approved P-1's retained-intent/capture model and
+state tables, including the versioned record, rooted payloads, capture locator,
+preservation on application failure, and child-quiescence handling.
 
-### P-1. One retained intent, with capture recovery inside it
+### D-5. Gate automatic negative-history retries on GitHub branch rules
+
+Q-2 is resolved: the owner approved P-2's shared validator, strict publication
+interval and stop rules with this boundary: an automatic negative-history retry
+is permitted only when the helper first verifies through the GitHub API that
+the publication branch's active rules forbid non-fast-forward pushes. If the
+rules do not forbid them, or cannot be read and verified, stop for operator
+reconciliation. An assumed append-only convention is insufficient.
+
+### D-6. Repair the live publisher separately
+
+Q-3 is resolved: the owner authorized a separate live-publisher capture-loss
+fix now, before #831 deletes it. The manager files and routes that issue;
+#830/REC-1 remains unchanged in scope. Reference the separate issue here when
+its number is available; its filing is not this designer's task.
+
+D-4–D-6 were approved in verified `kan-manager` reply
+`y6mj9vvpy3r9gapeapm7zn244w` in #kan-backlog on 2026-10-23 UTC, replying to
+draft-signoff question `r4d4zwr4itj3m7q4p7n8j3sm9a` at commit `6f006a1447`.
+The reply identifies Q-1 as manager approval and Q-2/Q-3 as direct owner
+decisions. The present user instruction also relays those choices. This
+signoff approves the contract below; opposite-brand review and readiness remain
+outstanding.
+
+## Approved design, pending review
+
+### P-1 (D-4). One retained intent, with capture recovery inside it
 
 Use one pending record as the durable intent and recovery journal. Keep the
 existing namespaces and digest. Avoid a second independent capture journal
@@ -192,6 +220,7 @@ captured edit just because approved content or another file exists at target.
 | `C`: captured aside | Custody begins at successful rename, before read. Retain until verified restoration or verified retention of its actual bytes plus safe target settlement. An unreadable capture is retained indefinitely, never treated as empty. |
 | Index, HEAD, unrelated files | Helper changes none. Target must be unstaged before every write and every external invocation; recheck before settlement. Unrelated work and stashes survive. External-tool behavior is tested at its boundary. |
 | `F`: fetched origin/default | Immutable commit OID captured after a successful fetch of the declared repository/branch. All checks in one classification use that OID, not a moving symbolic ref. A failed fetch cannot certify the cached ref as fresh. |
+| GitHub branch-rule observation | Fresh API verification that active rules for the bound repository/branch forbid non-fast-forward pushes; required before each automatic negative-history retry. It authorizes retry under D-5, never proves landing. Missing, inactive, inapplicable or unreadable rules grant nothing. |
 | `E`: saved landing evidence in `P` | A claim requiring the same validator as rediscovered evidence. Bound to `A`, repository/path/attempt, and interval rooted at `R`. Invalid `E` blocks; it is never discarded to enable fallback. |
 | Tracker transaction | Independent durable GitHub intent/identities/checkpoints. Publication cleanup never deletes it. Confirmed GitHub mutations are not reissued; resolution verifies the terminal disposition and artifact identity. |
 | External-tool state | `docs-push` owns its merge bases and temporary publication work. Helper neither edits nor interprets those private files as receipts; only verified remote evidence determines landing. |
@@ -207,8 +236,8 @@ after complete successful verification under the history assumptions below.
 | S0 clear | No pending/capture obligation; tracker clear; no malformed standalone applied ref | `clear`, fresh tip and working blob; valid legacy applied predecessor reported separately | A new approval may start; `--resume` alone says no pending publication. |
 | S1 prepared | `P` roots `A` and `B`; target still `B`; no captured file | `pending`, publication, landed false/unknown as evidence permits | Verify evidence first; if unlanded, install only over `B`. |
 | S2 capture recovery | Descriptor exists; aside may hold original/foreign bytes; target may be absent or occupied | `pending`, capture details and file states; never `clear` because `W != A` | Restore absent target exclusively, or retain capture and occupied target; read/hash failures stop. Reconcile before proceeding. |
-| S3 applied | `W=A`, target unstaged, `P` retained; `L=A` or its write needs recovery; no unresolved capture | `pending`, applied state and verified landing classification | Reconcile `L` with CAS; invoke tool only after verified no landing and tool quiescence. |
-| S4 handoff unresolved | Tool may have run, child may be live, or remote/evidence reads failed; `P` remains | `pending`, already_landed unknown unless a valid positive proof exists; exact failure | No blind retry. Establish child quiescence and evidence; classify S3, S5, or S7. |
+| S3 applied | `W=A`, target unstaged, `P` retained; `L=A` or its write needs recovery; no unresolved capture | `pending`, applied state and verified landing classification | Reconcile `L` with CAS; invoke tool only after verified no landing and tool quiescence; automatic retries also require D-5's API gate. |
+| S4 handoff unresolved | Tool may have run, child may be live, remote/evidence reads failed, or retry's API gate is unsatisfied; `P` remains | `pending`, already_landed unknown unless a valid positive proof exists; exact failure | No blind retry. Establish child quiescence and evidence; require D-5 before automatic retry, otherwise operator reconciliation. |
 | S5 landed, unsettled | Valid `E` or validated rediscovery; `W` or index differs, or capture/cleanup incomplete | `pending`, already_landed true, separate `A` and published `M`, divergence | Never invoke tool. Preserve both sides; operator reconciles the working copy/index, then settlement. |
 | S6 cleanup | Valid persisted `E`, `W=M`, target unstaged, no unresolved capture | `pending` until record cleanup completes | Delete matching `L` first, then CAS-delete `P`, then release owned lock. Interruption repeats only cleanup. |
 | S7 inconsistent/unverifiable | Malformed refs, invalid evidence, stale interval, missing objects, unexpected files, conflicting records | `pending` plus precise record fault; `already_landed=null` | No write, tool call, upgrade, overwrite, or cleanup; repair/restore evidence explicitly. |
@@ -237,7 +266,7 @@ the tracker. Preflight does not repair or write records (fetch is its permitted
 Git update). Use a stable record/lock snapshot or report busy/changed; its result
 is advisory and the mutating entry point revalidates under the document lock.
 
-### P-2. One authority rule for evidence
+### P-2 (D-5). One authority rule for evidence
 
 Let `Anc(X)` include commit `X` and all its ancestors. Require `R` to exist and
 be reachable from fresh `F` before accepting any landing, including a current-tip
@@ -302,25 +331,37 @@ between spawning and recording the child identity, automatic retry is blocked
 until the operator establishes quiescence; a dead parent PID is insufficient.
 Do not kill an unknown child, clear a live lock, or infer quiescence from silence.
 
-For ordinary append-only upstream history (including revert commits), fresh
-complete history plus quiescence makes an absent landing a safe retry through
-the same attempt. The next external call again receives exactly
+For an automatic negative-history retry, first verify through the GitHub API
+that active rules for the exact publication repository and branch forbid
+non-fast-forward pushes. A repository-wide setting, a ruleset name, an inactive
+or nonmatching rule, or an earlier cached response is not that verification.
+Require a fresh affirmative result before **each** such retry. A missing rule,
+API error, denied access, or unreadable/ambiguous response stops for operator
+reconciliation, retains P/L and captured content, and reports the exact reason;
+do not fall back to the former append-only assumption or another publisher.
+This gate concerns retry permission; it is not landing evidence and cannot
+replace full-history verification, interval validation, or child quiescence.
+Positive landing evidence can still be reconciled without invoking the tool
+when the API gate is unavailable.
+
+With that gate satisfied, fresh complete history and quiescence permit the
+same-attempt retry under D-5. The next external call again receives exactly
 `docs-push --expect A --keep -m <message-with-attempt-trailer> <document>`.
 Refetch/revalidate before that call and require `W=A` and an unstaged target.
 Process interruption between positive evidence detection and persistence is
 safe because rediscovery uses the same interval and predicates.
 
-**Guarantee boundary requiring signoff:** an upstream force-push can erase an
+**Guarantee boundary accepted in D-5:** an upstream force-push can erase an
 unsaved landing while retaining `R`; no local algorithm can reconstruct that
 erased event from the resulting history. A detectable rewrite or lost saved
 evidence stops, but detecting every erased event is impossible with the present
-external-tool API. Automatic negative-history retries therefore assume the
-publication branch remains append-only during an attempt. If that assumption
-cannot be accepted, use the conservative alternative: after any uncertain
-handoff with no positive proof, require explicit operator reconciliation before
-another invocation, even with apparently complete negative history. This trades
-automatic recovery for safety, without changing the external tool. Q-2 chooses
-the policy; it is not silently chosen here.
+external-tool API. The owner selected verified active GitHub rules as the
+operational boundary for automatic negative-history retries, and operator
+reconciliation otherwise. A current rules response does not prove uninterrupted
+historical enforcement or prevent an administrator changing rules immediately
+after the check; the helper must not claim it does. Known evidence of a rewrite
+or rule-enforcement gap still stops recovery. This design neither changes the
+branch rules nor widens the external tool's API to promise atomic enforcement.
 
 The model covers helper-process termination and ordinary syscall failures on
 a functioning local filesystem. It does not claim recovery after loss of the
@@ -359,9 +400,9 @@ than relying on an in-memory `finally` block.
 | T-13 | Approved install succeeds then crash; scratch/aside cleanup fails | P roots A/B; W=A; descriptor still discovers capture; S2/S3 | Verify actual capture and install, complete safe local cleanup, then record L; no need to rewrite W |
 | T-14 | Applied-ref write/CAS/read-back fails or crashes afterward | P remains; W=A; L absent, matching, or conflicting; pending | Recover matching L from verified P/W; conflict stops; never pretend an unrecorded application licenses local tracker resolution |
 | T-15 | Evidence fetch, ancestry/tree/message/path/history read fails before tool | S3/S7; landing unknown; all records intact | Retry verification; no tool invocation from a negative inferred from read failure |
-| T-16 | Tool absent, capability check fails, or executable cannot start | S3 with exact diagnostic; not handed off if that is conclusively known | Repair tool; reverify history and target before same-attempt retry |
+| T-16 | Tool absent, capability check fails, or executable cannot start | S3 with exact diagnostic; not handed off if that is conclusively known | Repair tool; reverify history, target and D-5 API gate before automatic same-attempt retry |
 | T-17 | Handoff-marker CAS failure; crash before spawn; crash after spawn before child-ID record | Marker failure prevents spawn; successful marker means may-have-run; S4 | Establish quiescence, then evidence policy; ambiguity never licenses concurrent invocation |
-| T-18 | Tool conflict/refusal/nonzero/timeout; misleading success or failure output | P/L retained; remote may or may not contain landing; exact output preserved | Fresh evidence decides; if yes S5/S6, if unknown S4, if verified no apply Q-2 retry policy |
+| T-18 | Tool conflict/refusal/nonzero/timeout; misleading success or failure output | P/L retained; remote may or may not contain landing; exact output preserved | Fresh evidence decides; if yes S5/S6, if unknown S4, if verified no apply D-5 retry gate |
 | T-19 | Remote publication succeeds; crash before `--keep` or after merged copy installed | P retains A; remote receipt roots M; W=A, M, absent or foreign; S5 if proof found | Persist evidence; W≠M is landed-but-divergent, never reapply A or invoke tool |
 | T-20 | No-op landing after R, crash before evidence lookup; post-tool fetch failure | S4 initially; history may contain A followed by revert | Recover intermediate occurrence within I, persist it, never republish (rounds 5–6) |
 | T-21 | Evidence-record construction/write/CAS/read-back fails; crash just after CAS | Old P or new P remains; positive fact may be unsaved; pending | Revalidate saved evidence if present, otherwise rediscover; preserve old intent, never “fix” conflicting ref |
@@ -373,6 +414,7 @@ than relying on an in-memory `finally` block.
 | T-27 | Lock-release CAS fails, dies before release, or ownership changes | Published/retained state reported separately from lock; never clear another owner | Clear only verified abandoned exact lock; no republishing |
 | T-28 | Tracker checkpoint or resolve read/write/CAS fails, crashes before/after confirmed GitHub mutation | Tracker intent and confirmed identities retained; preflight pending | Existing tracker recovery verifies identities/entry; no repeated confirmed GitHub mutation |
 | T-29 | Legacy validation/upgrade fails at any read/build/CAS/read-back boundary | Original legacy record or valid replacement retained; no file mutation before validation | Reclassify from actual ref, never restart as fresh or infer missing baseline |
+| T-30 | Retry's GitHub rule read fails, is ambiguous, or shows no active prohibition on non-fast-forward pushes | P/L/content retained; pending with gate failure; negative history alone does not authorize retry | Stop for operator reconciliation; only fresh affirmative API verification plus all other guards permits automatic retry |
 
 For every write/delete row, also inject an ambiguous command failure **after**
 the side effect and a concurrent ref-value change. The continuation must inspect
@@ -436,7 +478,7 @@ resume, assert exact retained bytes/refs/capture paths, remote commit graph,
 tool-call count, and tracker-call count. A content hash alone does not prove
 the file or rooted object remains recoverable.
 
-Each matrix row T-01–T-29 needs its own named regression or parameterized case
+Each matrix row T-01–T-30 needs its own named regression or parameterized case
 whose failure identifies the boundary. Existing tests can satisfy a row when
 they assert the whole invariant; no need to duplicate a meaningful regression.
 Add negative controls: remove the interval check, convert failed read to absent,
@@ -459,18 +501,25 @@ preservation by the external tool, consecutive dispositions, novel untracked
 documents with an existing working baseline, and consuming repos without
 Kanban `tools/`. Test missing objects, shallow history, second-parent receipt,
 merge-tree-only no-op occurrence, a stale R even when current F contains A,
-ambiguous subprocess lifetime, and both Q-2 policies' selected outcome.
+ambiguous subprocess lifetime, and D-5's API-gated retry. T-30 fixtures cover
+an active applicable non-fast-forward prohibition permitting retry; absent,
+inactive or nonmatching rules stopping it; denied/unreadable/error responses
+stopping it; and a changed response preventing reuse of an earlier positive
+check. All refusal cases assert zero additional tool calls and retained records.
+Positive landing reconciliation must still avoid republishing when rule lookup
+is unavailable. Use fake API responses, never production rule changes.
 
 Bundle byte-identity, inventory/version, and workflow-contract checks still
 apply to implementation. Change the executable contract with the code under
 the repository's code-document rules; this standalone design lands with
 `docs-push`. No new Haskell behavior is proposed.
 
-## Open questions and signoff
+## Open questions and signoff history
 
 ### Q-1. Approve P-1's retained-intent/capture model and associated state tables?
 
-The proposal adds a versioned record rooting baseline and approved payloads,
+**Resolved by D-4**, manager approval in `y6mj9vvpy3r9gapeapm7zn244w`.
+The approved model adds a versioned record rooting baseline and approved payloads,
 a capture locator persisted before rename, preservation on every application
 failure, and explicit child-quiescence handling. It costs schema/migration and
 fault-injection work, but avoids hidden filesystem state and exceptions that
@@ -480,20 +529,24 @@ unmodeled. This affects REC-1 and its legacy tests.
 
 ### Q-2. Approve P-2's evidence rules, and choose the negative-history retry boundary?
 
-The shared validator, strict interval and invalid-record stop rules fix rounds
-1–8 without weakening saved-evidence precedence. Choose either automatic
-negative-history retries under an explicit append-only publication-history
-assumption, or conservative operator reconciliation after an uncertain handoff
-with no positive proof. Both preserve positive saved/rediscovered evidence;
-the latter sacrifices unattended retry when external history may be erased.
-This affects REC-1's resume behavior and T-17–T-22 acceptance signals.
+**Resolved by D-5**, direct owner decision relayed in
+`y6mj9vvpy3r9gapeapm7zn244w`. The shared validator, strict interval and
+invalid-record stop rules are approved. Automatic negative-history retry
+requires fresh GitHub API verification that active publication-branch rules
+forbid non-fast-forward pushes; otherwise stop for operator reconciliation.
+The alternative of merely assuming append-only history is rejected. This
+affects REC-1's resume behavior, T-17–T-22 and T-30 acceptance signals.
 
 ### Q-3. Authorize a separate live-publisher preservation fix before #831 deletion?
 
-P-3 recommends yes because the loss is reproduced in today's live code and all
-three copies. This session does not implement or file it. The manager should
-route it separately or explicitly amend scope, without unpausing #836 until
-the design-review endpoint is satisfied.
+**Resolved by D-6**, direct owner decision relayed in
+`y6mj9vvpy3r9gapeapm7zn244w`. Yes: the manager files and routes a separate live
+fix; #830/REC-1 scope is unchanged. This session neither implements nor files
+it. #836 remains paused until the design-review endpoint is satisfied.
+
+No original design-choice question remains open. Opposite-brand review and
+explicit readiness signoff remain pending; new review findings may require
+further decisions.
 
 ## Delivery plan
 
@@ -505,21 +558,23 @@ the design-review endpoint is satisfied.
 - **Phase:** after manager signoff and opposite-brand design review with findings resolved.
 - **Depends on:** the existing #829 prerequisite; no new tracker dependency invented here.
 - **Ordering:** existing #775 chain; #831 follows #830.
-- **Relevant decisions:** D-1–D-3; P-1/P-2 await approval.
-- **Acceptance signals:** state invariants, T-01–T-29, eight-round regression
+- **Relevant decisions:** D-1–D-6; D-6 keeps the live-publisher fix separate.
+- **Acceptance signals:** state invariants, T-01–T-30, eight-round regression
   map, consuming-repository and bundled-copy checks.
 - **Out of scope:** new epic/children, consumer switch-over, classification
   retirement, external tool changes, and unapproved publisher scope changes.
-- **Open questions:** Q-1/Q-2 block implementation readiness; Q-3 decides a
-  separate live defect's handling. No finer issue decomposition is approved.
+- **Open questions:** Q-1–Q-3 resolved; review and readiness signoff remain
+  outstanding. No finer issue decomposition is approved.
 
 ## Review and handoff
 
 Initial draft: 2026-10-23 UTC, request `kan-backlog-20261022`, `kan-designer-1`.
-Manager signoff is requested with the published link and commit in #kan-backlog.
-Keep `exploring` until the exact choices above are approved; record verified
-reply IDs here. The manager then arranges the opposite-brand document review.
-Resolve its findings in this document and land each revision. Ready status
-requires explicit readiness signoff and a completed review; this document's
-publication alone is neither. No `process-design-doc` tracker creation is
-needed for this focused, already-tracked repair.
+Manager signoff on `6f006a1447` was received in verified reply
+`y6mj9vvpy3r9gapeapm7zn244w`, answering `r4d4zwr4itj3m7q4p7n8j3sm9a`.
+This revision records D-4–D-6 and the selected GitHub API retry gate. Publish its
+commit to #kan-backlog so the manager can arrange the opposite-brand review.
+Keep `exploring` during that review; resolve findings in this document and land
+each revision. Ready status requires explicit readiness signoff and a completed
+review; design-choice approval and document publication alone are neither.
+No `process-design-doc` tracker creation is needed for this focused,
+already-tracked repair.
