@@ -16,8 +16,8 @@ concrete precondition
 - [#830] REC-1. Rework the approved-document helper against this recovery contract.
 
 This ledger links existing work; it grants no permission to resume PR #836.
-The separately authorized live-publisher repair is for the manager to file and
-route; it is not an additional delivery slice in this design.
+The separately authorized live-publisher repair is tracked in #845 and routed
+by the manager; it is not an additional delivery slice in this design.
 There is one existing delivery slice and no new tracker artifact to process.
 
 ## Contract and scope
@@ -25,7 +25,8 @@ There is one existing delivery slice and no new tracker artifact to process.
 - **Goal:** after any helper-process interruption, preserve the document and
   approved bytes, determine publication only from verified evidence, and resume
   without replaying a mutation that reached the publication branch and was
-  subsequently reverted.
+  subsequently reverted, subject to D-5's explicitly accepted admin-bypass
+  boundary.
 - **Done when:** the state and interruption tables are implemented and tested,
   all eight review rounds have regression coverage, tracker recovery uses the
   same evidence rules, and each incomplete outcome names the retained state
@@ -93,7 +94,7 @@ Deletion later does not protect today's callers. Keep the repair narrowly
 focused on preserving/restoring the captured file on every post-rename failure,
 including failed reads and restoration, with the regression in all delivered
 copies. #830 expressly excludes publisher changes: the owner authorized a
-separate fix, which the manager will file and route. #830/REC-1's scope stays
+separate fix, filed as #845 and routed by the manager. #830/REC-1's scope stays
 unchanged. This design files nothing and changes no code. The broader helper journal below should not be
 backported merely to prolong a publisher being retired.
 
@@ -137,20 +138,28 @@ the publication branch's active rules forbid non-fast-forward pushes. If the
 rules do not forbid them, or cannot be read and verified, stop for operator
 reconciliation. An assumed append-only convention is insufficient.
 
+F1 clarification from the owner: **rule present is enough**. An active,
+applicable `non_fast_forward` rule permits automatic retry even when the
+pushing identity can bypass it. Admin bypass is an explicitly accepted residual
+risk. The gate reads the rule, not bypass permissions, and does not prove that
+the pushing identity cannot force-push. Source: verified manager review reply
+`b249chw3p5ydcr5937kx3zu7qa` (2026-10-23), relaying the direct owner decision.
+
 ### D-6. Repair the live publisher separately
 
 Q-3 is resolved: the owner authorized a separate live-publisher capture-loss
-fix now, before #831 deletes it. The manager files and routes that issue;
-#830/REC-1 remains unchanged in scope. Reference the separate issue here when
-its number is available; its filing is not this designer's task.
+fix now, before #831 deletes it. The manager filed
+[#845](https://github.com/coghex/kanban/issues/845) and routes it separately;
+#830/REC-1 remains unchanged in scope.
 
 D-4–D-6 were approved in verified `kan-manager` reply
 `y6mj9vvpy3r9gapeapm7zn244w` in #kan-backlog on 2026-10-23 UTC, replying to
 draft-signoff question `r4d4zwr4itj3m7q4p7n8j3sm9a` at commit `6f006a1447`.
 The reply identifies Q-1 as manager approval and Q-2/Q-3 as direct owner
 decisions. The present user instruction also relays those choices. This
-signoff approves the contract below; opposite-brand review and readiness remain
-outstanding.
+signoff approves the contract below. The opposite-brand review of `9d1e0f8680`
+was relayed in `b249chw3p5ydcr5937kx3zu7qa`; its five findings are addressed
+below. Review acceptance and readiness remain outstanding.
 
 ## Approved design, pending review
 
@@ -213,14 +222,14 @@ captured edit just because approved content or another file exists at target.
 | --- | --- |
 | `P`: pending ref/record | One approved attempt; roots `A`, `B`, any preserved capture and required predecessor. Create absent-only; rewrite/delete by compare-and-swap (CAS) against the observed record. No exception cleanup discards it. |
 | `L`: applied ref | Blob the protocol applied locally, never proof of remote publication. Validate type and readability before any replacement or deletion. A different valid predecessor is handled explicitly, not silently discarded. |
-| `K`: lock ref | One owner for repository/path across worktrees. Acquire absent-only, release only the acquired value. Unknown/live/foreign owner blocks mutation. A dead helper alone does not prove its publication child has stopped. |
+| `K`: lock ref | One owner for repository/path across worktrees. Acquire absent-only, release only the acquired value. Unknown/live/foreign owner blocks mutation. A dead helper alone does not prove its publication child has stopped; child identity includes PID, process start time and exact argv. |
 | Approved input | Complete caller-approved bytes. Caller retains the input until `P` is verified durable. Afterward `P` is the recovery source, so resume needs no input file. |
 | `W`: working file | Existing baseline, approved copy, published copy, a foreign edit, absent, or unreadable. A hash equality is checked at use, not assumed from an earlier read. Index contents are a separate guard. |
 | Capture reservation/scratch | Exact attempt-owned locations recorded before rename. Scratch contains `A` and is expendable only because `P` roots `A`. A crash before descriptor publication leaves only a harmless unreferenced empty reservation/scratch. |
 | `C`: captured aside | Custody begins at successful rename, before read. Retain until verified restoration or verified retention of its actual bytes plus safe target settlement. An unreadable capture is retained indefinitely, never treated as empty. |
 | Index, HEAD, unrelated files | Helper changes none. Target must be unstaged before every write and every external invocation; recheck before settlement. Unrelated work and stashes survive. External-tool behavior is tested at its boundary. |
 | `F`: fetched origin/default | Immutable commit OID captured after a successful fetch of the declared repository/branch. All checks in one classification use that OID, not a moving symbolic ref. A failed fetch cannot certify the cached ref as fresh. |
-| GitHub branch-rule observation | Fresh API verification that active rules for the bound repository/branch forbid non-fast-forward pushes; required before each automatic negative-history retry. It authorizes retry under D-5, never proves landing. Missing, inactive, inapplicable or unreadable rules grant nothing. |
+| GitHub branch-rule observation | Fresh API verification of an active applicable `non_fast_forward` rule for the bound repository/branch, or readable classic protection disabling force pushes; required before each automatic negative-history retry. It authorizes retry under D-5, never proves landing or lack of bypass. Missing, inactive, inapplicable or unreadable rules grant nothing. |
 | `E`: saved landing evidence in `P` | A claim requiring the same validator as rediscovered evidence. Bound to `A`, repository/path/attempt, and interval rooted at `R`. Invalid `E` blocks; it is never discarded to enable fallback. |
 | Tracker transaction | Independent durable GitHub intent/identities/checkpoints. Publication cleanup never deletes it. Confirmed GitHub mutations are not reissued; resolution verifies the terminal disposition and artifact identity. |
 | External-tool state | `docs-push` owns its merge bases and temporary publication work. Helper neither edits nor interprets those private files as receipts; only verified remote evidence determines landing. |
@@ -324,17 +333,47 @@ evidence proves landing; never substitute another publisher.
 
 ### External invocation and limits of the guarantee
 
-Persist a handoff marker before spawning `docs-push`; report its run identity
-and child ownership when available. A parent crash can leave the child running.
-Retain serialization until the child is known quiescent. If a crash occurred
-between spawning and recording the child identity, automatic retry is blocked
-until the operator establishes quiescence; a dead parent PID is insufficient.
-Do not kill an unknown child, clear a live lock, or infer quiescence from silence.
+Persist a handoff marker before spawning `docs-push`; once spawned, persist the
+child's **PID, operating-system process start time, and exact argv**, with its
+host and intended invocation. Never record or check PID alone. Quiescent means
+that this exact process identity no longer exists: PID reuse with a different
+start time is not the old child and must neither block it as live nor authorize
+killing the unrelated process. A matching PID/start time that remains live is
+not quiescent; an unexpected argv for that same live identity is an inspection
+ambiguity, not proof of exit. Missing/insufficient start-time precision or failed
+inspection also leaves quiescence unknown.
+
+A parent crash can leave the child running. Retain serialization until the
+child is known quiescent, including any known still-running publication
+descendants. If a crash occurred between spawning and recording the child
+identity, automatic retry is blocked until the operator establishes quiescence;
+a dead parent PID is insufficient. Do not kill an unknown child, clear a live
+lock, or infer quiescence from silence.
 
 For an automatic negative-history retry, first verify through the GitHub API
 that active rules for the exact publication repository and branch forbid
-non-fast-forward pushes. A repository-wide setting, a ruleset name, an inactive
-or nonmatching rule, or an earlier cached response is not that verification.
+non-fast-forward pushes under D-5's rule-presence policy. Use
+`GET /repos/{owner}/{repo}/rules/branches/{branch}`, with the exact branch
+URL-encoded. Affirmative means a returned entry whose `type` is
+`non_fast_forward`. This endpoint supplies the effective active rules for that
+branch, including organization rules; evaluate/disabled rules are excluded.
+It needs repository metadata read access, not administration access. Read all
+pages before declaring the rule absent; failed/incomplete parsing is unknown.
+([GitHub rules API](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch))
+
+Classic branch protection is an alternative only when
+`GET /repos/{owner}/{repo}/branches/{branch}/protection` is readable using the
+helper's existing access and explicitly returns `allow_force_pushes.enabled=false`.
+That endpoint documents Administration read permission for fine-grained tokens;
+never require elevated/admin access, ask for broader credentials, or infer a
+prohibition from a 403/404. A successful rules response containing
+`non_fast_forward` suffices without querying classic protection or bypass actors.
+([GitHub protection API](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection))
+
+A ruleset name, an inactive or nonmatching rule, or an earlier cached response
+is not verification. Neither an administrator bypass nor lack of admin
+enforcement invalidates an otherwise affirmative rule under the owner's F1
+decision; this is a rule-presence gate, not an identity-permission gate.
 Require a fresh affirmative result before **each** such retry. A missing rule,
 API error, denied access, or unreadable/ambiguous response stops for operator
 reconciliation, retains P/L and captured content, and reports the exact reason;
@@ -359,9 +398,17 @@ external-tool API. The owner selected verified active GitHub rules as the
 operational boundary for automatic negative-history retries, and operator
 reconciliation otherwise. A current rules response does not prove uninterrupted
 historical enforcement or prevent an administrator changing rules immediately
-after the check; the helper must not claim it does. Known evidence of a rewrite
-or rule-enforcement gap still stops recovery. This design neither changes the
-branch rules nor widens the external tool's API to promise atomic enforcement.
+after the check; the helper must not claim it does. **Admin bypass is accepted
+residual risk:** the manager's F1 review reported that Kanban's master ruleset
+`19144628` contains `non_fast_forward` but grants `RepositoryRole 5` (Admin)
+an `always` bypass, and agents, `docs-push` and the drainer push as admin
+`coghex`. The owner's response was “rule present is enough.” This is recorded
+review evidence, not a reason for the helper to query bypass actors or demand
+that the pushing identity be unable to force-push. Consequently, even with the
+gate passing, an admin can erase an unsaved landing; absolute no-replay under
+that bypass is not guaranteed. Known evidence of an actual rewrite or an
+enforcement gap other than the accepted bypass still stops recovery. This
+design neither changes branch rules nor promises atomic enforcement.
 
 The model covers helper-process termination and ordinary syscall failures on
 a functioning local filesystem. It does not claim recovery after loss of the
@@ -401,7 +448,7 @@ than relying on an in-memory `finally` block.
 | T-14 | Applied-ref write/CAS/read-back fails or crashes afterward | P remains; W=A; L absent, matching, or conflicting; pending | Recover matching L from verified P/W; conflict stops; never pretend an unrecorded application licenses local tracker resolution |
 | T-15 | Evidence fetch, ancestry/tree/message/path/history read fails before tool | S3/S7; landing unknown; all records intact | Retry verification; no tool invocation from a negative inferred from read failure |
 | T-16 | Tool absent, capability check fails, or executable cannot start | S3 with exact diagnostic; not handed off if that is conclusively known | Repair tool; reverify history, target and D-5 API gate before automatic same-attempt retry |
-| T-17 | Handoff-marker CAS failure; crash before spawn; crash after spawn before child-ID record | Marker failure prevents spawn; successful marker means may-have-run; S4 | Establish quiescence, then evidence policy; ambiguity never licenses concurrent invocation |
+| T-17 | Handoff-marker CAS failure; crash before spawn; crash after spawn before child-ID record; PID reuse or identity-inspection failure | Marker failure prevents spawn; successful marker means may-have-run; S4; persisted child identity includes PID/start time/exact argv | Establish exact-identity quiescence, then evidence policy; reused PID is not the child, unknown identity never licenses concurrent invocation |
 | T-18 | Tool conflict/refusal/nonzero/timeout; misleading success or failure output | P/L retained; remote may or may not contain landing; exact output preserved | Fresh evidence decides; if yes S5/S6, if unknown S4, if verified no apply D-5 retry gate |
 | T-19 | Remote publication succeeds; crash before `--keep` or after merged copy installed | P retains A; remote receipt roots M; W=A, M, absent or foreign; S5 if proof found | Persist evidence; W≠M is landed-but-divergent, never reapply A or invoke tool |
 | T-20 | No-op landing after R, crash before evidence lookup; post-tool fetch failure | S4 initially; history may contain A followed by revert | Recover intermediate occurrence within I, persist it, never republish (rounds 5–6) |
@@ -414,7 +461,7 @@ than relying on an in-memory `finally` block.
 | T-27 | Lock-release CAS fails, dies before release, or ownership changes | Published/retained state reported separately from lock; never clear another owner | Clear only verified abandoned exact lock; no republishing |
 | T-28 | Tracker checkpoint or resolve read/write/CAS fails, crashes before/after confirmed GitHub mutation | Tracker intent and confirmed identities retained; preflight pending | Existing tracker recovery verifies identities/entry; no repeated confirmed GitHub mutation |
 | T-29 | Legacy validation/upgrade fails at any read/build/CAS/read-back boundary | Original legacy record or valid replacement retained; no file mutation before validation | Reclassify from actual ref, never restart as fresh or infer missing baseline |
-| T-30 | Retry's GitHub rule read fails, is ambiguous, or shows no active prohibition on non-fast-forward pushes | P/L/content retained; pending with gate failure; negative history alone does not authorize retry | Stop for operator reconciliation; only fresh affirmative API verification plus all other guards permits automatic retry |
+| T-30 | Effective-rules endpoint read/pagination/parse fails or supplies no `non_fast_forward`; classic protection unavailable/nonaffirmative | P/L/content retained; pending with gate failure; negative history alone does not authorize retry | Stop for operator reconciliation; fresh affirmative rule verification plus all other guards permits retry even with admin bypass |
 
 For every write/delete row, also inject an ambiguous command failure **after**
 the side effect and a concurrent ref-value change. The continuation must inspect
@@ -473,7 +520,27 @@ held worktrees. Preserve existing fixture patterns in
 `tools/test_approved_document.py`, `tools/test_tracker_transaction.py` and
 `tools/test_consuming_repository_documents.py`. For crash coverage use process
 termination at explicit seams as well as raised exceptions: exceptions alone
-exercise cleanup that a killed process never runs. Run a fresh preflight and
+exercise cleanup that a killed process never runs.
+
+The deterministic crash harness runs the helper in a fixture child process.
+The test runner passes a named boundary such as
+`KANBAN_TEST_FAULT_POINT=T-07.after-rename`; the child harness installs an
+observer/wrapper on that exact operation and calls `os._exit(86)` immediately
+after the successful rename, before the next helper operation. Before exiting,
+it writes the reached seam ID to a parent-observed pipe. This hook is installed
+by the test harness, not a production environment-controlled kill switch.
+Each T-N with crash coverage has explicit before/after seam names; unknown seam
+names fail the harness rather than silently execute a success path. The parent
+asserts both seam receipt and exit code 86 before starting recovery. No sleep,
+wall-clock scheduling, or timed external signal selects the crash point.
+Operation-failure cases use the same seams to inject their specified errors;
+ambiguous-after-effect failures perform the effect before raising. Temporary
+subprocesses and fake tool descendants are owned and reaped by the harness;
+timeouts fail the test, never stand in for the intended crash. T-17 uses
+controlled process-inspection fixtures for same PID/different start time,
+same live identity, changed argv, and unreadable identity.
+
+Run a fresh preflight and
 resume, assert exact retained bytes/refs/capture paths, remote commit graph,
 tool-call count, and tracker-call count. A content hash alone does not prove
 the file or rooted object remains recoverable.
@@ -501,11 +568,17 @@ preservation by the external tool, consecutive dispositions, novel untracked
 documents with an existing working baseline, and consuming repos without
 Kanban `tools/`. Test missing objects, shallow history, second-parent receipt,
 merge-tree-only no-op occurrence, a stale R even when current F contains A,
-ambiguous subprocess lifetime, and D-5's API-gated retry. T-30 fixtures cover
-an active applicable non-fast-forward prohibition permitting retry; absent,
-inactive or nonmatching rules stopping it; denied/unreadable/error responses
-stopping it; and a changed response preventing reuse of an earlier positive
-check. All refusal cases assert zero additional tool calls and retained records.
+ambiguous subprocess lifetime, and D-5's API-gated retry. T-30 fixtures assert
+the exact `GET /repos/{owner}/{repo}/rules/branches/{branch}` request, branch
+encoding and pagination. Cover an active applicable `non_fast_forward` entry
+permitting retry; no such entry (including inactive/nonmatching rules excluded
+by that endpoint); denied/unreadable/error responses; a rule found on a later
+page; and changed responses preventing reuse of an earlier positive check.
+An affirmative rule with admin bypass must still pass, without a bypass-actor
+query. Readable classic protection with `allow_force_pushes.enabled=false`
+may pass; true, missing/ambiguous fields, 403 or 404 grant nothing and must not
+trigger a request for admin credentials. All refusal cases assert zero
+additional tool calls and retained records.
 Positive landing reconciliation must still avoid republishing when rule lookup
 is unavailable. Use fake API responses, never production rule changes.
 
@@ -544,16 +617,17 @@ affects REC-1's resume behavior, T-17–T-22 and T-30 acceptance signals.
 fix; #830/REC-1 scope is unchanged. This session neither implements nor files
 it. #836 remains paused until the design-review endpoint is satisfied.
 
-No original design-choice question remains open. Opposite-brand review and
-explicit readiness signoff remain pending; new review findings may require
-further decisions.
+No original design-choice question remains open. F1's owner clarification is
+recorded in D-5. Acceptance of the review fixes and explicit readiness signoff
+remain pending; additional review findings may require further decisions.
 
 ## Delivery plan
 
 ### REC-1. Rework existing #830 against the signed recovery contract
 
-- **Outcome:** one existing issue/PR/worktree delivers helper recovery and
-  tracker integration once the manager releases the held solver.
+- **Outcome:** existing #830 delivers helper recovery and tracker integration
+  once the manager releases the held solver, in one PR if it fits the cap or
+  the ordered conditional split below if it does not.
 - **Scope:** the approved decisions above; existing #830 delivery obligations.
 - **Phase:** after manager signoff and opposite-brand design review with findings resolved.
 - **Depends on:** the existing #829 prerequisite; no new tracker dependency invented here.
@@ -561,20 +635,71 @@ further decisions.
 - **Relevant decisions:** D-1–D-6; D-6 keeps the live-publisher fix separate.
 - **Acceptance signals:** state invariants, T-01–T-30, eight-round regression
   map, consuming-repository and bundled-copy checks.
-- **Out of scope:** new epic/children, consumer switch-over, classification
+- **Out of scope:** filing new tracker artifacts in this design session, consumer switch-over, classification
   retirement, external tool changes, and unapproved publisher scope changes.
-- **Open questions:** Q-1–Q-3 resolved; review and readiness signoff remain
-  outstanding. No finer issue decomposition is approved.
+- **Open questions:** Q-1–Q-3 resolved; review acceptance and readiness signoff
+  remain outstanding. Conditional split activation belongs to the manager.
+
+### Size budget and ordered fallback (F3)
+
+The review cited 8,449 changed lines. A read-only measurement on 2026-10-23 of
+the pinned PR base `ff1e9f9dba7a6df389ad8db10f859fdea730c186` to head
+`37d9923605bad43a0a31ce7ad40d6ef6eb629a04` gives **9,970** numstat lines:
+9,606 additions + 364 deletions across 21 paths. Both
+`git diff --numstat <base>...<head>` and GitHub's additions/deletions agree.
+Use this larger verified baseline for planning, not 8,449. The three helper
+copies contribute 6,354 added lines and its current test suite another 2,118;
+bundled duplication is therefore included in every estimate below.
+
+Estimated extra final-diff volume for record v2/capture/legacy changes,
+handoff/evidence/API/tracker changes, and the fault fixtures is **5,000–8,000**
+lines after accounting for all copies, tests, contracts and manifests. This
+puts a combined PR at roughly **14,970–17,970** lines, with effectively no
+margin at the upper end against the **strictly below 18,000** cap. This is a
+planning estimate, not measured implementation work. Existing regressions may
+be extended rather than duplicated, but coverage must not be cut to fit.
+
+The solver reports fresh `additions + deletions` against the intended base at
+the first complete implementation/test pass and again before asking the manager
+to push/review. If the projection reaches 18,000, or the measured final diff
+does, stop the combined delivery and use this ordered fallback. The manager
+files and readiness-gates the child issues before work is dispatched, relates
+them to #830, and keeps #831 dependent on both. No held branch is rewritten by
+this design session. Each eventual PR must itself measure below the cap.
+
+| Conditional slice | Deliverable and green intermediate state | Dependencies / checks / estimate |
+| --- | --- | --- |
+| REC-1a. Record v2, capture custody and legacy adapters | Add the helper's record/capture foundation and compatibility adapters, rooting payloads and making capture recovery testable. Ship required copies/inventory/version changes and its contract alongside it. Keep production workflow assets and tracker imports on the live publisher; do not expose the unfinished helper as a usable publication CLI. No production caller creates v2 records in this intermediate release. Existing publisher/tracker behavior remains intact; new isolated foundation tests pass. | First; T-01–T-14 and T-29, new/legacy record round trips, capture custody, lock/CAS and bundled-copy checks. Approximately 7,000–11,000 changed lines including three copies and tests. |
+| REC-1b. Evidence, handoff, API gate and tracker integration | Build on REC-1a to complete the helper's public preflight/apply/resume flow, bounded evidence validation, child identity/quiescence, API retry gate and tracker decoupling. The full #830 contract is usable only here. Workflow asset migration and publisher deletion still belong to #831. | Depends on merged REC-1a; T-15–T-28 and T-30 plus rerun T-01–T-14/T-29, all eight-round regressions, tracker/consuming-repository and bundle checks. Approximately 7,000–11,000 changed lines against REC-1a, including edits/deletions and repeated bundle/version changes. |
+
+The split estimates can exceed the combined estimate in total because the
+second PR edits foundation lines and repeats release metadata. Each slice runs
+the relevant Python suite and all selected gates, and neither lands with a
+half-switched consumer or failing existing tests. If either slice still
+approaches the cap, return to the manager for a revised boundary; do not silently
+split shared invariants or relax the cap. These are conditional child designs,
+not additional entries in the current processing ledger: when activated, the
+manager replaces REC-1 with REC-1a then REC-1b and records the filed issue IDs.
+Until then the ledger continues to link the one existing #830 slice.
 
 ## Review and handoff
 
 Initial draft: 2026-10-23 UTC, request `kan-backlog-20261022`, `kan-designer-1`.
 Manager signoff on `6f006a1447` was received in verified reply
 `y6mj9vvpy3r9gapeapm7zn244w`, answering `r4d4zwr4itj3m7q4p7n8j3sm9a`.
-This revision records D-4–D-6 and the selected GitHub API retry gate. Publish its
-commit to #kan-backlog so the manager can arrange the opposite-brand review.
-Keep `exploring` during that review; resolve findings in this document and land
-each revision. Ready status requires explicit readiness signoff and a completed
-review; design-choice approval and document publication alone are neither.
-No `process-design-doc` tracker creation is needed for this focused,
-already-tracked repair.
+The manager relayed the opposite-brand review of `9d1e0f8680` in verified reply
+`b249chw3p5ydcr5937kx3zu7qa`, answering status
+`piry5ucf4xy5ejeqj29ihwb7un`. Resolution map for review acceptance:
+
+| Finding | Document resolution |
+| --- | --- |
+| F1 — admin bypass (owner decision) | D-5 and the guarantee boundary explicitly accept bypass risk. Rule presence suffices; no identity/bypass permission gate. |
+| F2 — verification API | External-invocation contract names the effective-rules endpoint, affirmative response, read-only access requirement and optional already-readable classic protection; T-30 tests those requests and outcomes. |
+| F3 — delivery size | Verified 9,970-line baseline, combined estimate against the 18,000 cap, measurement checkpoints, and ordered REC-1a/REC-1b fallback with independently green intermediate states. |
+| F4 — child quiescence | Handoff records PID, process start time and exact argv; reused PID is distinguished and unreadable identity stops. T-17 fixtures cover each classification. |
+| F5 — deterministic crashes | Named test-harness fault seams invoke `os._exit(86)` in the child with a seam receipt; no timing-dependent signals; error injection and recovery assertions share the same boundaries. |
+
+Publish this revision's commit in #kan-backlog for acceptance of the fixes.
+Keep `exploring` until explicit readiness signoff and completed review; addressed
+findings are not a self-issued approval. No tracker artifact is filed by this
+design session; a cap-triggered split is managed as described above.
