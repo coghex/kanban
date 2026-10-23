@@ -539,20 +539,25 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         # solve can run against any repository Kanban is pointed at, so its
         # gate check must resolve the Kanban-managed install location
         # rather than assume the repository under review tracks
-        # tools/approve_issues.py itself.
+        # tools/approve_issues.py itself. Since issue #841 it does so by
+        # calling the bundled resolver, so the asset holds the call and the
+        # precedence prose while the resolver holds the record paths.
         solve_source = (COMMANDS_ROOT / "solve.md").read_text(encoding="utf-8")
         self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", solve_source)
+        self.assertIn("scripts/resolve_issue_review_backend.py", solve_source)
+        self.assertNotIn("XDG_RECORD", solve_source)
+        helper_source = (PLUGIN_ROOT / "scripts" / "resolve_issue_review_backend.py").read_text(encoding="utf-8")
         # Both record spellings, for the same reason the coordinator owes
-        # both: the fence probes the XDG location and then the `~/Library`
+        # both: the resolver probes the XDG location and then the `~/Library`
         # one, and a pin on one of them alone cannot see the other reverted.
         for token in (
             "Library/Application Support/kanban/issue-review/config.json",
             "/.local/share/kanban/issue-review/config.json",
         ):
-            self.assertIn(token, solve_source)
-        self.assertIn("XDG_DATA_HOME", solve_source)
-        self.assertIn("backend_path", solve_source)
-        self.assertIn("python3 tools/install_issue_review.py", solve_source)
+            self.assertIn(token, helper_source)
+        self.assertIn("XDG_DATA_HOME", helper_source)
+        self.assertIn("backend_path", helper_source)
+        self.assertIn("python3 tools/install_issue_review.py", helper_source)
 
 
 def load_review_pr_module():
@@ -1081,8 +1086,8 @@ class ApproverPathResolutionTests(unittest.TestCase):
     issue #445 made this coordinator probe. Which of the two it selects, and
     what it reports when neither is occupied, is
     `tools/test_packaged_issue_review_probe.py`'s -- it asserts that against
-    the five coordinators and the markdown fences together, because all eighteen
-    owe the same answers."""
+    the six coordinators and the bundled resolver script together, because all
+    seventeen owe the same answers."""
 
     def setUp(self):
         self.module = load_review_pr_module()

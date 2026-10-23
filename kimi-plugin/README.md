@@ -10,7 +10,8 @@ of a kimi-origin pull request, so `autosolve` revises in the same Kimi session a
 asks the bundled coordinator to spawn Codex.
 
 See [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
-the origin routing and the trusted-comment helper these workflows call.
+the origin routing, the trusted-comment helper and the issue-review backend
+resolver these workflows call.
 
 Claude packaging is at [claude-plugin/](../claude-plugin/README.md), Codex at
 [codex-plugin/](../codex-plugin/README.md), Grok at
@@ -46,7 +47,7 @@ COPILOT_HOME=$HOME/.copilot-kimi \
 
 `KIMI_PLUGIN_ROOT` is what the skills' helper lookup reads first; exporting it
 in the same launch line is what lets a `--plugin-dir` session find the
-vendored coordinator and trusted-comment helper beside the skills it loaded.
+vendored coordinator, trusted-comment helper and backend resolver beside the skills it loaded.
 
 The marketplace way registers and installs the bundle into that isolated
 profile. Copilot CLI 1.0.85 requires the tested absolute marketplace path:

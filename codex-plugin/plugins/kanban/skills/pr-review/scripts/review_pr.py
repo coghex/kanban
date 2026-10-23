@@ -820,8 +820,9 @@ def unreadable_record(record: Path, detail: str) -> WorkflowError:
 
 def approver_path() -> Path:
     """Resolve Kanban's canonical issue-review backend with the same
-    precedence `Kanban.Review.resolveCanonicalIssueReviewer` uses: a non-empty
-    KANBAN_ISSUE_REVIEW_INSTALL_DIR, then the backend the installer recorded,
+    precedence `tools/resolve_issue_review_backend.py` gives the packaged
+    workflows' fences and `tools/approve_issues_service.py`'s `resolve_backend`
+    gives the controller: a non-empty KANBAN_ISSUE_REVIEW_INSTALL_DIR, then the backend the installer recorded,
     then -- only when the record names none -- the directory the record itself
     lives in, which is where an install predating the record put it. A
     selected override or recorded backend that is missing fails there rather

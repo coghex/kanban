@@ -1,11 +1,12 @@
 """Shared model-roster reader for approve_issues.py, drain_prs.py, and the
 Claude, Codex, Grok, Kimi, and Google plugins' review_pr.py.
 
-Schema is documented in models.toml.example at the repo root and mirrors
-src/Kanban/Models.hs, which is the authoritative implementation: the two sides
-read the same `~/.config/kanban/models.toml` (or `$XDG_CONFIG_HOME`), carry the
-same compiled defaults, and answer an unusable file with the same vocabulary.
-See that module for the semantics replicated here.
+Schema is documented in models.toml.example at the repo root, and this module
+is the authoritative implementation: it reads `~/.config/kanban/models.toml`
+(or `$XDG_CONFIG_HOME`), carries the compiled defaults, and answers an unusable
+file with the vocabulary below. The Haskell reader that once shared the file
+was removed with the application's agent control (epic #794), and
+`tools/test_kanban_models.py` holds the semantics it left here.
 
 Two layers, deliberately provider-generic. *Providers* declare what exists --
 an ordered model list and an effort vocabulary per brand -- and *roles* name
@@ -64,7 +65,7 @@ KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-review/kanban_models.py"
 SCHEMA_VERSION = 1
 
 # The providers this build carries an adapter for, and the pipeline steps it
-# knows. Both mirror Kanban.Models' compiled registries; a key outside either
+# knows. Both are compiled into this module; a key outside either
 # is a validation error, since an assignment can only ever run through a
 # compiled adapter.
 PROVIDERS = ("codex", "claude")
@@ -199,9 +200,8 @@ class ModelRoster:
         return assignment
 
 
-# The operating-mode names, mirroring Kanban.Models.operatingModeLabel exactly.
-# Both sides of the language boundary report a mode to the same operator, so
-# there is one spelling of each and it lives here.
+# The operating-mode names. Every consumer reports a mode to the same operator,
+# so there is one spelling of each and it lives here.
 DUAL_MODE = "dual"
 SINGLE_AGENT_MODE = "single-agent"
 NO_AGENT_MODE = "no-agent"
@@ -211,17 +211,14 @@ OPERATING_MODES = (DUAL_MODE, SINGLE_AGENT_MODE, NO_AGENT_MODE)
 def operating_mode_for(roster: ModelRoster) -> str:
     """The mode a roster's own `agents` list derives (D-8).
 
-    Mirrors `Kanban.Models.operatingModeFor`, counting rather than matching
-    pair by pair so a third compiled provider widens dual instead of falling
-    through to a mode it does not mean.
+    Counts rather than matching pair by pair, so a third compiled provider
+    widens dual instead of falling through to a mode it does not mean.
 
-    Deliberately NOT the Python twin of `loadedOperatingMode`. That function
-    maps a load failure to no-agent because the dashboard needs a total value
-    for a mode it must draw; these consumers refuse on an unusable roster
-    instead (#483's requirement 3), and reporting a defective file to an
-    operator as a deliberate board-only install would hide the defect. A
-    roster that will not load never reaches this function at all: loading
-    raises first.
+    Deliberately total only over a loaded roster. A load failure is never
+    mapped to no-agent here: these consumers refuse on an unusable roster
+    (#483's requirement 3), and reporting a defective file to an operator as a
+    deliberate board-only install would hide the defect. A roster that will not
+    load never reaches this function at all: loading raises first.
     """
     count = len(roster.agents)
     if count == 0:
@@ -246,8 +243,8 @@ def role_applicability(role: str) -> tuple[str, ...]:
 
 
 # The compiled defaults: today's wire values, cell for cell, equal to the
-# tracked models.toml.example (a test holds the two together, on both sides of
-# the language boundary). Thirteen applicable cells, every one valued.
+# tracked models.toml.example (a test holds the two together). Thirteen
+# applicable cells, every one valued.
 DEFAULT_ROSTER = ModelRoster(
     agents=("codex", "claude"),
     providers={
@@ -305,12 +302,11 @@ DEFAULT_ROSTER = ModelRoster(
 def default_roster_path() -> Path:
     """`models.toml` under the XDG configuration root, beside `config.toml`.
 
-    Matches Kanban.Models.rosterPath (getXdgDirectory XdgConfig) and
-    kanban_config.default_config_path: honor `$XDG_CONFIG_HOME` when set, so
-    the dashboard and these tools agree on the same file. Resolved per call
-    rather than frozen at import, for the same reason that module's resolvers
-    are: freezing it would bind whatever `$HOME` and `$XDG_CONFIG_HOME` held
-    when this module first loaded.
+    Matches kanban_config.default_config_path: honor `$XDG_CONFIG_HOME` when
+    set, so the board's configuration and these tools agree on the same
+    directory. Resolved per call rather than frozen at import, for the same
+    reason that module's resolvers are: freezing it would bind whatever `$HOME`
+    and `$XDG_CONFIG_HOME` held when this module first loaded.
     """
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
@@ -369,9 +365,7 @@ def _load_or_absent(
     the same swallowing reason -- and it is what makes a symbolic link to a
     regular file stay loadable while one to nothing refuses.
 
-    This mirrors `Kanban.Models.loadModelRoster`, which draws exactly these
-    distinctions with `getSymbolicLinkStatus`, `isDoesNotExistError`, and
-    `getFileStatus`.
+    `tools/test_kanban_models.py` drives each of these distinctions.
     """
     path = (
         Path(explicit_path).expanduser()

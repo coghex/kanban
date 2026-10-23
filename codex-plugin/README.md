@@ -159,8 +159,8 @@ two skills locate the installed coordinator by searching under
 `$CODEX_HOME` rather than a path relative to the current directory — the
 same review logic and `pr-review:v2` marker/label state machine runs
 regardless of which command an agent session starts from. The coordinator
-resolves the canonical issue-review backend the same way
-`Kanban.Review.resolveCanonicalIssueReviewer` does: a non-empty
+resolves the canonical issue-review backend the way each skill's bundled
+`scripts/resolve_issue_review_backend.py` does for the workflows: a non-empty
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path
 `tools/install_issue_review.py` recorded in its discovery record, then — only
 when that record names none — the directory the record lives in; it never
@@ -178,6 +178,17 @@ effort, sandbox, approval policy, or working directory — the session that
 runs a skill is started with those, and `tools/test_codex_plugin.py` asserts
 none of the packaged manifests (or the coordinator's own nested-reviewer
 invocations) override them.
+
+`$solve`, `$issue-review`, `$issue-rereview`, `$triage` and `$retriage` find the
+canonical issue-review backend through a bundled script of their own,
+`skills/<name>/scripts/resolve_issue_review_backend.py`, a byte-identical copy of
+`tools/resolve_issue_review_backend.py` in each of the five skills that prints
+the resolved path, or one diagnostic and a non-zero exit. Each skill locates its
+own installed copy under `$CODEX_HOME` exactly the way the PR-flow skills locate
+the coordinator, so none embeds the probe and none can be satisfied by a copy
+inside the repository being worked. The coordinator keeps its own Python probe;
+`tools/test_packaged_issue_review_probe.py` drives the script, each skill's call
+to it, and the coordinator's `approver_path()` against the same cases.
 
 `$solve` bundles a second script, `skills/solve/scripts/trusted_issue_spec.py`,
 and reads the issue's effective spec through nothing else. It fetches the

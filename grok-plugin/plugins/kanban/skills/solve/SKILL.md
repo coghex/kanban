@@ -12,47 +12,41 @@ Take one issue through a tested pull request. Stop after opening the PR; review 
 
 This bundle stamps the grok origin marker, which is correct only in a session running a Grok model. The Grok CLI keeps no session record this workflow can read deterministically, so this bundle has no runtime check that the session's model is a Grok one: it relies on the operator loading it only into a Grok session. Do not stand in for the missing check with the model's own report of which model it is — a self-report is not evidence, and a check built on one would only look like a guard.
 
-## Resolving The Canonical Backend
+## Locating This Bundle's Helpers
 
-Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:
+The trusted-comment helper and the issue-review backend resolver are vendored side by side in this bundle's `skills/solve/scripts/`, so locating the helper locates both. Kanban and Grok invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory this session loaded, whether a hashed install or a local marketplace source outside `$GROK_HOME`. Otherwise search the documented install layout `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`). Never search a fabricated `$GROK_HOME/plugins/user/kanban` path, and never resolve a checkout-relative copy:
 
 ```bash
-XDG_RECORD="$HOME/.local/share/kanban/issue-review/config.json"
-[ -z "$XDG_DATA_HOME" ] || XDG_RECORD="$XDG_DATA_HOME/kanban/issue-review/config.json"
-RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
-BACKEND="$(python3 - "$XDG_RECORD" "$RECORD" <<'PY'
-import json, os, sys
+TRUSTED_SPEC="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
+import sys
 from pathlib import Path
 
-records = [Path(argument) for argument in sys.argv[1:]]
-occupied = [candidate for candidate in records if os.path.lexists(candidate)]
-record = occupied[0] if occupied else records[0]
-consulted = str(record) if occupied else " and ".join(str(candidate) for candidate in records)
-override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
-if override and override.strip():
-    resolved = Path(override).expanduser() / "approve_issues.py"
-else:
-    if not occupied:
-        document = {}
-    else:
-        try:
-            document = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
-    if not isinstance(document, dict):
-        raise SystemExit(f"The install record at {record} is not a JSON object.")
-    if "backend_path" not in document:
-        resolved = record.parent / "approve_issues.py"
-    else:
-        recorded = document["backend_path"]
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
-            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
-        resolved = Path(recorded)
-if not resolved.is_file():
-    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {consulted}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
-print(resolved)
+plugin_root, grok_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+if plugin_root:
+    candidate = Path(plugin_root) / relative
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("trusted helper was not found under $GROK_HOME/installed-plugins/kanban-*")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
 PY
 )"
+```
+
+If that leaves `$TRUSTED_SPEC` empty, stop and report the message it printed: this bundle's helpers were not found, and nothing below can run without them. Never fall back to a copy inside the repository being worked or to a personal copy of this skill.
+
+## Resolving The Canonical Backend
+
+Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location through this bundle's `resolve_issue_review_backend.py`, which sits beside the helper located above, rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then the macOS user Library directory's. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both. The resolver runs from the directory the helper was located in, never from the repository being worked:
+
+```bash
+[ -n "$TRUSTED_SPEC" ] && BACKEND="$(python3 "${TRUSTED_SPEC%/*}/resolve_issue_review_backend.py")"
 ```
 
 If that command fails or leaves `$BACKEND` empty, stop and report exactly the message it printed: it names the record or records that were consulted and the repair for that specific failure, which is not always the bare installer command.
@@ -99,29 +93,9 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 1. Resolve the repository root and default branch. Fetch `origin`. The GitHub repository identity is the `$REPO` established above; do not resolve it again and do not derive it from the local checkout directory name.
 2. Keep newly created worktrees outside the source-checkout directory. Set `WORKTREES_ROOT=${WORKTREES_ROOT:-"$HOME/worktrees"}` and use the repository-scoped directory `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>`, named by the established identity. Create its parent if needed. If no same-issue recovery worktree was found above, create that worktree from the latest `origin/<default-branch>`; otherwise continue in the recovered worktree. `git worktree list` remains the sole collision/recovery source and therefore continues to recognize legacy worktrees at their existing paths. Never move, rename, or bulk-clean legacy worktrees as part of solving. Use absolute paths for every later command because tool working directories are not persistent.
-3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Grok invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory this session loaded, whether a hashed install or a local marketplace source outside `$GROK_HOME`. Otherwise search the documented install layout `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`). Never search a fabricated `$GROK_HOME/plugins/user/kanban` path, and never resolve a checkout-relative copy:
+3. Fetch the effective spec through this bundle's vendored trusted-comment helper, located under "Locating This Bundle's Helpers" above, before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. `$TRUSTED_SPEC` is that located path; if this shell no longer has it, run that lookup again rather than guessing a path:
 
    ```bash
-   TRUSTED_SPEC="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
-import sys
-from pathlib import Path
-
-plugin_root, grok_home = sys.argv[1], sys.argv[2]
-relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
-if plugin_root:
-    candidate = Path(plugin_root) / relative
-    if not candidate.is_file():
-        raise SystemExit(f"trusted helper was not found at {candidate}")
-    print(candidate)
-    raise SystemExit(0)
-matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
-if not matches:
-    raise SystemExit("trusted helper was not found under $GROK_HOME/installed-plugins/kanban-*")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
-PY
-)"
    python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>
    ```
 

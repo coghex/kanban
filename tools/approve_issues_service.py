@@ -655,7 +655,7 @@ def resolve_backend(install_dir: str | Path | None = None) -> Path:
 
     The one resolution contract, in the one order
     `docs/agent-workflow-contract.md` sections 2.3 and 3 fix and
-    `Kanban.Review.resolveCanonicalIssueReviewer` implements: a non-empty
+    `tools/resolve_issue_review_backend.py` gives the packaged workflows: a non-empty
     `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the absolute `backend_path` the
     installer recorded, then -- only when that field is absent, which is
     exactly how an installation predating the record reads -- the directory
