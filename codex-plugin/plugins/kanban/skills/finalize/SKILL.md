@@ -74,14 +74,12 @@ request number before anything is read:
 : "${PR:?a pull request number must be exactly one positive number; nothing has been read}"
 ```
 
-This is not decoration. GitHub's CLI accepts a branch name or a URL wherever a
-pull request number goes — the `pr view` and `pr merge` subcommands both do — so
-an unvalidated `$PR` lets `$finalize some-branch` gate and then **merge**
-whatever pull request that branch happens to have open, one nobody named. An empty `$PR` is refused for the same
-reason: it must be the number that was confirmed, not the absence that prompted
-the question. The test rejects an empty value, a non-numeric one, a negative or
-zero one, and anything carrying a second token, and it runs before the first
-`gh` call rather than after, so a rejected invocation reads nothing at all.
+GitHub's CLI accepts a branch name or a URL wherever a pull request number
+goes, so an unvalidated `$PR` lets `$finalize some-branch` gate and then
+**merge** a pull request nobody named. The test rejects an empty value, a
+non-numeric one, a negative or zero one, and anything carrying a second token,
+and it runs before the first `gh` call, so a rejected invocation reads nothing
+at all.
 
 ## 2. The gate (FAIL CLOSED)
 
@@ -234,7 +232,7 @@ PY
 )"
 ```
 
-What that gate requires, and why each part is what it is:
+What that gate requires:
 
 - **Approval from the helper, under the `finalize` policy, by exit status AND
   result.** The helper reads the authenticated login, the pull request, and the
@@ -244,60 +242,44 @@ What that gate requires, and why each part is what it is:
   object, missing or malformed output, and a failed helper each leave `$HEAD`
   empty, and the refusal it reports is the helper's own `reason`. `$HEAD` is
   cleared before every run, so a refused second run can never inherit the first
-  run's head. The helper's input, result, and exit-status contract is the module
-  docstring of `tools/pr_head_approval.py`, which this command bundles and which
-  owns everything about the evidence; this command keeps the merge-specific
-  checks below.
+  run's head. The helper's contract is the module docstring of
+  `tools/pr_head_approval.py`, which owns everything about the evidence; this
+  command keeps the merge-specific checks below.
 - **The authenticated login, resolved fail-closed.** Only a marker *you*
   published counts, so an unresolved login refuses rather than accepting every
-  marker in the feed. Logins are compared case-insensitively; GitHub does not
-  preserve case in a way that may decide this.
-- **The complete comment feed.** A pull request's `comments` field returns a
-  bounded window, so on a long pull request the newest marker can fall outside
-  it and an older verdict wins. The helper reads the paginated issue-comments
-  endpoint whole and flattens it, then orders it newest-first by `created_at`
-  with the comment id breaking ties, so the marker chosen is the globally newest
-  one and the choice does not depend on the order GitHub happened to return. The
-  feed reaches the helper's own process, never an argument: a feed long enough
-  to need the paging exceeds the system argument limit.
-- **The marker the coordinator publishes today.** That is
-  `<!-- pr-review:v2 reviewers=… models=… head=… verdict=… -->`, and both of
-  its list fields are comma-joined, so `reviewers=claude,codex` is an ordinary
+  marker in the feed. Logins are compared case-insensitively.
+- **The complete comment feed.** The helper reads the paginated issue-comments
+  endpoint whole, not the bounded `comments` window, orders it newest-first by
+  `created_at` with the comment id breaking ties, and takes the globally newest
+  marker. The feed reaches the helper's own process, never an argument.
+- **The marker the coordinator publishes today** is
+  `<!-- pr-review:v2 reviewers=… models=… head=… verdict=… -->`; both list
+  fields are comma-joined, so `reviewers=claude,codex` is an ordinary
   dual-reviewer marker and not a malformed one. The older
-  `<!-- pr-review:v1 reviewer=… head=… verdict=… -->` spelling is still honoured
-  for pull requests reviewed before the change.
+  `<!-- pr-review:v1 reviewer=… head=… verdict=… -->` spelling is still honoured.
 - **`head=` equal to the pull request's current `headRefOid`.** An approval names
-  a commit, not a branch. `.github/workflows/review-gate.yml`'s
-  `dismiss-stale-approval` job already removes `reviewed:approve` when a push
-  touches a file the pull request owns, but a marker whose head no longer matches
-  is stale whatever the label says, so the head comparison decides and not the
-  label alone.
-- **The approved head and the head this gate reads are one value.** The helper
-  evaluates the approval at the head it read, and the readiness checks here read
-  the pull request again. The gate refuses unless the `headRefOid` it read equals
-  the helper's approved `head`, so `$HEAD` is set only when the helper approved
-  AND every readiness check passed against that same commit, on each of the two
-  gate runs.
+  a commit, not a branch: a marker whose head no longer matches is stale whatever
+  the label says, so the head comparison decides and not the label alone.
+- **The approved head and the head this gate reads are one value.** The gate
+  refuses unless the `headRefOid` it read equals the helper's approved `head`, so
+  `$HEAD` is set only when the helper approved AND every readiness check passed
+  against that same commit, on each of the two gate runs.
 - **A malformed or duplicated marker refuses.** Every `pr-review:v` opening in
-  the chosen comment has to parse, and exactly one has to be there. Taking the
-  first marker that parsed would read a comment opening with a current-head
-  `APPROVE` and going on to a `CHANGES_REQUESTED` as the approval alone. The
-  coordinator publishes exactly one marker per comment, so anything else is a
-  comment this gate cannot safely read.
+  the chosen comment has to parse, and exactly one has to be there, because the
+  first marker that parsed could be a current-head `APPROVE` ahead of a
+  `CHANGES_REQUESTED`.
 - **A reviewer set that does not exclude the pull request's own brand.** The
   approval this workflow acts on is an *opposite-brand* approval, and the marker
-  alone cannot say whether it is one: it names who reviewed, not who wrote. So
-  the helper reads the origin off the pull request body by exactly the rules
-  the bundled coordinator's `origin_from_body` applies — one marker, of one
-  kind, as the body's final non-whitespace content — and a marker whose
-  `reviewers=` names that same brand is refused as a self-review. Both markers
-  present, the same marker twice, and a marker with trailing text after it are
-  each refusals rather than defaults. A body with **no** marker is the
-  coordinator's unknown-origin route, which reviews with both brands; there
-  being no declared brand to be opposite of, only a marker naming both is known
-  to be independent of whoever wrote the code, and a single-brand marker on such
-  a pull request refuses. A grok, kimi, or google origin is a known origin that
-  Codex reviews, so only a Codex-only marker is accepted there.
+  names who reviewed, not who wrote. So the helper reads the origin off the pull
+  request body by exactly the rules the bundled coordinator's `origin_from_body`
+  applies — one marker, of one kind, as the body's final non-whitespace content
+  — and a marker whose `reviewers=` names that same brand is refused as a
+  self-review. Both markers present, the same marker twice, and a marker with
+  trailing text after it are each refusals rather than defaults. A body with
+  **no** marker is the coordinator's unknown-origin route, which reviews with
+  both brands: only a marker naming both is accepted there, and a single-brand
+  marker refuses. A grok, kimi, or google origin is a known origin that Codex
+  reviews, so only a Codex-only marker is accepted there.
 - **Native reviews never substitute.** GitHub's own review approval is not read
   here at all. Whichever mode the repository approves by, a current-head
   canonical marker is required as well as that mode's label or `reviewDecision`
@@ -306,48 +288,34 @@ What that gate requires, and why each part is what it is:
   approval label, the changes-requested label, the blocking labels and the
   approval mode are configuration — the global `[workflow]` table, overridden by
   `[repositories."<owner>/<name>".workflow]` — so the helper resolves them the
-  way the bundled coordinator, the drainer and the board all do, and compares them
-  with case folded on both sides as `hasLabel` does. A repository that renamed
-  `reviewed:approve` would otherwise have every one of its approvals refused,
-  and one configured for `review` approval would look unapproved with a
-  perfectly good approval on it. A blocking label refuses for the same reason
-  the changes-requested label does: `hasProblemLabel` treats the two alike, and
-  a blocking label is a decision a human made. An unreadable or absent
-  configuration file keeps the documented defaults.
-- **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict and
-  `UNKNOWN` means GitHub has not finished computing mergeability; neither is a
-  clearance, and merging on either is how an unresolved conflict lands.
-- **A base that is the repository's default branch.** An approval names a
-  commit, and everything above binds it to one — but a pull request can be
-  *retargeted* to a different base without its head moving at all. The marker
-  still names the current head, `.github/workflows/review-gate.yml` strips the
-  approval label only on a `synchronize` push and never on a retarget, and the
-  marker records no base to compare against, so nothing in the gate above would
-  notice that the reviewed code is about to land somewhere it was never
-  reviewed against. So the target is pinned instead: this workflow finalizes a
-  pull request onto the default branch, and refuses any other base. That is a
-  deliberate narrowing rather than a check — a stacked pull request onto a
-  feature base is out of scope here, and belongs to whoever owns that base. A
-  default branch that cannot be resolved refuses too.
+  way the bundled coordinator, the drainer and the board do, and compares them
+  with case folded on both sides as `hasLabel` does. A blocking label refuses
+  as the changes-requested label does (`hasProblemLabel`). An unreadable or
+  absent configuration file keeps the documented defaults.
+- **`mergeable` exactly `MERGEABLE`.** `CONFLICTING` is a real merge conflict
+  and `UNKNOWN` means GitHub has not finished computing mergeability; neither is
+  a clearance.
+- **A base that is the repository's default branch.** A pull request can be
+  *retargeted* without its head moving, and the marker records no base to
+  compare against, so the target is pinned instead: this workflow finalizes a
+  pull request onto the default branch and refuses any other base — a stacked
+  pull request belongs to whoever owns that base. A default branch that cannot
+  be resolved refuses too.
 - **A merge state that is actually ready.** `mergeable` answers whether the
-  merge *would* be clean, never whether it *should* happen now: a pull request
-  is routinely `MERGEABLE` while its `mergeStateStatus` is `BEHIND` — its head
-  has not seen the base tip the reviewed code will land on — or `UNSTABLE`,
-  where a check is failing. Merging either with `--admin` would push straight
-  past the branch update and the fresh review the drainer would have required.
+  merge *would* be clean, never whether it *should* happen now: a `MERGEABLE`
+  pull request may be `BEHIND` or `UNSTABLE`, and `--admin` would push straight
+  past the branch update and fresh review the drainer would require.
   So `parseMergeState` and `mergeStateReady` are mirrored exactly: `CLEAN` is
   ready, and a `BLOCKED` state on a `MERGEABLE` pull request is ready too —
   that is the branch-protection requirement the `MergeProtected` state models,
-  and clearing it is precisely what `--admin` is for. Everything else refuses,
-  `BEHIND` and `UNSTABLE` included. A `BEHIND` pull request is not finalized
-  here: it is updated and rereviewed first, which is
-  $fix's branch to take, not this one.
+  and clearing it is what `--admin` is for. Everything else refuses, `BEHIND`
+  and `UNSTABLE` included. A `BEHIND` pull request is not finalized here: it is
+  updated and rereviewed first, which is $fix's branch to take, not this
+  one.
 - **Every check successful.** Any check whose bucket is not `pass` or `skipping`
   refuses, and so does an empty or unreadable check set — "no checks reported"
-  is what a conflicted pull request looks like, not what a green one does. This
-  is deliberately wider than the drainer's single configured
-  `required_ci_check`: a manual fallback merging outside the daemon's audit
-  should be more careful than it, not less.
+  is what a conflicted pull request looks like. This is deliberately wider than
+  the drainer's single configured `required_ci_check`.
 
 **A refusal is total.** Stop immediately and do nothing else: merge nothing,
 close nothing, remove no worktree, delete no branch. Report the two lines the
@@ -370,9 +338,7 @@ That is the same call `tools/drain_prs.py` makes, flag for flag, and each flag
 is load-bearing:
 
 - `--merge` creates a merge commit, so every commit of the pull request reaches
-  the default branch alongside it. Never `--squash` and never `--rebase`: both
-  discard that history, and the drainer's own merges would then disagree with
-  this one about what the repository's history looks like.
+  the default branch. Never `--squash` and never `--rebase`.
 - `--match-head-commit "$HEAD"` names the reviewed commit as an object. A branch
   that moved between the gate and this call aborts the merge instead of landing
   a head nobody reviewed.
@@ -385,21 +351,11 @@ the shell before `gh` is reached. That is the intent — never substitute a head
 read from somewhere else, and never drop `--match-head-commit` to get past it.
 
 **One window this does not close, deliberately.** The gate re-reads the base
-immediately before the merge, so a retarget is caught right up to that read —
-but the merge itself binds only the head. `--match-head-commit` is the one
-binding the merge subcommand accepts; there is no base counterpart. An actor who
-retargets the pull request between that final read and the merge therefore lands
-the reviewed head on the new base, and nothing here can refuse it.
-
-Closing that would mean advancing the base reference directly with a
-compare-and-swap rather than asking GitHub to merge — a larger mechanism, and
-one that writes to a remote, which is the surface this workflow deliberately
-does not have. It is also not a weakness peculiar to this fallback:
-`tools/drain_prs.py` merges with exactly the same call and exactly the same
-binding, unattended, for every pull request it drains. The window is a property
-of the merge primitive, and finalize is no more exposed to it than the component
-that owns merging. Name the base you merged onto in the report, so the window is
-auditable after the fact.
+immediately before the merge, but the merge binds only the head
+(`--match-head-commit` has no base counterpart), so a retarget between that read
+and the merge lands the reviewed head on the new base and nothing here can
+refuse it. `tools/drain_prs.py` merges with exactly the same call and exactly
+the same binding. Name the base you merged onto in the report, so the window is auditable.
 
 **Do not arm auto-merge.** Arming a merge on a head whose checks have not passed
 is a mutation, and step 2 forbids every mutation until they have. A pull request

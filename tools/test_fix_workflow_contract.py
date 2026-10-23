@@ -370,30 +370,26 @@ REQUIRED_PHRASES = {
         "no check state, which is why it precedes the\n   rollup test below."
     ),
     "the-scratch-file-lives-outside-the-checkout": (
-        "Argument-free `mktemp` is portable across BSD/macOS and GNU/Linux, "
-        "and puts that file OUTSIDE the checkout; the `rm` is not optional."
+        "Argument-free `mktemp` puts that file OUTSIDE the checkout, and the "
+        "`rm` is not optional."
     ),
     "nothing-may-be-left-in-the-working-tree": (
         "Nothing this workflow does may leave a file in the working tree"
     ),
     "a-rollup-entry-is-not-a-check": (
         "**A rollup entry is not the same thing as a CHECK.** GitHub returns "
-        "every context on the commit, including ones a later run superseded, "
-        "so the same check can appear twice — an old failure beside the "
-        "passing rerun that replaced it."
+        "every context on the commit, including ones a later run superseded."
     ),
     "the-decoders-dedup-key-and-recency-rule-are-restated": (
-        "`src/Kanban/GitHub/Decode.hs` keys each context "
+        "As `src/Kanban/GitHub/Decode.hs` does, key each context "
         "(`check:<app-slug>:<name>` for a `CheckRun`, "
-        "`status:<creator-login>:<context>` for a `StatusContext`), keeps only "
-        "the most recent context per key (`startedAt` falling back to "
-        "`completedAt` for a check run, `createdAt` for a status), and reads "
-        "the verdict off THAT set alone."
+        "`status:<creator-login>:<context>` for a `StatusContext`), keep only "
+        "the most recent per key (`startedAt` falling back to `completedAt` "
+        "for a check run, `createdAt` for a status), and read the verdict off "
+        "THAT set alone before applying any branch below."
     ),
-    "a-superseded-failure-is-a-real-state-here": (
-        "since the PR drainer reruns required checks on its own schedule, a "
-        "superseded failure is a state this repository actually produces, not "
-        "a hypothetical."
+    "never-deduplicate-on-a-guess": (
+        "Never deduplicate on a guess."
     ),
     "an-undedupable-entry-fails-closed": (
         "**If any entry lacks the fields that rule needs** — no `__typename` "
@@ -409,45 +405,36 @@ REQUIRED_PHRASES = {
         "conclusion\n   from the rollup, that rollup must be COMPLETE."
     ),
     "a-null-rollup-is-trusted-checks-none": (
-        "when `statusCheckRollup` itself is `null` or absent, treat it as "
+        "When `statusCheckRollup` itself is `null` or absent, treat it as "
         "`ChecksNone`, exactly as `parseChecks` does in "
         "`src/Kanban/GitHub/Decode.hs`"
     ),
     "a-null-rollup-continues-as-no-checks": (
-        "There is no `contexts` object to compare in that shape because GitHub "
-        "is reporting NO checks; continue through the later branches with no "
-        "failed or pending checks."
+        "GitHub is reporting NO checks, so continue through the later "
+        "branches with no failed or pending checks."
     ),
     "a-malformed-present-rollup-still-fails-closed": (
-        "Do not confuse that with a PRESENT, non-null rollup whose `contexts`, "
-        "`totalCount`, or nodes cannot be read — that still fails closed."
+        "A PRESENT, non-null rollup whose `contexts`, `totalCount`, or nodes "
+        "cannot be read still fails closed."
     ),
     "a-failed-check-is-fixed-not-retried": (
         "3. **Failed check** — EVERY failed check in the DEDUPLICATED set "
-        "above, required or not, not only required checks, and not only the "
-        "first one you notice. Fix the causes in the worktree of step 4, push, "
-        "and hand off the rereview of step 6."
+        "above, required or not, not only the first one you notice. Fix the "
+        "causes in the worktree of step 4, push, and hand off the rereview of "
+        "step 6."
     ),
     "never-retry-a-failure-instead-of-fixing-it": (
-        "Never\n   delete or skip a test, never weaken an assertion, and never "
-        "retry a failure\n   instead of fixing it — see step 5, which forbids "
-        "that outright."
+        "Never delete or skip a test, never weaken an assertion, and never "
+        "retry a failure instead of fixing it — see step 5."
     ),
     "completeness-is-established-by-the-same-comparison-kanban-makes": (
         "Compare the `totalCount` the query above returned against the number "
-        "of nodes it returned beside it. They must be equal — the same "
-        "comparison `src/Kanban/GitHub/Decode.hs` makes before it decodes a "
-        "single context."
+        "of nodes it returned beside it. They must be equal."
     ),
     "an-untrustworthy-rollup-fails-closed": (
         "**A truncated rollup, or any entry you cannot classify, fails "
         "closed:** report that the check state cannot be read completely and "
         "stop without pushing or invoking a rereview."
-    ),
-    "why-an-incomplete-rollup-is-not-an-absence": (
-        "An incomplete rollup can be\n   hiding exactly the failed or pending "
-        "entry the branches below test for, so\n   treating it as absence "
-        'would turn "I did not see one" into "there is none".'
     ),
     "a-pending-check-mutates-nothing": (
         "4. **A check still running** — no conflict, a rollup you can trust, "
@@ -478,14 +465,8 @@ REQUIRED_PHRASES = {
         "reports rather than retries"
     ),
     "pending-outranks-behind-as-it-does-in-the-haskell": (
-        "`pullRequestStatus` ranks it this way\n   too — `checksPending` is "
-        "guarded BEFORE the merge-state test"
-    ),
-    "why-pending-outranks-behind": (
-        "replacing the approved head\n   while CI is still running discards "
-        "the very run that would have told you\n   whether there was anything "
-        "to fix, and starts the whole thing again on a\n   head nobody has "
-        "reviewed."
+        "`pullRequestStatus` guards `checksPending` BEFORE the merge-state "
+        "test"
     ),
     "behind-the-base-is-its-own-obstacle": (
         "5. **Behind its base** — no conflict, no failed check, no pending "
@@ -493,7 +474,7 @@ REQUIRED_PHRASES = {
     ),
     "only-behind-is-fixable-by-a-branch-update": (
         "6. **Any other merge state that is not ready** — `BLOCKED` and "
-        "`UNSTABLE` are\n   real states (`MergeBlocked`, `MergeUnstable`)"
+        "`UNSTABLE`\n   (`MergeBlocked`, `MergeUnstable`)"
     ),
     "blocked-and-unstable-fail-closed": (
         "This branch fails closed: report the exact merge state, say that this "
@@ -501,24 +482,22 @@ REQUIRED_PHRASES = {
         "rereview."
     ),
     "only-clean-and-protected-are-ready": (
-        "Only `MergeClean` and `MergeProtected`\n   are ready "
-        "(`mergeStateReady`); everything else that is not `BEHIND` lands\n   "
-        "here."
+        "Only `MergeClean` and `MergeProtected` are ready "
+        "(`mergeStateReady`); everything else that is not `BEHIND` lands "
+        "here"
     ),
     "green-checks-do-not-make-a-behind-pr-mergeable": (
-        "Green checks do not make\n   such a pull request mergeable. Update it "
-        "from the recorded `baseRefName`\n   through step 4, exactly as the "
-        "conflict branch does"
+        "Green checks do not make it mergeable. Update it from the recorded"
+        "\n   `baseRefName` through step 4, exactly as the conflict branch "
+        "does"
     ),
     "nothing-to-fix-requires-a-ready-merge-state": (
         "7. **Nothing to fix** — no conflict, no failed check, no pending "
         "check, and a\n   merge state that is ready."
     ),
     "an-unknown-merge-state-is-not-a-clearance": (
-        "`UNKNOWN` is not a clearance either — GitHub has not\n   finished "
-        "computing mergeability, so it lands in branch 6 and stops rather\n   "
-        "than being reported ready when it may yet come back `BEHIND` or "
-        "`DIRTY`."
+        "everything else that is not `BEHIND` lands here, `UNKNOWN` "
+        "included."
     ),
 
     # --- The retry prohibition. ---
@@ -526,9 +505,8 @@ REQUIRED_PHRASES = {
         "Never\n   delete or skip a test, never weaken an assertion"
     ),
     "a-pre-existing-failure-stops-the-run": (
-        "A failure\n   you judge to be pre-existing on the recorded base "
-        "branch is reported to the\n   user and stops the run rather than "
-        "being papered over."
+        "A failure you judge to be pre-existing on the recorded base branch "
+        "is reported to the user and stops the run."
     ),
     # --- The ceiling. ---
     # --- Authority: what a push does and does not invalidate. ---
@@ -637,8 +615,8 @@ DIAGNOSIS_ORDER = (
 FIX_ONLY_REQUIREMENTS = (
     "an-untrustworthy-rollup-is-its-own-branch",
     "the-branches-read-the-deduplicated-set",
+    "never-deduplicate-on-a-guess",
     "an-undedupable-entry-fails-closed",
-    "a-superseded-failure-is-a-real-state-here",
     "the-decoders-dedup-key-and-recency-rule-are-restated",
     "the-scratch-file-lives-outside-the-checkout",
     "nothing-may-be-left-in-the-working-tree",
@@ -653,10 +631,8 @@ FIX_ONLY_REQUIREMENTS = (
     "the-conflict-branch-precedes-the-rollup-test",
     "an-untrustworthy-rollup-fails-closed",
     "completeness-is-established-by-the-same-comparison-kanban-makes",
-    "why-an-incomplete-rollup-is-not-an-absence",
     "a-pending-check-mutates-nothing",
     "pending-outranks-behind-as-it-does-in-the-haskell",
-    "why-pending-outranks-behind",
     "behind-the-base-is-its-own-obstacle",
     "only-clean-and-protected-are-ready",
     "blocked-and-unstable-fail-closed",
@@ -1262,7 +1238,7 @@ class ContextDeduplicationTests(unittest.TestCase):
             text = flat(read(path))
             self.assertIn("check:<app-slug>:<name>", text, path)
             self.assertIn("status:<creator-login>:<context>", text, path)
-            self.assertIn("keeps only the most recent context per key", text, path)
+            self.assertIn("keep only the most recent per key", text, path)
 
     def test_the_rollup_query_fetches_the_fields_that_rule_needs(self):
         # `gh pr view --json statusCheckRollup` omits the app slug and the
