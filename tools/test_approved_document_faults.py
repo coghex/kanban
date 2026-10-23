@@ -1687,6 +1687,35 @@ class ReworkRoundFive(FaultFixture):
         self.assertEqual(asides[0].stat().st_mode & 0o777, 0o600)
         self.assertIsNotNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["capture"])
 
+    def restrict_aside(self):
+        asides = list((self.fx.work / "docs").glob(".kanban-attempt-*/aside"))
+        self.assertEqual(len(asides), 1)
+        os.chmod(asides[0], 0o600)
+        return asides[0]
+
+    def test_a_new_process_resume_keeps_a_captured_mode_the_replacement_lacks(self):
+        for seam in ("link_into_place.after", "finish_capture.before"):
+            with self.subTest(interrupted_at=seam):
+                self.setUp()
+                self.mode("refuse")
+                self.crash([self.fault(seam, "R14.mode")])
+                aside = self.restrict_aside()
+                self.assertEqual(os.stat(self.fx.work / DOC).st_mode & 0o777, 0o644)
+                calls = len(self.calls())
+                before = self.facts()
+                code, stop, _ = self.resume_child()
+                self.assertEqual(stop["status"], "capture-changed", stop)
+                self.assertEqual(self.facts(), before)
+                self.assertEqual(aside.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(os.stat(self.fx.work / DOC).st_mode & 0o777, 0o644)
+                self.assertEqual(len(self.calls()), calls)
+                self.assertIsNotNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["capture"])
+
+    def test_a_matching_mode_still_lets_a_resume_clean_up(self):
+        self.crash([self.fault("finish_capture.before", "R14.control")])
+        self.recover()
+        self.settled()
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

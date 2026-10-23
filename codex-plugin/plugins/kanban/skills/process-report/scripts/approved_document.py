@@ -1311,7 +1311,33 @@ def inspect_capture(root: Path, pending: dict) -> dict:
         "aside": safe_state(aside) if present else ("absent", None),
         "scratch": safe_state(scratch) if present else ("absent", None),
         "target": file_state(root / pending["document"]),
+        "aside_mode": file_mode(aside) if present else None,
+        "target_mode": file_mode(root / pending["document"]),
     }
+
+
+def file_mode(path: Path):
+    """The permission bits of a regular file, or None when it is not one."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return stat.S_IMODE(info.st_mode) if stat.S_ISREG(info.st_mode) else None
+
+
+def mode_stop(inspected: dict, pending: dict) -> DocumentError | None:
+    """The stop for a capture whose replacement and captured file disagree about
+    permissions: cleanup would silently lose the captured mode, so both are kept."""
+    aside, target = inspected.get("aside_mode"), inspected.get("target_mode")
+    if aside is None or target is None or aside == target:
+        return None
+    return capture_stop(
+        "capture-changed",
+        f"{pending['document']} and its captured file differ in permissions "
+        f"({target:04o} against {aside:04o}); both are kept for reconciliation and "
+        "nothing was removed",
+        inspected, pending,
+    )
 
 
 def safe_state(path: Path):
@@ -1488,11 +1514,23 @@ def recover_capture(root: Path, pending: dict) -> dict:
             )
         if aside_blob != baseline:
             pending = root_capture(root, pending, _preserve(root, Path(inspected["aside_path"]).read_bytes()))
-        return finish_capture(root, pending, inspected | {"target": restored})
+        restored_view = inspected | {
+            "target": restored, "target_mode": file_mode(root / pending["document"]),
+        }
+        stop = mode_stop(restored_view, pending)
+        if stop is not None:
+            raise stop
+        return finish_capture(root, pending, restored_view | {"mode": inspected["aside_mode"]})
     if target_blob == approved and aside_blob == baseline:
-        return finish_capture(root, pending, inspected)
+        stop = mode_stop(inspected, pending)
+        if stop is not None:
+            raise stop
+        return finish_capture(root, pending, inspected | {"mode": inspected["aside_mode"]})
     if target_blob == aside_blob:
-        return finish_capture(root, pending, inspected)
+        stop = mode_stop(inspected, pending)
+        if stop is not None:
+            raise stop
+        return finish_capture(root, pending, inspected | {"mode": inspected["aside_mode"]})
     if aside_blob != baseline:
         pending = root_capture(root, pending, _preserve(root, Path(inspected["aside_path"]).read_bytes()))
     raise capture_stop(
