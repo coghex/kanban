@@ -68,6 +68,7 @@ EXPECTED_BUNDLE_FILES = {
     "claude-copilot-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
 }
 
@@ -233,7 +234,7 @@ class PluginLayoutTests(unittest.TestCase):
     def test_the_plugin_manifest_declares_version_1_0_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.5")
+        self.assertEqual(document["version"], "1.0.6")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -409,6 +410,12 @@ class VendoredHelperTests(unittest.TestCase):
         self.assertEqual(
             TRUSTED_SPEC.read_bytes(),
             (CLAUDE_PLUGIN / "scripts" / "trusted_issue_spec.py").read_bytes(),
+        )
+
+    def test_issue_review_backend_resolver_matches_its_tools_source(self):
+        self.assertEqual(
+            (TRUSTED_SPEC.parent / "resolve_issue_review_backend.py").read_bytes(),
+            (REPO_ROOT / "tools" / "resolve_issue_review_backend.py").read_bytes(),
         )
 
     def test_review_pr_carries_expected_route_binding(self):

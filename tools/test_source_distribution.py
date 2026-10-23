@@ -298,8 +298,15 @@ PROVIDER_MANIFESTS = (
 # The tracked issue-creation tool joins them beside the transaction module it
 # loads from beside itself: the processing workflows create every tracked issue
 # through it, so a bundle without it cannot create one at all.
-# Seventeen modules: six in the Claude bundle, seven in the Codex bundle, and
-# the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers.
+# Issue #841's issue-review backend resolver joins them as the one program the
+# fourteen workflow assets call instead of embedding a probe: a bundle that
+# shipped those assets without it would install a `solve`, `issue-review`,
+# `issue-rereview`, `triage` or `retriage` that cannot find its backend. It
+# ships once in the Claude bundle, once in each of the five Codex skills that
+# resolve the backend, and beside each external solve skill's trusted helper.
+# Twenty-seven modules: seven in the Claude bundle, twelve in the Codex bundle,
+# the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers, and
+# those four bundles' resolver copies.
 BUNDLED_MECHANISM_MODULES = (
     "claude-copilot-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
@@ -308,9 +315,14 @@ BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
+    "claude-plugin/plugins/kanban/scripts/resolve_issue_review_backend.py",
+    "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "google-plugin/plugins/kanban/scripts/kanban_models.py",
+    "google-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
+    "grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
@@ -318,6 +330,11 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",
+    "codex-plugin/plugins/kanban/skills/issue-review/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/triage/scripts/resolve_issue_review_backend.py",
+    "codex-plugin/plugins/kanban/skills/retriage/scripts/resolve_issue_review_backend.py",
 )
 
 # What each `tools/setup_workflows.py` component installs from. Keyed to that

@@ -70,97 +70,12 @@ The check reads only the newest main-agent row (`agent_id IS NULL`) for that one
 
 A false origin marker is durable — it routes the review and stays on the pull request — while this stop is cheap, so every failure refuses and none is a warning: a model of another brand, an unrecognized model, an unset or empty `$COPILOT_AGENT_SESSION_ID`, an absent database, no main-agent row for the session, a newest row naming no model, and a database or schema the query cannot read. Never soften a refusal, never retry against another session, a subagent's row, or an older row, and never substitute your own belief about which model you are. On a non-zero exit, stop with exactly the one line it printed: claim no issue, push no branch, and open no pull request.
 
-## Resolving The Canonical Backend
+## Locating This Bundle's Helpers
 
-Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:
+The trusted-comment helper and the issue-review backend resolver are vendored side by side in this bundle's `skills/solve/scripts/`, so locating the helper locates both. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$KIMI_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-kimi` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the two copied layouts the Copilot CLI actually creates under `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace layout `kanban-kimi/kanban/`, and a direct install `_direct/<owner>--<repo>--kimi-plugin-plugins-kanban/`. Those two form one candidate set — an absent marketplace-layout install still admits a direct one, and two eligible roots across them refuse as ambiguous rather than picking either. Roots are identified before the helper is looked for, so a root missing the helper refuses instead of silently losing to a competitor. An absent settings file, one with no `kanban-kimi` entry, or a `kanban-kimi` entry the CLI recorded from a remote `github`, `git`, or `url` source reaches that search; unreadable or malformed applicable settings, a recorded source kind that is unsupported or does not carry the field that kind locates its marketplace by (`repo` for `github`, `url` for the other two), a relative recorded directory path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
 
 ```bash
-XDG_RECORD="$HOME/.local/share/kanban/issue-review/config.json"
-[ -z "$XDG_DATA_HOME" ] || XDG_RECORD="$XDG_DATA_HOME/kanban/issue-review/config.json"
-RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
-BACKEND="$(python3 - "$XDG_RECORD" "$RECORD" <<'PY'
-import json, os, sys
-from pathlib import Path
-
-records = [Path(argument) for argument in sys.argv[1:]]
-occupied = [candidate for candidate in records if os.path.lexists(candidate)]
-record = occupied[0] if occupied else records[0]
-consulted = str(record) if occupied else " and ".join(str(candidate) for candidate in records)
-override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
-if override and override.strip():
-    resolved = Path(override).expanduser() / "approve_issues.py"
-else:
-    if not occupied:
-        document = {}
-    else:
-        try:
-            document = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
-    if not isinstance(document, dict):
-        raise SystemExit(f"The install record at {record} is not a JSON object.")
-    if "backend_path" not in document:
-        resolved = record.parent / "approve_issues.py"
-    else:
-        recorded = document["backend_path"]
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
-            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
-        resolved = Path(recorded)
-if not resolved.is_file():
-    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {consulted}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
-print(resolved)
-PY
-)"
-```
-
-If that command fails or leaves `$BACKEND` empty, stop and report exactly the message it printed: it names the record or records that were consulted and the repair for that specific failure, which is not always the bare installer command.
-
-## Establish The Target Repository
-
-Kanban can point a solve at a repository the worked checkout's own remote does not name — an explicit `--repo` override, or a configured remote naming upstream from a fork checkout — so the target identity is an input to this run, not something to re-derive from the checkout. Establish it once, before anything else.
-
-1. If the invocation supplied a repository identity (Kanban's prompt passes `--repo <owner>/<name>`), that identity is the target and nothing else may override it. Otherwise resolve it once from the checkout:
-
-   ```bash
-   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-   ```
-
-2. Use exactly that one `$REPO` for the whole run: `-R "$REPO"` on every `gh` issue and pull-request command, `--repo "$REPO"` on the canonical gate check and on the trusted-comment helper, and `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>` for the worktree directory. Never resolve it a second time, and never derive it from the checkout directory name or a remote URL.
-3. If `$REPO` is empty or cannot be established, stop and report that before touching the issue. Every issue and pull-request mutation below is forbidden until one identity is established — the first of them is the claim in "Select And Claim" step 3 — and falling back to the checkout's own repository is never the repair. Report this failure in your own words; it is a different stop from the canonical-gate refusal in step 2 of that section, whose single-line spelling is fixed.
-
-## Select And Claim
-
-1. Take the issue number from the user's request. Copilot skills receive no substituted arguments: the number is whatever the user named when they asked for this workflow. If none was named, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
-
-   ```bash
-   gh issue list -R "$REPO" --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"
-   ```
-
-2. Before claiming, require the canonical cross-agent gate, resolving `$BACKEND` exactly as "Resolving The Canonical Backend" above specifies:
-
-   ```bash
-   python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --check <issue> --legacy-policy dual --json
-   ```
-
-   Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and stop with exactly one line: `KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.` Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
-3. Claim it before doing any work:
-
-   ```bash
-   gh issue edit -R "$REPO" <issue> --add-assignee @me
-   ```
-
-4. Immediately check both collision signals. From this repository's primary checkout, use `git worktree list` to find any `issue-<issue>-` worktree registered to THIS repository, and `gh pr list -R "$REPO" --state open --search "<issue> in:body"` to ensure no open PR is already closing it. Never scan a shared parent directory or another repository's worktrees: issue numbers are repository-local.
-5. An open PR is a real collision: release the claim with `gh issue edit -R "$REPO" <issue> --remove-assignee @me`. Choose another issue only when the user did not name one; otherwise stop and report the PR.
-6. An existing same-issue worktree is interrupted work, not a collision. Do not release the claim or create another worktree. Enter the existing worktree; identify its upstream/default base; inspect `git status`, committed progress relative to that base, `git diff --cached`, and `git diff`. Preserve and validate useful work, then continue the solve there. Never discard, reset, or overwrite unfinished changes merely to start clean.
-
-## Work In Isolation
-
-1. Resolve the repository root and default branch. Fetch `origin`. The GitHub repository identity is the `$REPO` established above; do not resolve it again and do not derive it from the local checkout directory name.
-2. Keep newly created worktrees outside the source-checkout directory. Set `WORKTREES_ROOT=${WORKTREES_ROOT:-"$HOME/worktrees"}` and use the repository-scoped directory `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>`, named by the established identity. Create its parent if needed. If no same-issue recovery worktree was found above, create that worktree from the latest `origin/<default-branch>`; otherwise continue in the recovered worktree. `git worktree list` remains the sole collision/recovery source and therefore continues to recognize legacy worktrees at their existing paths. Never move, rename, or bulk-clean legacy worktrees as part of solving. Use absolute paths for every later command because tool working directories are not persistent.
-3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$KIMI_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-kimi` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the two copied layouts the Copilot CLI actually creates under `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace layout `kanban-kimi/kanban/`, and a direct install `_direct/<owner>--<repo>--kimi-plugin-plugins-kanban/`. Those two form one candidate set — an absent marketplace-layout install still admits a direct one, and two eligible roots across them refuse as ambiguous rather than picking either. Roots are identified before the helper is looked for, so a root missing the helper refuses instead of silently losing to a competitor. An absent settings file, one with no `kanban-kimi` entry, or a `kanban-kimi` entry the CLI recorded from a remote `github`, `git`, or `url` source reaches that search; unreadable or malformed applicable settings, a recorded source kind that is unsupported or does not carry the field that kind locates its marketplace by (`repo` for `github`, `url` for the other two), a relative recorded directory path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
-
-   ```bash
-   TRUSTED_SPEC="$(python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
+TRUSTED_SPEC="$(python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
 import json, os, sys
 from pathlib import Path
 
@@ -238,6 +153,65 @@ if len(roots) != 1:
 finish(roots[0] / relative)
 PY
 )"
+```
+
+If that leaves `$TRUSTED_SPEC` empty, stop and report the message it printed: this bundle's helpers were not found, and nothing below can run without them. Never fall back to a copy inside the repository being worked or to a personal copy of this skill.
+
+## Resolving The Canonical Backend
+
+Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location through this bundle's `resolve_issue_review_backend.py`, which sits beside the helper located above, rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then the macOS user Library directory's. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both. The resolver runs from the directory the helper was located in, never from the repository being worked:
+
+```bash
+[ -n "$TRUSTED_SPEC" ] && BACKEND="$(python3 "${TRUSTED_SPEC%/*}/resolve_issue_review_backend.py")"
+```
+
+If that command fails or leaves `$BACKEND` empty, stop and report exactly the message it printed: it names the record or records that were consulted and the repair for that specific failure, which is not always the bare installer command.
+
+## Establish The Target Repository
+
+Kanban can point a solve at a repository the worked checkout's own remote does not name — an explicit `--repo` override, or a configured remote naming upstream from a fork checkout — so the target identity is an input to this run, not something to re-derive from the checkout. Establish it once, before anything else.
+
+1. If the invocation supplied a repository identity (Kanban's prompt passes `--repo <owner>/<name>`), that identity is the target and nothing else may override it. Otherwise resolve it once from the checkout:
+
+   ```bash
+   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+   ```
+
+2. Use exactly that one `$REPO` for the whole run: `-R "$REPO"` on every `gh` issue and pull-request command, `--repo "$REPO"` on the canonical gate check and on the trusted-comment helper, and `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>` for the worktree directory. Never resolve it a second time, and never derive it from the checkout directory name or a remote URL.
+3. If `$REPO` is empty or cannot be established, stop and report that before touching the issue. Every issue and pull-request mutation below is forbidden until one identity is established — the first of them is the claim in "Select And Claim" step 3 — and falling back to the checkout's own repository is never the repair. Report this failure in your own words; it is a different stop from the canonical-gate refusal in step 2 of that section, whose single-line spelling is fixed.
+
+## Select And Claim
+
+1. Take the issue number from the user's request. Copilot skills receive no substituted arguments: the number is whatever the user named when they asked for this workflow. If none was named, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
+
+   ```bash
+   gh issue list -R "$REPO" --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"
+   ```
+
+2. Before claiming, require the canonical cross-agent gate, resolving `$BACKEND` exactly as "Resolving The Canonical Backend" above specifies:
+
+   ```bash
+   python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --repo "$REPO" --check <issue> --legacy-policy dual --json
+   ```
+
+   Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and stop with exactly one line: `KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.` Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
+3. Claim it before doing any work:
+
+   ```bash
+   gh issue edit -R "$REPO" <issue> --add-assignee @me
+   ```
+
+4. Immediately check both collision signals. From this repository's primary checkout, use `git worktree list` to find any `issue-<issue>-` worktree registered to THIS repository, and `gh pr list -R "$REPO" --state open --search "<issue> in:body"` to ensure no open PR is already closing it. Never scan a shared parent directory or another repository's worktrees: issue numbers are repository-local.
+5. An open PR is a real collision: release the claim with `gh issue edit -R "$REPO" <issue> --remove-assignee @me`. Choose another issue only when the user did not name one; otherwise stop and report the PR.
+6. An existing same-issue worktree is interrupted work, not a collision. Do not release the claim or create another worktree. Enter the existing worktree; identify its upstream/default base; inspect `git status`, committed progress relative to that base, `git diff --cached`, and `git diff`. Preserve and validate useful work, then continue the solve there. Never discard, reset, or overwrite unfinished changes merely to start clean.
+
+## Work In Isolation
+
+1. Resolve the repository root and default branch. Fetch `origin`. The GitHub repository identity is the `$REPO` established above; do not resolve it again and do not derive it from the local checkout directory name.
+2. Keep newly created worktrees outside the source-checkout directory. Set `WORKTREES_ROOT=${WORKTREES_ROOT:-"$HOME/worktrees"}` and use the repository-scoped directory `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>`, named by the established identity. Create its parent if needed. If no same-issue recovery worktree was found above, create that worktree from the latest `origin/<default-branch>`; otherwise continue in the recovered worktree. `git worktree list` remains the sole collision/recovery source and therefore continues to recognize legacy worktrees at their existing paths. Never move, rename, or bulk-clean legacy worktrees as part of solving. Use absolute paths for every later command because tool working directories are not persistent.
+3. Fetch the effective spec through this bundle's vendored trusted-comment helper, located under "Locating This Bundle's Helpers" above, before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. `$TRUSTED_SPEC` is that located path; if this shell no longer has it, run that lookup again rather than guessing a path:
+
+   ```bash
    python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>
    ```
 

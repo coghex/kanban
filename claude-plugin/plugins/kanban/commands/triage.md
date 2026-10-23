@@ -120,45 +120,11 @@ A raw approval label is normally a **candidate**, not proof. Canonical approval 
 
 Which label that is belongs to the repository, not to this workflow. `reviewed:approve` is only the default: a repository may configure `workflow.approval_label` to something else, and a workflow that hard-coded the default would quietly reconcile nothing there and go on rendering the stale readiness this section exists to stop. So never name a candidate label here — ask the backend, which has already resolved the configured one, and read the label it reports back.
 
-Resolve the backend's install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being triaged or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:
+Resolve the backend's install location through this bundle's `resolve_issue_review_backend.py` rather than a path relative to the repository being triaged or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then the macOS user Library directory's. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both.
+The resolver ships in this plugin's `scripts/`, and Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` with that install location whatever directory the workflow runs from, so a copy inside the repository being worked is never what runs:
 
 ```bash
-XDG_RECORD="$HOME/.local/share/kanban/issue-review/config.json"
-[ -z "$XDG_DATA_HOME" ] || XDG_RECORD="$XDG_DATA_HOME/kanban/issue-review/config.json"
-RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
-BACKEND="$(python3 - "$XDG_RECORD" "$RECORD" <<'PY'
-import json, os, sys
-from pathlib import Path
-
-records = [Path(argument) for argument in sys.argv[1:]]
-occupied = [candidate for candidate in records if os.path.lexists(candidate)]
-record = occupied[0] if occupied else records[0]
-consulted = str(record) if occupied else " and ".join(str(candidate) for candidate in records)
-override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
-if override and override.strip():
-    resolved = Path(override).expanduser() / "approve_issues.py"
-else:
-    if not occupied:
-        document = {}
-    else:
-        try:
-            document = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
-    if not isinstance(document, dict):
-        raise SystemExit(f"The install record at {record} is not a JSON object.")
-    if "backend_path" not in document:
-        resolved = record.parent / "approve_issues.py"
-    else:
-        recorded = document["backend_path"]
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
-            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
-        resolved = Path(recorded)
-if not resolved.is_file():
-    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {consulted}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
-print(resolved)
-PY
-)"
+BACKEND="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/resolve_issue_review_backend.py")"
 ```
 
 Then reconcile every candidate in **one** invocation, passing no issue numbers so the backend selects them itself:

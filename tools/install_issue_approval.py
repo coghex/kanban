@@ -28,7 +28,7 @@ The canonical issue-review backend is *not* installed here and never linked
 here. It is one global installation shared by every ordinary review workflow,
 so this installer only resolves it -- through the record
 `docs/agent-workflow-contract.md` fixes, in the order
-`Kanban.Review.resolveCanonicalIssueReviewer` implements -- and refuses with
+`tools/resolve_issue_review_backend.py` implements -- and refuses with
 `tools/install_issue_review.py`'s own remediation when it is absent. Making a
 second reviewer installation here would give this service a backend the rest of
 the workflow does not use.
@@ -214,7 +214,7 @@ def canonical_backend(job: approve_issues_service.ApprovalJob) -> Path:
 
     The order is the controller's, which is the one
     `docs/agent-workflow-contract.md` sections 2.3 and 3 fix and
-    `Kanban.Review.resolveCanonicalIssueReviewer` implements: a non-empty
+    `tools/resolve_issue_review_backend.py` implements: a non-empty
     `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the absolute `backend_path` the
     issue-review installer recorded, then -- only when the record is absent or
     names none -- the directory holding the record.

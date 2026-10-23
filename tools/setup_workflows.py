@@ -821,8 +821,8 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
 def backend_is_installed(install_dir: Path) -> bool:
     """Whether a Kanban-managed backend already occupies install_dir.
 
-    Exactly the shape `plan_issue_review` converges on and
-    `Kanban.Preflight` counts as installed: for each installed asset, a
+    Exactly the shape `plan_issue_review` converges on, counted
+    as installed: for each installed asset, a
     symlink resolving to a file that carries that asset's identity marker.
     All of them are required, since `approve_issues.py` imports both
     `kanban_config.py` and `kanban_models.py` at module scope.
