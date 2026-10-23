@@ -15,6 +15,16 @@ created above it.
 
 ### Unreleased
 
+- Fixed `publish_coordination_doc.py` deleting the document it had moved aside
+  when reading it back failed (#845). Cleanup treated an unread capture as proof
+  the rename never happened and unlinked the aside, so an untracked document
+  was lost with no stored blob. The move is now tracked apart from the read:
+  after it, the aside is dropped only once the document is restored, or its
+  bytes are in the object database, and a restore never overwrites a file that
+  appeared at the path meanwhile. Otherwise the aside is kept and its path
+  reported as `captured_file`. The delivered copies are byte-identical.
+  Bundles: Claude 1.81.0, Codex 1.80.0.
+
 - Added the `merge:hold` repository label, which keeps a pull request out of
   the PR drainer whatever its approval says (#774). A held pull request is never
   merged, readied from draft, updated or rerun, in a polling pass or with

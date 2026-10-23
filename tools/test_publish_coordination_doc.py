@@ -27,6 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -2998,6 +2999,179 @@ class PublishTests(PublishFixture):
         with self.assertRaises(publisher.PublishError) as caught:
             self.fx.publish("# UI\n\n- one\n")
         self.assertEqual(caught.exception.status, "no-mutation")
+
+
+class MovedAsideCaptureTests(PublishFixture):
+    """Issue #845: once the document is moved aside, no failure deletes it.
+
+    `verify_and_write` is driven directly so each step after the rename can be
+    failed on its own. An untracked document is the sharp case — its aside is
+    the only copy, and no baseline blob exists unless the run stores one — and a
+    tracked one proves the same invariant on the ordinary path.
+    """
+
+    TRACKED = "docs/ui-bugs.md"
+    UNTRACKED = "docs/untracked-notes.md"
+
+    def each_document(self, body):
+        """Run `body(root, path, data, baseline)` once per kind of document, on
+        a fresh repository each time."""
+        for path in (self.TRACKED, self.UNTRACKED):
+            with self.subTest(document=path):
+                self.fresh_fixture()
+                root = self.fx.docs
+                if path == self.UNTRACKED:
+                    (root / path).write_bytes(b"only untracked baseline copy\n")
+                data = (root / path).read_bytes()
+                body(root, path, data, publisher.git_blob_hash(data))
+
+    @staticmethod
+    def in_aside(path):
+        return Path(path).parent.name.startswith(".kanban-publish-aside-")
+
+    def failing_aside_read(self, before=None):
+        original = publisher.read_for_write
+
+        def read(path):
+            if self.in_aside(path):
+                if before is not None:
+                    before(path)
+                raise OSError(5, "I/O error")
+            return original(path)
+
+        return mock.patch.object(publisher, "read_for_write", read)
+
+    def temporaries(self, root):
+        return [p.name for p in (root / "docs").iterdir() if "kanban-publish" in p.name]
+
+    def test_a_failed_read_of_the_aside_restores_the_document(self):
+        def body(root, path, data, baseline):
+            with self.failing_aside_read():
+                with self.assertRaises(publisher.PublishError) as caught:
+                    publisher.verify_and_write(root, path, baseline, b"new\n")
+            self.assertEqual(caught.exception.status, "document-unwritable")
+            self.assertEqual((root / path).read_bytes(), data)
+            self.assertEqual(self.temporaries(root), [])
+
+        self.each_document(body)
+
+    def test_a_failed_read_with_no_restoration_keeps_and_names_the_aside(self):
+        def body(root, path, data, baseline):
+            with self.failing_aside_read(), mock.patch.object(
+                publisher, "link_into_place", side_effect=PermissionError(13, "denied")
+            ):
+                with self.assertRaises(publisher.PublishError) as caught:
+                    publisher.verify_and_write(root, path, baseline, b"new\n")
+            kept = Path(caught.exception.detail["captured_file"])
+            self.assertEqual(kept.read_bytes(), data)
+            self.assertFalse((root / path).exists())
+
+        self.each_document(body)
+
+    def test_a_failed_read_never_overwrites_a_recreated_target(self):
+        def body(root, path, data, baseline):
+            def recreate(_):
+                (root / path).write_bytes(b"written meanwhile\n")
+
+            with self.failing_aside_read(before=recreate):
+                with self.assertRaises(publisher.PublishError) as caught:
+                    publisher.verify_and_write(root, path, baseline, b"new\n")
+            self.assertEqual((root / path).read_bytes(), b"written meanwhile\n")
+            kept = Path(caught.exception.detail["captured_file"])
+            self.assertEqual(kept.read_bytes(), data)
+
+        self.each_document(body)
+
+    def test_restoration_returns_a_capture_changed_just_before_the_rename(self):
+        original = publisher.rename_aside
+
+        def body(root, path, data, baseline):
+            def racing(src, dst):
+                src.write_bytes(b"edited just before the rename\n")
+                return original(src, dst)
+
+            with mock.patch.object(publisher, "rename_aside", racing), \
+                    self.failing_aside_read():
+                with self.assertRaises(publisher.PublishError):
+                    publisher.verify_and_write(root, path, baseline, b"new\n")
+            self.assertEqual(
+                (root / path).read_bytes(), b"edited just before the rename\n"
+            )
+
+        self.each_document(body)
+
+    def test_a_failed_preservation_with_a_recreated_target_keeps_the_aside(self):
+        original = publisher.rename_aside
+
+        def body(root, path, data, baseline):
+            def recreating(src, dst):
+                original(src, dst)
+                src.write_bytes(b"written meanwhile\n")
+
+            for failure in (
+                publisher.PublishError("git-failed", "git hash-object failed"),
+                RuntimeError("unexpected"),
+            ):
+                with self.subTest(failure=type(failure).__name__):
+                    (root / path).unlink(missing_ok=True)
+                    (root / path).write_bytes(data)
+                    with mock.patch.object(publisher, "rename_aside", recreating), \
+                            mock.patch.object(publisher, "_preserve", side_effect=failure):
+                        with self.assertRaises(publisher.PublishError) as caught:
+                            publisher.verify_and_write(root, path, baseline, b"new\n")
+                    self.assertEqual((root / path).read_bytes(), b"written meanwhile\n")
+                    kept = Path(caught.exception.detail["captured_file"])
+                    self.assertEqual(kept.read_bytes(), data)
+                    kept.unlink()
+
+        self.each_document(body)
+
+    def test_an_unexpected_error_in_the_cleanup_read_still_restores_and_reports(self):
+        # The retry in cleanup must not let an exception it was not written for
+        # skip the restoration or the report of where the capture is.
+        for failure in (MemoryError("no memory"), RuntimeError("unexpected")):
+            def restored(root, path, data, baseline):
+                original = publisher.read_for_write
+
+                def read(target):
+                    if self.in_aside(target):
+                        raise failure
+                    return original(target)
+
+                with mock.patch.object(publisher, "read_for_write", read):
+                    with self.assertRaises(publisher.PublishError) as caught:
+                        publisher.verify_and_write(root, path, baseline, b"new\n")
+                self.assertEqual(caught.exception.status, "internal-error")
+                self.assertEqual((root / path).read_bytes(), data)
+                self.assertEqual(self.temporaries(root), [])
+
+                (root / path).write_bytes(data)
+                with mock.patch.object(publisher, "read_for_write", read), \
+                        mock.patch.object(
+                            publisher, "link_into_place",
+                            side_effect=PermissionError(13, "denied"),
+                        ):
+                    with self.assertRaises(publisher.PublishError) as caught:
+                        publisher.verify_and_write(root, path, baseline, b"new\n")
+                self.assertFalse((root / path).exists())
+                kept = Path(caught.exception.detail["captured_file"])
+                self.assertEqual(kept.read_bytes(), data)
+
+            with self.subTest(failure=type(failure).__name__):
+                self.each_document(restored)
+
+    def test_a_failed_install_restores_the_document(self):
+        # Already safe before the change; kept so the table covers every step.
+        def body(root, path, data, baseline):
+            with mock.patch.object(
+                publisher, "link_into_place", side_effect=PermissionError(13, "denied")
+            ):
+                with self.assertRaises(publisher.PublishError):
+                    publisher.verify_and_write(root, path, baseline, b"new\n")
+            self.assertEqual((root / path).read_bytes(), data)
+            self.assertEqual(self.temporaries(root), [])
+
+        self.each_document(body)
 
 
 if __name__ == "__main__":
