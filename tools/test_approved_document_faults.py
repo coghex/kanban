@@ -1574,7 +1574,8 @@ class ReworkRoundFive(FaultFixture):
         self.assertFalse((self.fx.work / DOC).exists())
         # The remote is rewritten so the recorded tip is no longer in its history.
         tree = run(["git", "rev-parse", "master^{tree}"], self.fx.origin)
-        orphan = run(["git", "commit-tree", tree, "-m", "history rewritten"], self.fx.origin)
+        orphan = run(["git", "-c", "user.name=Rewriter", "-c", "user.email=rewriter@example.com",
+                      "commit-tree", tree, "-m", "history rewritten"], self.fx.origin)
         run(["git", "update-ref", "refs/heads/master", orphan], self.fx.origin)
         report = self.check_child()[1]
         self.assertEqual(report["record_fault"]["status"], "pending-stale")
