@@ -125,6 +125,8 @@ DESCENDANT_GRACE_SECONDS = 10
 
 OID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 ATTEMPT_RE = re.compile(r"^[0-9a-f]{32}$")
+# A captured edit that a later capture displaced stays rooted under its own name.
+CAPTURED_VERSION_RE = re.compile(r"^captured-[0-9]+$")
 HANDOFF_STATES = ("marker", "running", "finished")
 
 
@@ -945,10 +947,12 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
                 f"{payloads['approved']}",
             )
     else:
+        prefix = f"{PAYLOAD_DIR}/"
         payloads = {
-            name: tree[f"{PAYLOAD_DIR}/{name}"]
-            for name in PAYLOAD_NAMES
-            if f"{PAYLOAD_DIR}/{name}" in tree
+            path[len(prefix):]: blob
+            for path, blob in tree.items()
+            if path.startswith(prefix)
+            and (path[len(prefix):] in PAYLOAD_NAMES or CAPTURED_VERSION_RE.match(path[len(prefix):]))
         }
         if payloads.get("approved") != fields["approved_blob"]:
             raise _malformed(ref, commit, "does not root its approved blob")
@@ -1390,10 +1394,21 @@ def preserve_captured(root: Path, data: bytes) -> str:
 
 
 def root_capture(root: Path, pending: dict, captured: str) -> dict:
-    """Retain a captured foreign edit by reachability in the intent."""
-    if pending["payloads"].get("captured") == captured:
+    """Retain a captured foreign edit by reachability in the intent.
+
+    Every distinct version observed stays rooted: the newest is `captured`, and
+    the one it displaces moves to `captured-<n>` in the same rewrite, so a record
+    that is rewritten never makes an earlier captured version unreachable."""
+    held = pending["payloads"]
+    versions = {name: blob for name, blob in held.items()
+                if name == "captured" or CAPTURED_VERSION_RE.match(name)}
+    if captured in versions.values():
         return pending
-    return rewrite_pending(root, pending, payloads={"captured": captured})
+    changes = {"captured": captured}
+    if "captured" in held:
+        serial = 1 + sum(1 for name in versions if CAPTURED_VERSION_RE.match(name))
+        changes[f"captured-{serial}"] = held["captured"]
+    return rewrite_pending(root, pending, payloads=changes)
 
 
 def recover_capture(root: Path, pending: dict) -> dict:
@@ -2200,17 +2215,30 @@ def stop_group(proc) -> None:
 
 
 def group_alive(pgid: int, settle: float = 0.0) -> bool:
-    """Whether any process is still in the group the tool led, allowing `settle`
-    seconds for processes that were just killed to be reaped. A permission error
-    means one exists that cannot be signalled, which is alive."""
+    """Whether any live process is still in process group `pgid`, allowing
+    `settle` seconds for processes that were just killed to be reaped.
+
+    The process table is read, not signalled: a signal probe counts a zombie
+    that nothing has reaped (a container without an init) as a member for good.
+    A table that cannot be read is an answer of "yes", never of "no"."""
     deadline = time.monotonic() + settle
     while True:
         try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return False
-        except OSError:
+            listing = subprocess.run(
+                ["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
             return True
+        if listing.returncode != 0:
+            return True
+        members = [
+            fields for fields in (line.split() for line in listing.stdout.splitlines())
+            if fields and fields[0] == str(pgid)
+            and not (len(fields) > 1 and fields[1].startswith("Z"))
+        ]
+        if not members:
+            return False
         if time.monotonic() >= deadline:
             return True
         time.sleep(0.05)
@@ -2529,6 +2557,10 @@ def resume_pending(
             pending_ref=pending["ref"],
         )
     if pending["capture"] is not None:
+        # Read-only first: a record that is stale or whose evidence cannot be
+        # verified is refused with the capture, the document and the record as
+        # they were.
+        landing(root, branch, pending)
         blocked = unquiet_tool(root, owner, branch, pending, operator_quiescent)
         if blocked is not None:
             return blocked

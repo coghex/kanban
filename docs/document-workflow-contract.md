@@ -983,7 +983,11 @@ and every `T-NN` row of that design is a named regression in
    predecessor under a fixed internal directory, so the bytes are retained by
    reachability. It is created absent-only before the document is touched,
    rewritten and deleted only by compare-and-swap with a read-back, and never
-   discarded because something later failed. `refs/kanban/applied-locally/<key>`
+   discarded because something later failed. Every distinct captured foreign
+   edit stays rooted: the newest is `captured`, and one it displaces moves to
+   `captured-<n>` in the same rewrite. A resume validates the record's landing
+   evidence read-only (a stale or unverifiable record refuses) before it settles
+   a capture or writes anything. `refs/kanban/applied-locally/<key>`
    is the blob the protocol applied, never proof of publication. The helper also
    reads the paused branch's version-1 record and the publisher's commit-shaped
    one, validating first and migrating only when something is about to be

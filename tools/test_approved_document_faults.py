@@ -424,7 +424,11 @@ class EvidenceFaults(FaultFixture):
         self.assertEqual((code, payload["reason"]), (1, "tool-missing"))
         record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
         self.assertIsNone(record["handoff"])
-        os.environ["PATH"] = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+        # The tool comes back, and so does `ps`, which the helper reads the
+        # process table through.
+        os.environ["PATH"] = os.pathsep.join(
+            (str(self.bin), os.environ["PATH"], "/bin", "/usr/bin")
+        )
         self.recover()
         self.assertEqual(self.gh_calls(), [])
         self.settled()
@@ -1318,8 +1322,14 @@ class ReworkRoundFive(FaultFixture):
         self.assertEqual(outcome["reason"], "tool-failed")
         record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
         self.assertEqual(record["handoff"]["state"], "finished")
-        with self.assertRaises(OSError):
-            os.kill(int(pid_file.read_text()), 0)
+        self.assertFalse(self.running(int(pid_file.read_text())))
+
+    def running(self, pid):
+        """Whether `pid` is a process that is not a zombie."""
+        listing = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                 capture_output=True, text=True)
+        stat = listing.stdout.strip()
+        return bool(stat) and not stat.startswith("Z")
 
     def test_a_descendant_that_outlives_a_timed_out_tool_keeps_the_handoff_open(self):
         outcome, pid_file = self.hung("hang-with-escapee")
@@ -1534,6 +1544,46 @@ class ReworkRoundFive(FaultFixture):
                     self.assertEqual(outcome["reason"], "tool-child-not-quiescent")
                     self.assertEqual(self.fx.read(self.fx.work), NOTES)
                     self.assertEqual(len(self.calls()), calls)
+
+    def test_a_foreign_edit_captured_twice_keeps_both_versions_rooted(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        first = approved._preserve(self.fx.work, b"the first foreign edit\n")
+        second = approved._preserve(self.fx.work, b"a later write through an open descriptor\n")
+        third = approved._preserve(self.fx.work, b"and a third\n")
+        record = approved.root_capture(self.fx.work, record, first)
+        record = approved.root_capture(self.fx.work, record, second)
+        record = approved.root_capture(self.fx.work, record, second)
+        record = approved.root_capture(self.fx.work, record, third)
+        reread = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertEqual(
+            sorted(reread["payloads"].values()), sorted([
+                record["approved_blob"], record["baseline"], first, second, third,
+            ]),
+        )
+        self.assertEqual(reread["payloads"]["captured"], third)
+        run(["git", "reflog", "expire", "--expire=now", "--all"], self.fx.work)
+        run(["git", "gc", "-q", "--prune=now"], self.fx.work)
+        for blob in (first, second, third):
+            run(["git", "cat-file", "-e", blob], self.fx.work)
+
+    def test_a_stale_record_leaves_an_interrupted_capture_exactly_as_it_was(self):
+        self.crash([self.fault("rename_aside.after", "R10.capture")])
+        before = self.facts()
+        self.assertFalse((self.fx.work / DOC).exists())
+        # The remote is rewritten so the recorded tip is no longer in its history.
+        tree = run(["git", "rev-parse", "master^{tree}"], self.fx.origin)
+        orphan = run(["git", "commit-tree", tree, "-m", "history rewritten"], self.fx.origin)
+        run(["git", "update-ref", "refs/heads/master", orphan], self.fx.origin)
+        report = self.check_child()[1]
+        self.assertEqual(report["record_fault"]["status"], "pending-stale")
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "pending-stale")
+        after = self.facts()
+        self.assertEqual({k: v for k, v in after.items() if k != "origin"},
+                         {k: v for k, v in before.items() if k != "origin"})
+        self.assertFalse((self.fx.work / DOC).exists())
 
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
