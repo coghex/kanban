@@ -143,22 +143,24 @@ WRITE_LOCATION_RULES = (
     "a repository with no docs-wip worktree does not use this convention",
 )
 
-# The two issue-drafting assets that owe issue #493's art policy: the paired
-# /issue and $issue surfaces §2 declares. PR #251 made missing art an explicit
+# The issue-drafting assets that owe issue #493's art policy: the paired
+# /issue and $issue surfaces §2 declares, and, since issue #840, Claude-only
+# /draft-issues, which drafts to the same hand-off bar. PR #251 made missing art an explicit
 # tracked blocker with a user-owned supply-or-generate decision and landed it in
 # the Claude asset alone, adding no regression assertion, so nothing held the
 # Codex twin to it and the two brands drifted apart on a product decision.
 #
-# Claude-only /draft-issues is deliberately not a member even though it drafts
-# to the same hand-off bar and IS a member of WRITE_LOCATION_ASSETS above: §3.2
-# declares it the breadth workflow with no Codex counterpart, so it carries no
-# cross-brand split for this policy to close. Its omission is a scope boundary
-# rather than an oversight, and stating the policy there is separate work.
+# Claude-only /draft-issues was left out until issue #840: §3.2 declares it the
+# breadth workflow with no Codex counterpart, so it has no cross-brand split to
+# close, but it files issues to the same hand-off bar and had silently dropped
+# this policy, so a survey could file a texture-dependent issue with no blocker.
+# #840 made it inherit the rule from /issue, and it is a member from there on.
 #
 # autoissue is exempt by delegation exactly as it is for WRITE_LOCATION_RULES,
 # and is this tuple's negative control through DELEGATING_ASSETS.
 ART_POLICY_ISSUE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue.md",
+    "claude-plugin/plugins/kanban/commands/draft-issues.md",
     "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
 )
 
@@ -774,6 +776,333 @@ class ArtPolicyTests(unittest.TestCase):
                         "rather than silently exempt"
                     )
         self.assertEqual(offenders, [], "\n".join(offenders))
+
+
+# Issue #840: what each drafting and issue-review description says about when it
+# applies. The description is all a session matches a request against, so a
+# neighbour's redirect and the "use only when" trigger boundary are behavior.
+# Lowercase: compared against canonical() output of the description.
+#
+# `redirects` are fragments each description owes (every brand, because the
+# redirect is guidance for whoever reads the description). The Codex `issue`
+# redirect names the Claude-only survey command in prose and never a
+# sigil-prefixed Codex skill, since §3.2 forbids a Codex $draft-issues.
+DESCRIPTION_REDIRECTS = {
+    "claude-plugin/plugins/kanban/commands/issue.md": ("not a survey of many (/draft-issues surveys)",),
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md": (
+        "not a survey of many (the claude-only draft-issues command surveys; codex has no survey skill)",
+    ),
+    "claude-plugin/plugins/kanban/commands/draft-issues.md": ("not one candidate (use /issue)",),
+    "claude-plugin/plugins/kanban/commands/autoissue.md": (
+        "not drafting alone (use /issue)",
+        "not review of an existing issue (use /issue-review)",
+    ),
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md": (
+        "not drafting alone (use $issue)",
+        "not review of an existing issue (use $issue-review)",
+    ),
+    "claude-plugin/plugins/kanban/commands/issue-review.md": ("not drafting (use /issue)",),
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md": ("does not draft or create issues (use $issue)",),
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md": ("not drafting (use /issue)",),
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": ("does not draft or create issues (use $issue)",),
+}
+
+# A client may truncate a long description, so a redirect that sits past this
+# many characters is not placed to survive.
+DESCRIPTION_REDIRECT_BUDGET = 330
+
+# The Claude descriptions that owe the narrow trigger, and the Codex wording
+# each is matched to. The Codex trigger is asserted only to be unchanged: this
+# issue does not narrow Codex.
+CLAUDE_USE_ONLY_TRIGGERS = {
+    "claude-plugin/plugins/kanban/commands/autoissue.md": (
+        "use only when the user invokes /autoissue or explicitly asks for "
+        "this combined draft-create-review workflow"
+    ),
+    "claude-plugin/plugins/kanban/commands/issue-review.md": (
+        "use only when the user invokes /issue-review or explicitly asks to "
+        "review, approve, fact-check, or readiness-gate an issue before solving it"
+    ),
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md": (
+        "use only when the user invokes /issue-rereview or explicitly asks to "
+        "address issue-review feedback"
+    ),
+}
+CODEX_TRIGGERS = {
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md": (
+        "use only when the user invokes $autoissue or explicitly asks for "
+        "this combined draft-create-review workflow"
+    ),
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md": (
+        "use when the user invokes $issue-review or asks to review, approve, "
+        "fact-check, or readiness-gate an issue before solving it"
+    ),
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": (
+        "use when the user invokes $issue-rereview, asks to address issue-review feedback"
+    ),
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md": (
+        "trigger when asked to find, scout, or draft an issue"
+    ),
+}
+
+# Issue #840: /draft-issues shows every chosen candidate's complete body and
+# waits for approval of those bodies before it creates anything, and inherits
+# the hand-off rules /issue applies. Lowercase, compared against canonical().
+DRAFT_ISSUES_PATH = "claude-plugin/plugins/kanban/commands/draft-issues.md"
+
+DRAFT_ISSUES_SUBAGENT_RULES = (
+    "audit the repository in your own session; do not spawn subagents",
+    "if the user asked for subagents for this task, you may use them, and only on sonnet",
+)
+
+DRAFT_ISSUES_HANDOFF_RULES = (
+    # issue.md rule 3: a stale steering document is a requirement to update it.
+    "if the change invalidates a statement in the repo's agent instructions",
+    "updating that doc is a requirement — name the file",
+    # rule 6: a design question is never resolved silently.
+    "never silently resolve a design question",
+    'put it in a "deliberately open" section with instructions to stop and ask',
+    # Scope to one PR, split at signoff.
+    "a candidate that is genuinely larger than one pull request is split at signoff",
+)
+
+# The art rule is ART_POLICY_ISSUE_RULES, enforced for this asset through
+# ART_POLICY_ISSUE_ASSETS. These are the extra #840 clarifications: a missing
+# asset is a dependency, never a readiness failure or a placeholder.
+DRAFT_ISSUES_ART_RULES = (
+    "a missing asset is an execution dependency, not a readiness failure",
+    "purpose, visual constraints, dependencies, and the criteria the user will apply to approve the finished image",
+    "keep a supply method the user has already chosen",
+    "leave the choice of method and the authorization to generate until the solver needs the asset",
+    "never substitute a placeholder or drop the requirement",
+)
+
+DRAFT_ISSUES_APPROVAL_RULES = (
+    "choosing candidates from the list is not signoff of their bodies",
+    "present every drafted issue exactly as it will be posted: title, proposed labels",
+    "the complete body verbatim, including each piece of a split candidate",
+    "wait for the user's explicit approval of those bodies",
+    "present the complete revised draft again",
+    "do not run gh issue create until the user has explicitly approved the drafts",
+    "create only the drafts they approved",
+)
+
+# Where the approval stop and the creation step start. The first is the
+# signoff heading; the second is the one instruction that actually creates.
+DRAFT_ISSUES_SIGNOFF_ANCHOR = "signoff on the bodies — stop"
+DRAFT_ISSUES_CREATE_ANCHOR = "create it with gh issue create --title"
+
+
+def description_of(text):
+    """The frontmatter `description:` value of an asset's text."""
+    match = re.search(r"^description: (?P<value>.+)$", text, re.MULTILINE)
+    if match is None:
+        raise AssertionError("asset has no frontmatter description")
+    return match.group("value")
+
+
+def draft_issues_findings(text):
+    """Everything wrong with a /draft-issues text, as a list of messages.
+
+    Factored out so the planted-mutation checks drive the predicate the
+    presence check drives. The ordering test is the load-bearing one: a text
+    can carry every approval sentence and still create before it shows bodies,
+    so the creation instruction must come after the signoff stop.
+    """
+    body = canonical(text)
+    findings = []
+    if "fan out" in body:
+        findings.append("instructs fanning out")
+    for rule in (
+        DRAFT_ISSUES_SUBAGENT_RULES
+        + DRAFT_ISSUES_HANDOFF_RULES
+        + DRAFT_ISSUES_ART_RULES
+        + DRAFT_ISSUES_APPROVAL_RULES
+    ):
+        if rule not in body:
+            findings.append(f"missing rule {rule!r}")
+    signoff = body.find(DRAFT_ISSUES_SIGNOFF_ANCHOR)
+    create = body.find(DRAFT_ISSUES_CREATE_ANCHOR)
+    if signoff < 0:
+        findings.append("has no body signoff stop")
+    if create < 0:
+        findings.append("has no creation step")
+    if signoff >= 0 and create >= 0 and create < signoff:
+        findings.append("creates before it shows the bodies")
+    return findings
+
+
+class DescriptionBoundaryTests(unittest.TestCase):
+    """Issue #840: the descriptions redirect to their neighbour near the front
+    and the three Claude review/automation commands trigger only on request."""
+
+    def setUp(self):
+        self.descriptions = {
+            path: canonical(description_of((REPO_ROOT / path).read_text(encoding="utf-8")))
+            for path in (
+                set(DESCRIPTION_REDIRECTS) | set(CLAUDE_USE_ONLY_TRIGGERS) | set(CODEX_TRIGGERS)
+            )
+        }
+
+    def test_every_description_redirects_to_its_neighbour_within_the_budget(self):
+        findings = []
+        for path, fragments in DESCRIPTION_REDIRECTS.items():
+            for fragment in fragments:
+                at = self.descriptions[path].find(fragment)
+                if at < 0:
+                    findings.append(f"{path}: description lacks redirect {fragment!r}")
+                elif at + len(fragment) > DESCRIPTION_REDIRECT_BUDGET:
+                    findings.append(f"{path}: redirect {fragment!r} ends past {DESCRIPTION_REDIRECT_BUDGET} characters")
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_the_claude_commands_trigger_only_on_request(self):
+        findings = [
+            f"{path}: description lacks {trigger!r}"
+            for path, trigger in CLAUDE_USE_ONLY_TRIGGERS.items()
+            if trigger not in self.descriptions[path]
+        ]
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_the_codex_triggers_are_not_narrowed(self):
+        findings = [
+            f"{path}: description lacks its existing trigger {trigger!r}"
+            for path, trigger in CODEX_TRIGGERS.items()
+            if trigger not in self.descriptions[path]
+        ]
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_the_codex_issue_description_names_no_codex_survey_skill(self):
+        # §3.2 forbids a Codex $draft-issues, so the redirect names the Claude-only
+        # command in prose and must not read as an invocation.
+        description = self.descriptions["codex-plugin/plugins/kanban/skills/issue/SKILL.md"]
+        self.assertIn("claude-only draft-issues", description)
+        self.assertNotIn("$draft-issues", description)
+        self.assertNotIn("/draft-issues", description)
+
+    def test_the_neighbour_redirects_are_not_vacuous(self):
+        # Negative control: issue-review and issue-rereview legitimately share
+        # "not drafting", so the control is the assets that owe no redirect at
+        # all. A fragment that matched them would pass the presence check above
+        # while asserting nothing.
+        controls = {
+            name: canonical(
+                description_of((CLAUDE_COMMANDS_ROOT / f"{name}.md").read_text(encoding="utf-8"))
+            )
+            for name in ("solve", "pr-review", "triage", "finalize", "design-epic")
+        }
+        offenders = [
+            f"{name} carries {path}'s redirect {fragment!r}"
+            for path, fragments in DESCRIPTION_REDIRECTS.items()
+            for fragment in fragments
+            for name, text in controls.items()
+            if fragment in text
+        ]
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_a_removed_redirect_or_trigger_is_reported(self):
+        for path, fragments in DESCRIPTION_REDIRECTS.items():
+            for fragment in fragments:
+                mutated = self.descriptions[path].replace(fragment, "")
+                self.assertNotIn(fragment, mutated, f"{path}: {fragment!r} survived its own removal")
+        for path, trigger in CLAUDE_USE_ONLY_TRIGGERS.items():
+            self.assertNotIn(trigger, self.descriptions[path].replace(trigger, ""))
+
+
+class DraftIssuesBodyApprovalTests(unittest.TestCase):
+    """Issue #840: /draft-issues shows complete bodies and waits before any
+    `gh issue create`, spawns no subagent unprompted, and inherits /issue's
+    hand-off rules. No behavioral prompt harness exists, so the asset text is
+    the reviewable property, exactly as for WriteLocationTests."""
+
+    def setUp(self):
+        self.text = (REPO_ROOT / DRAFT_ISSUES_PATH).read_text(encoding="utf-8")
+
+    def test_the_asset_satisfies_every_rule(self):
+        findings = draft_issues_findings(self.text)
+        self.assertEqual(findings, [], "\n".join(findings))
+
+    def test_the_signoff_stop_comes_before_the_creation_instruction(self):
+        body = canonical(self.text)
+        self.assertLess(
+            body.index(DRAFT_ISSUES_SIGNOFF_ANCHOR),
+            body.index(DRAFT_ISSUES_CREATE_ANCHOR),
+        )
+
+    def test_removing_any_rule_is_reported(self):
+        for rule in (
+            DRAFT_ISSUES_SUBAGENT_RULES
+            + DRAFT_ISSUES_HANDOFF_RULES
+            + DRAFT_ISSUES_ART_RULES
+            + DRAFT_ISSUES_APPROVAL_RULES
+        ):
+            with self.subTest(rule=rule):
+                mutated = canonical(self.text).replace(rule, "")
+                self.assertIn(f"missing rule {rule!r}", draft_issues_findings(mutated))
+
+    def test_removing_the_body_approval_stop_is_reported(self):
+        body = canonical(self.text)
+        start = body.index(DRAFT_ISSUES_SIGNOFF_ANCHOR)
+        end = body.index("create: only after that approval")
+        mutated = body[:start] + body[end:]
+        self.assertIn("has no body signoff stop", draft_issues_findings(mutated))
+
+    def test_creating_ahead_of_the_body_approval_is_reported(self):
+        body = canonical(self.text)
+        start = body.index(DRAFT_ISSUES_SIGNOFF_ANCHOR)
+        end = body.index("create: only after that approval")
+        mutated = body[end:] + " " + body[start:end]
+        self.assertIn("creates before it shows the bodies", draft_issues_findings(mutated))
+
+    def test_a_reinstated_fan_out_instruction_is_reported(self):
+        mutated = canonical(self.text) + " for a large repo, fan out parallel subagents to audit modules."
+        self.assertIn("instructs fanning out", draft_issues_findings(mutated))
+
+    def test_the_acceptance_grep_finds_no_unsolicited_spawn_instruction(self):
+        # The acceptance check is `git grep -niE 'fan out|subagent'`, read for an
+        # instruction to spawn. The explicit-request Sonnet exception names the
+        # word, so the word alone is not the failure; "fan out" must be absent.
+        self.assertNotIn("fan out", self.text.lower())
+
+    def test_the_approval_rules_are_not_vacuous(self):
+        # Negative control: the assets that delegate to /issue (autoissue) or
+        # draft exactly one candidate already had a signoff stop of their own
+        # and must not restate /draft-issues' list-selection distinction.
+        offenders = []
+        for path in DELEGATING_ASSETS:
+            text = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for rule in DRAFT_ISSUES_APPROVAL_RULES + DRAFT_ISSUES_SUBAGENT_RULES:
+                if rule in text:
+                    offenders.append(f"{path} now states {rule!r}; enforce it there")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+
+class DraftIssuesContractTests(unittest.TestCase):
+    """§3.2 and the responsibility-matrix row state the body-approval behavior."""
+
+    def setUp(self):
+        self.text = normalized(contract_text())
+
+    def test_the_matrix_row_separates_selection_from_body_approval(self):
+        self.assertIn(
+            "Only the drafts whose complete bodies the user approves; selecting "
+            "candidates from the list is not that approval",
+            self.text,
+        )
+
+    def test_section_3_2_states_the_body_approval_and_subagent_rules(self):
+        for fragment in (
+            "creates nothing until the user has approved the drafts",
+            "Choosing candidates from the list is selection, not signoff",
+            "with its title, labels, and complete body",
+            "each piece of a split candidate",
+            "presented again as a complete revised draft",
+            "spawns no subagent unless the user asked for subagents for that task",
+            "run on Sonnet",
+            "a candidate larger than one pull request is split at signoff",
+            "A placeholder never substitutes for it and the requirement is never dropped",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.text)
 
 
 class ScopeGateTests(unittest.TestCase):
