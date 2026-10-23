@@ -30,9 +30,12 @@ VEND-3 (issue #430) `backlog-review`, since VEND-5 (issue #511) `drain-prs`, sin
 (issue #544) `finalize`, since VEND-9 (issue #575) `janitor`, since VEND-8
 (issue #576) `autosolve`, and -- authored
 directly against this mechanism rather than vendored from a personal copy --
-`fix`, all nine of
-which do render into both bundles, so the same class pins
-the shipped sets at twenty-four and twenty-three and pins which registered
+`fix`, eight in all, which render into both bundles. Issue #837 then migrated
+the eight issue and pull-request pairs -- `solve`, `pr-review`, `pr-rereview`,
+`pr-revise`, `issue`, `autoissue`, `issue-review` and `issue-rereview` -- from
+hand-edited copies to authored sources, so sixteen sources render into both
+bundles. The migration added no shipped workflow, so the same class pins
+the shipped sets at twenty-three and twenty-two and pins which registered
 source belongs to which kind. Since EXT-2 (issue #717) it holds a third kind
 too, the external `solve` and, since EXT-3 (issue #718), the external
 `autosolve`, which render into the Grok, Kimi, and Google bundles and, since
@@ -60,7 +63,9 @@ CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
 # The shipped sets: Claude's twenty-three names, and Codex's the same set minus
-# Claude-only `draft-issues`. Pinned as counts and as the one documented
+# Claude-only `draft-issues`. These count the bundle files, not the authored
+# sources: issue #837's migration of eight pairs to sources added no workflow.
+# Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
 # Both grew by one in VEND-1, which added the first source that ships, by
@@ -93,12 +98,22 @@ SHIPPING_SOURCE_NAMES = {
     "finalize",
     "janitor",
     "autosolve",
+    # Issue #837: the eight issue and pull-request pairs, migrated from two
+    # hand-edited copies to one authored source each.
+    "solve",
+    "pr-review",
+    "pr-rereview",
+    "pr-revise",
+    "issue",
+    "autoissue",
+    "issue-review",
+    "issue-rereview",
 }
 
 # The registered sources that render into the four external bundles and
 # neither of the two above. Keyed by source path rather than by name, because
 # each shares its name with a Claude and Codex pair it deliberately does not
-# render: the hand-edited `solve`, and the `autosolve` another source renders.
+# render: the `solve` and the `autosolve` that other sources render.
 EXTERNAL_SOURCES = {
     "tools/command_sources/external/solve.md",
     "tools/command_sources/external/autosolve.md",
@@ -252,7 +267,7 @@ class RegistryShapeTests(unittest.TestCase):
         sources = [entry.source for entry in renderer.COMMAND_SOURCES]
         self.assertEqual(sorted(sources), sorted(set(sources)))
         # A name may repeat only across the canonical/external split -- the
-        # external autosolve beside the Claude and Codex one -- and then only
+        # external solve and autosolve beside the Claude and Codex ones -- and then only
         # between entries rendering disjoint brand sets, so no bundle ships two.
         brands_by_name = {}
         for entry in renderer.COMMAND_SOURCES:
