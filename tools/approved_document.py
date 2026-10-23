@@ -81,6 +81,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 from pathlib import Path, PurePosixPath
 
@@ -525,13 +526,20 @@ def require_unstaged(root: Path, document: str) -> None:
 
 
 def is_ancestor(root: Path, commit: str, revision: str) -> bool:
-    return (
-        git(
-            ["merge-base", "--is-ancestor", commit, revision], cwd=root, check=False
-        ).returncode
-        == 0
+    """Whether `commit` is `revision` or one of its ancestors. Only Git's
+    verified answers count: 0 is yes, 1 is no, and any other outcome (a command
+    that failed, an object that could not be read) is unknown and raises, so a
+    broken comparison can never read as a negative."""
+    proc = git(["merge-base", "--is-ancestor", commit, revision], cwd=root, check=False)
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1 and not proc.stderr.strip():
+        return False
+    raise DocumentError(
+        "ancestry-unreadable",
+        f"whether {commit[:12]} is an ancestor of {revision[:12]} could not be "
+        f"decided ({proc.stderr.decode(errors='replace').strip() or proc.returncode})",
     )
-
 
 
 def git_blob_hash(data: bytes) -> str:
@@ -620,10 +628,43 @@ def check_supported_name(document: str) -> None:
         )
 
 
+def actual_spelling(root: Path, document: str) -> None:
+    """Refuse a spelling the filesystem would resolve to a different one: on a
+    case-insensitive (or Unicode-normalizing) filesystem `Docs/notes.md` and
+    `docs/notes.md` are one file but would key two locks and two records. Each
+    existing component must be spelled exactly as the directory stores it."""
+    current = root
+    for part in PurePosixPath(document).parts:
+        try:
+            names = os.listdir(current)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise DocumentError(
+                "document-path-unsafe", f"{current} could not be listed ({error})"
+            ) from error
+        if part not in names:
+            folded = unicodedata.normalize("NFC", part).casefold()
+            twins = [
+                name for name in names
+                if unicodedata.normalize("NFC", name).casefold() == folded
+            ]
+            if twins:
+                raise DocumentError(
+                    "document-name-unsupported",
+                    f"{document!r} is spelled {part!r} where the filesystem stores "
+                    f"{twins[0]!r}: one file must have one spelling, so it is not "
+                    "keyed under both",
+                )
+            return
+        current = current / part
+
+
 def confine(root: Path, document: str) -> None:
     """Refuse a document whose path leaves the verified worktree: every existing
     component below the root must be a real directory (or the final file), never
     a symlink, so a link cannot carry a write or a recovery outside it."""
+    actual_spelling(root, document)
     current = root
     for part in PurePosixPath(document).parts:
         current = current / part
@@ -1532,34 +1573,79 @@ def interval_commits(root: Path, fresh: str, recorded_tip: str) -> list[str]:
     return listed.stdout.decode().split()
 
 
+class TreeReader:
+    """Walk the document's path in each commit's trees through one
+    `git cat-file --batch`, so that an absent path is *proved* absent — the
+    parent tree was read and does not list it — and a tree that cannot be read
+    is unknown. A batch probe of `commit:path` reports both as "missing"."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.width = 32 if git_out(["rev-parse", "--show-object-format"], cwd=root) == "sha256" else 20
+        self.process = subprocess.Popen(
+            ["git", "cat-file", "--batch"], cwd=str(root), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        self.trees: dict = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        _quietly(self.process.stdin.close)
+        _quietly(self.process.stdout.close)
+        _quietly(self.process.wait)
+
+    def read(self, spec: str):
+        self.process.stdin.write(f"{spec}\n".encode())
+        self.process.stdin.flush()
+        header = self.process.stdout.readline().decode().split()
+        if len(header) != 3 or header[1] == "missing":
+            raise DocumentError(
+                "landing-unverifiable",
+                f"{spec} could not be read from the object database, so whether the "
+                "mutation landed cannot be decided",
+            )
+        data = self.process.stdout.read(int(header[2]))
+        self.process.stdout.read(1)
+        return header[0], header[1], data
+
+    def entries(self, oid: str) -> dict:
+        if oid not in self.trees:
+            _, kind, data = self.read(oid)
+            if kind != "tree":
+                raise DocumentError("landing-unverifiable", f"{oid} is not a tree")
+            found, index = {}, 0
+            while index < len(data):
+                space, nul = data.index(b" ", index), data.index(b"\0", index)
+                name = data[space + 1:nul].decode("utf-8", errors="surrogateescape")
+                found[name] = (data[index:space].decode(), data[nul + 1:nul + 1 + self.width].hex())
+                index = nul + 1 + self.width
+            self.trees[oid] = found
+        return self.trees[oid]
+
+    def blob_in(self, commit: str, parts: tuple) -> str | None:
+        oid, kind, _ = self.read(f"{commit}^{{tree}}")
+        if kind != "tree":
+            raise DocumentError("landing-unverifiable", f"{commit} has no readable tree")
+        for position, part in enumerate(parts):
+            listing = self.entries(oid)
+            if part not in listing:
+                return None
+            mode, oid = listing[part]
+            if position == len(parts) - 1:
+                return oid if mode in ("100644", "100755") else None
+            if mode != "40000":
+                return None
+        return None
+
+
 def blobs_at(root: Path, commits: list[str], document: str) -> list[str | None]:
-    """The document's blob in each commit, in one process. A commit whose tree
-    does not hold the path yields None; an object that cannot be read raises."""
-    if not commits:
-        return []
-    probe = git(
-        ["cat-file", "--batch-check=%(objecttype)"], cwd=root, check=False,
-        input_bytes="".join(f"{commit}^{{tree}}\n" for commit in commits).encode(),
-    )
-    types = probe.stdout.decode().splitlines()
-    if probe.returncode != 0 or types != ["tree"] * len(commits):
-        raise DocumentError(
-            "landing-unverifiable",
-            "a commit in the publication interval has no readable tree, so "
-            f"whether {document} landed cannot be decided",
-        )
-    named = git(
-        ["cat-file", "--batch-check=%(objectname)"], cwd=root, check=False,
-        input_bytes="".join(f"{commit}:{document}\n" for commit in commits).encode(),
-    )
-    lines = named.stdout.decode().splitlines()
-    if named.returncode != 0 or len(lines) != len(commits):
-        raise DocumentError(
-            "landing-unverifiable",
-            f"the revisions of {document} in the publication interval could not "
-            "all be read",
-        )
-    return [None if line.endswith(" missing") else line for line in lines]
+    """The document's blob in each commit. None means the path is *proved*
+    absent from a tree that was read; anything unreadable raises."""
+    parts = tuple(PurePosixPath(document).parts)
+    with TreeReader(root) as reader:
+        return [reader.blob_in(commit, parts) for commit in commits]
 
 
 def is_shallow(root: Path) -> bool:
@@ -2224,6 +2310,18 @@ def publish_recorded(
                 next_action="reconcile by hand: negative history alone does not "
                 "authorize a retry, and nothing was published by other means",
                 reachable=None,
+            )
+        # The earlier child may have published between the negative check above
+        # and now. Quiescence and the gate come first, then a fresh
+        # classification: only a negative taken after both authorizes a call.
+        pending, info = confirm_landing(root, branch, pending)
+        if info["landed"]:
+            cleared = settle_landed(
+                root, owner, branch, document, pending, info, operator_quiescent
+            )
+            return published_outcome(
+                root, owner, branch, document, pending, info, cleared,
+                resumed=resumed or "already-landed", tool=None,
             )
     base = pending["message"] or default_message(document)
     tool, pending = run_publication_tool(

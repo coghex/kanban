@@ -1058,6 +1058,117 @@ class ReworkRoundTwo(FaultFixture):
         self.assertIsNotNone(self.fx.pending())
 
 
+class ReworkRoundThree(FaultFixture):
+    """Reproduced by the third rereview of the reworked branch (PR #836)."""
+
+    def test_a_filesystem_alias_of_an_existing_spelling_is_refused(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["status"], "incomplete-publication")
+        for alias in ("Docs/notes.md", "docs/NOTES.md", "DOCS/Notes.MD"):
+            with self.subTest(alias=alias):
+                code, report, _ = self.child([], "--branch", "master", "--check-pending", document=alias)
+                self.assertEqual((code, report["status"]), (1, "document-name-unsupported"))
+                self.assertIn("one file must have one spelling", report["message"])
+                code, started, _ = self.start([], document=alias, baseline=blob_of(NOTES))
+                self.assertEqual(started["status"], "document-name-unsupported")
+        self.assertEqual(self.check_child()[1]["status"], "pending")
+
+    def test_the_retry_checks_landing_again_after_quiescence_and_the_gate(self):
+        # The earlier child may publish between the negative check and the
+        # gate; a retry authorized by the first negative would reinstate a
+        # mutation that landed and was reverted.
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        self.mode("land")
+        real = approved.retry_gate
+
+        def late(repository, branch):
+            result = real(repository, branch)
+            self.fx.upstream_edit(EDITED, message="the earlier child publishes")
+            self.fx.upstream_edit(EDITED.replace("- line 8\n", "- line 8, reverted later\n"))
+            return result
+
+        with unittest.mock.patch.object(approved, "retry_gate", late):
+            outcome = self.resume()
+        self.assertEqual(outcome["status"], "published")
+        self.assertEqual(outcome["landed_via"], "already-present")
+        self.assertEqual(len(self.calls()), 1)
+
+    def drop_object(self, oid):
+        """Delete one loose object, as a damaged repository would lose it."""
+        common = Path(run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], self.fx.work))
+        path = common / "objects" / oid[:2] / oid[2:]
+        self.assertTrue(path.exists(), f"{oid} is not a loose object here")
+        os.chmod(path.parent, 0o755)
+        os.chmod(path, 0o644)
+        path.unlink()
+
+    def test_a_missing_tree_object_is_unknown_not_an_absent_document(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        self.fx.upstream_edit(EDITED, message="a concurrent publication")
+        landing_commit = self.fx.origin_tip()
+        self.fx.upstream_edit(EDITED.replace("- line 8\n", "- line 8, reverted later\n"))
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        self.drop_object(run(["git", "rev-parse", f"{landing_commit}:docs"], self.fx.work))
+        calls = len(self.calls())
+        report = self.check_child()[1]
+        self.assertIsNone(report["already_landed"])
+        self.assertEqual(report["record_fault"]["status"], "landing-unverifiable")
+        self.mode("land")
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "landing-unverifiable")
+        self.assertEqual(len(self.calls()), calls)
+        self.assertIsNotNone(self.fx.pending())
+
+    def test_an_absent_document_in_an_old_commit_is_still_a_proved_absence(self):
+        # The path walk reads the parent tree and finds no entry: that is a
+        # negative, not an error, and a document created later is unaffected.
+        novel = "docs/created-later.md"
+        self.fx.write(self.fx.work, "# later\n", novel)
+        baseline = approved.working_blob(self.fx.work, novel)
+        code, outcome, _ = self.start([], "# later\n\n- approved\n", baseline=baseline, document=novel)
+        self.assertEqual((code, outcome["status"]), (0, "published"))
+
+    def test_an_ancestry_command_error_is_unknown_never_a_negative(self):
+        real = approved.git
+
+        def broken(args, **kwargs):
+            if args[:2] == ["merge-base", "--is-ancestor"]:
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: bad object")
+            return real(args, **kwargs)
+
+        with unittest.mock.patch.object(approved, "git", broken):
+            with self.assertRaises(approved.DocumentError) as caught:
+                approved.is_ancestor(self.fx.work, self.fx.origin_tip(), self.fx.origin_tip())
+        self.assertEqual(caught.exception.status, "ancestry-unreadable")
+        # ...so older saved evidence is not accepted when the check breaks.
+        self.fx.upstream_edit(EDITED)
+        older = self.fx.origin_tip()
+        self.fx.upstream_edit(EDITED.replace("- line 8\n", "- line 8, later\n"))
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        self.mode("refuse")
+        self.approve(EDITED, baseline=approved.working_blob(self.fx.work, DOC))
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        commit = self.reseed(record, landing={
+            "via": "already-present", "published_blob": record["approved_blob"],
+            "receipt_commit": None, "evidence_commit": older,
+        })
+
+        def breaking(args, **kwargs):
+            if args[:2] == ["merge-base", "--is-ancestor"] and args[2] == older and args[3] == record["rendered_tip"]:
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: bad object")
+            return real(args, **kwargs)
+
+        self.mode("land")
+        calls = len(self.calls())
+        with unittest.mock.patch.object(approved, "git", breaking):
+            with self.assertRaises(approved.DocumentError) as caught:
+                self.resume()
+        self.assertEqual(caught.exception.status, "ancestry-unreadable")
+        self.assertEqual((self.fx.pending(), len(self.calls())), (commit, calls))
+
+
 class NegativeControls(FaultFixture):
     """Each guard must fail its test when removed: the tests have teeth."""
 

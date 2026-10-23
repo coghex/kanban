@@ -2087,6 +2087,46 @@ class LocalCheckpointTests(RecordSeedingMixin, ApprovedFixture):
         self.assertIn("shallow", caught.exception.message)
         self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
 
+    def test_a_missing_tree_cannot_license_a_legacy_local_resolution(self):
+        # PR #836 rework round 3. The landing commit's docs tree is gone; the
+        # path walk cannot prove the document was absent there.
+        ref = self.confirmed_transaction()
+        outcome = publisher.publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=self.STATUS.encode(), message="legacy",
+            expected_working_copy=blob_of(NOTES),
+        )
+        self.assertEqual(outcome["status"], "not-published")
+        self.fx.upstream_edit(self.STATUS)
+        landing_commit = self.fx.origin_tip()
+        self.fx.upstream_edit(NOTES + "\nthe entry is gone\n")
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        tree = run(["git", "rev-parse", f"{landing_commit}:docs"], self.fx.work)
+        common = Path(run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], self.fx.work))
+        victim = common / "objects" / tree[:2] / tree[2:]
+        os.chmod(victim.parent, 0o755)
+        os.chmod(victim, 0o644)
+        victim.unlink()
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("could not all be read", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
+    def test_an_applied_record_that_disagrees_with_its_pending_attempt_licenses_nothing(self):
+        ref = self.confirmed_transaction()
+        self.mode("refuse")
+        self.assertEqual(self.approve(self.STATUS)["status"], "incomplete-publication")
+        other_text = self.STATUS.replace("DW-3", "DW-3 (older)")
+        other = approved._preserve(self.fx.work, other_text.encode())
+        run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), other], self.fx.work)
+        self.fx.write(self.fx.work, other_text)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("pending attempt", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
     def test_a_malformed_applied_record_licenses_nothing(self):
         ref = self.confirmed_transaction()
         self.fx.write(self.fx.work, self.STATUS)

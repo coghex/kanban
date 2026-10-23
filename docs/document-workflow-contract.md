@@ -961,8 +961,9 @@ and every `T-NN` row of that design is a named regression in
 2. **Per-document serialization.** One lock per (repository, document), keyed by
    the publisher's own digest, so the two exclude each other. A document has one
    canonical spelling (no `./`, repeated or trailing separators, no `..`), and the
-   helper and the tracker each refuse every other, so an alias can never key a
-   second lock and record. A reference that cannot be read is an error, never
+   helper and the tracker each refuse every other — and, in the helper, every
+   spelling the filesystem would resolve to a different one (case or Unicode
+   form) — so an alias can never key a second lock and record. A reference that cannot be read is an error, never
    absence, in both modules. A lock whose owner
    is dead is cleared only when the tool's child is also known to have exited.
 3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
@@ -1022,7 +1023,11 @@ to enable a search; without saved evidence the complete interval is searched
 and the finding is saved by compare-and-swap before any cleanup. Several
 receipts for one attempt are an inconsistency, not a choice. A shallow history,
 a missing object or any unreadable step is *unknown*, and unknown never
-publishes. The tool's output decides nothing, and "historically landed" is
+publishes. The document's path is walked through each commit's trees, so an
+absent path is proved absent from a tree that was read, and an unreadable tree
+is unknown; an ancestry check that errors is unknown, never "no". An automatic
+retry classifies landing again after the child is known gone and the gate is
+satisfied, and only that later negative authorizes the call. The tool's output decides nothing, and "historically landed" is
 reported apart from the current branch blob.
 
 **An automatic retry is gated on a rule.** After a handoff that did not land, a

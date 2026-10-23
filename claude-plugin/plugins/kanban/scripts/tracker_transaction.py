@@ -1409,7 +1409,7 @@ def approved_document_module():
     return module
 
 
-def recorded_publication_landed(root: Path, record: dict, branch: str):
+def recorded_publication_landed(root: Path, record: dict, branch: str, applied: str | None = None):
     """(landed, why) for the publication the helper recorded, if it recorded one.
 
     Fails closed: a record that cannot be read, a module that cannot be loaded,
@@ -1423,6 +1423,15 @@ def recorded_publication_landed(root: Path, record: dict, branch: str):
     try:
         module = approved_document_module()
         pending = module.read_pending(root, record["repository"], record["document"])
+        if applied is not None and pending["approved_blob"] != applied:
+            # The negative landing result below is about the pending attempt's
+            # content; it says nothing about some other blob the applied record
+            # happens to name, so a disagreement is a stop, not an inheritance.
+            return None, (
+                f"the applied record names {applied[:12]} but the pending attempt "
+                f"at {ref} is for {pending['approved_blob'][:12]}; both are kept "
+                "until they are reconciled"
+            )
         if pending["capture"] is not None:
             return None, (
                 f"a capture of {record['document']} recorded at {ref} is unresolved"
@@ -1519,7 +1528,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     if pending_exists:
         # A pending attempt has its own recorded interval and one validator, the
         # helper's: a second, weaker heuristic here would only disagree with it.
-        landed, why = recorded_publication_landed(root, record, branch)
+        landed, why = recorded_publication_landed(root, record, branch, recorded)
         if landed is None:
             return False, why
         if landed:
@@ -1530,32 +1539,27 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
         return True, f"{document} was applied locally and has not landed on {branch}"
     if "\n" in document:
         return False, f"{document} has a newline in its name, so its history cannot be searched"
-    shallow = git(["rev-parse", "--is-shallow-repository"], cwd=root, check=False)
-    if shallow.returncode != 0 or shallow.stdout.decode().strip() != "false":
-        return False, (
-            f"the history of origin/{branch} is shallow or its depth cannot be "
-            "read, so whether the applied content already landed cannot be decided"
-        )
     commits = git(["rev-list", f"origin/{branch}"], cwd=root, check=False)
     if commits.returncode != 0:
         return False, (
             f"the history of origin/{branch} could not be read, so whether the "
             "applied content already landed cannot be decided"
         )
-    names = "".join(
-        f"{commit}:{document}\n"
-        for commit in commits.stdout.decode().split()
-    )
-    probed = git(
-        ["cat-file", "--batch-check=%(objectname)"],
-        cwd=root, check=False, input_bytes=names.encode(),
-    )
-    if probed.returncode != 0:
+    try:
+        helper = approved_document_module()
+        if helper.is_shallow(root):
+            return False, (
+                f"the history of origin/{branch} is shallow or its depth cannot be "
+                "read, so whether the applied content already landed cannot be decided"
+            )
+        seen = helper.blobs_at(root, commits.stdout.decode().split(), document)
+    except Exception as error:  # noqa: BLE001 - an unreadable history refuses
         return False, (
-            f"the revisions of {document} on origin/{branch} could not be read, so "
-            "whether the applied content already landed cannot be decided"
+            f"the revisions of {document} on origin/{branch} could not all be read "
+            f"({getattr(error, 'message', error)}), so whether the applied content "
+            "already landed cannot be decided"
         )
-    if recorded in probed.stdout.decode().split():
+    if recorded in seen:
         return False, (
             f"origin/{branch} already carried the applied content of "
             f"{document} at some revision, so it is landed rather than "
