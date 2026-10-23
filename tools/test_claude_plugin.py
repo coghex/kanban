@@ -1774,8 +1774,8 @@ class SelfReviewPreconditionDocumentTests(unittest.TestCase):
                     f"{name}: a --self-review invocation must declare this session's brand",
                 )
 
-    def test_both_documents_route_a_refusal_back_to_the_nested_spawn(self):
-        for name in ("pr-review", "pr-rereview"):
+    def test_pr_review_routes_a_refusal_back_to_the_nested_spawn(self):
+        for name in ("pr-review",):
             text = self._doc(name)
             self.assertIn("self_review_refused", text, f"{name} must handle the refusal status")
             self.assertIn(
@@ -1783,6 +1783,15 @@ class SelfReviewPreconditionDocumentTests(unittest.TestCase):
                 text,
                 f"{name} must say a refusal means this session is the PR's own brand",
             )
+
+    def test_pr_rereview_follows_pr_review_for_the_refusal(self):
+        # Issue #839: the recovery is stated once, at its owner. The follower
+        # keeps its own brand declaration (asserted above) and must point at
+        # the owner rather than restate or drop the recovery.
+        text = self._doc("pr-rereview")
+        self.assertIn("read and follow the complete `/pr-review` workflow", text)
+        self.assertIn("none of it is restated here", text)
+        self.assertNotIn("self_review_refused", text)
 
     def test_neither_document_asserts_the_opposite_brand_premise_unconditionally(self):
         stale = "Kanban already spawned this session as the canonical opposite-brand reviewer"

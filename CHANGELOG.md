@@ -15,6 +15,24 @@ created above it.
 
 ### Unreleased
 
+- Corrected the text of the pull-request workflows after the board stopped
+  spawning them (#839). `pr-revise` no longer waits for, polls or diagnoses the
+  pull request's checks: the canonical rereview follows the push at once, and
+  its report says the checks were not awaited. It now reads the `pr-origin`
+  marker first and stops with nothing changed unless the pull request carries
+  exactly one marker naming this bundle's brand, the rule and wording of
+  `fix` step 2b; its routing table and the claim that Kanban resumes the
+  solver are gone, since the bundled coordinator decides the reviewer.
+  `finalize` cites the coordinator's `origin_from_body` instead of the removed
+  `originFromBody`, `drain-prs` points at the roster's `drain_rereview` cell
+  instead of naming a model and effort, `pr-rereview` is `pr-review` plus the
+  flags and steps that differ (about 5,500 bytes shorter in each bundle), and
+  `autosolve` states its own steps and leaves override, owner-directive and
+  route semantics to the coordinator. New assertions hold `pr-revise`'s origin
+  guard in both bundles against `fix`'s unchanged wording, with the
+  review workflows as the negative control.
+  Bundles: Claude 1.84.0, Codex 1.83.0.
+
 - The drafting commands now say when they apply, and `/draft-issues` shows what
   it files (#840). Every drafting and issue-review description names its
   neighbour (`/issue` is not a survey, `/draft-issues` is not one candidate,

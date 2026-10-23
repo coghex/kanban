@@ -606,7 +606,10 @@ DIAGNOSIS_ORDER = (
 
 # Requirements that belong to fix alone. The pr-revise pair must carry none of
 # them, which is what proves the table above is measuring this workflow rather
-# than matching text every packaged workflow happens to contain.
+# than matching text every packaged workflow happens to contain. The origin
+# rules `pr-revise` shares with fix (`ORIGIN_GUARD_RULES`) are deliberately NOT
+# in it: `ReviseOriginGuardTests` asserts them present in both and absent from
+# the workflows that delegate the origin decision.
 FIX_ONLY_REQUIREMENTS = (
     "an-untrustworthy-rollup-is-its-own-branch",
     "the-branches-read-the-deduplicated-set",
@@ -638,9 +641,6 @@ FIX_ONLY_REQUIREMENTS = (
     "nothing-to-fix-requires-a-ready-merge-state",
     "an-unknown-merge-state-is-not-a-clearance",
     "the-origin-marker-is-validated-before-any-mutation",
-    "the-origin-rules-are-the-coordinators",
-    "every-malformed-origin-is-a-refusal-not-a-default",
-    "a-wrong-brand-origin-stops-with-nothing-changed",
     "why-the-origin-gate-exists",
     "the-worktree-step-serves-only-head-moving-branches",
     "a-diagnosis-is-not-authorisation",
@@ -1682,6 +1682,202 @@ class RevisionDelegationTests(unittest.TestCase):
     def test_the_fix_only_set_is_a_real_subset_of_the_required_table(self):
         self.assertTrue(set(FIX_ONLY_REQUIREMENTS) < set(REQUIRED_PHRASES))
         self.assertGreaterEqual(len(FIX_ONLY_REQUIREMENTS), 10)
+
+
+# The origin rules fix step 2b states and pr-revise step 1 repeats: both author
+# a change on a pull request and hand it to a reviewer the coordinator routes
+# from the same marker. Each entry is a key of REQUIRED_PHRASES, so fix's own
+# wording is the single source and "fix's is unchanged" is the same assertion.
+ORIGIN_GUARD_RULES = (
+    "the-origin-rules-are-the-coordinators",
+    "every-malformed-origin-is-a-refusal-not-a-default",
+    "a-wrong-brand-origin-stops-with-nothing-changed",
+)
+
+# The negative control, in WriteLocationTests' pattern: assets that never
+# author a change on someone else's pull request. pr-review and pr-rereview
+# hand the origin decision to the coordinator's route, and finalize only reads
+# the marker to exclude a self-review, so none owes the guard, and a rule that
+# matched every PR workflow would have to pass here too.
+ORIGIN_GUARD_DELEGATING_ASSETS = tuple(
+    REPO_ROOT / path
+    for path in (
+        "claude-plugin/plugins/kanban/commands/pr-review.md",
+        "claude-plugin/plugins/kanban/commands/pr-rereview.md",
+        "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
+        "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
+    )
+)
+
+# What pr-revise must no longer say: a routing table the coordinator owns, a
+# claim about who starts this session, and any instruction to wait on checks.
+REVISE_RETIRED_TEXT = (
+    "uses both independently",
+    "only ever resumes the original solver",
+    "route is fixed by brand",
+    "Kanban resumes this session",
+    # The coordinator collapses routing to the one loaded provider in
+    # single-agent mode (docs/agent-workflow-contract.md section 2.2), so a
+    # Claude-only roster reviews a Claude-origin pull request with Claude.
+    # Any promise of an independent or opposite-brand reviewer is false there.
+    "never reaches the brand that authored the revision",
+    "opposite brand's canonical reviewer",
+    "never to this session's own model",
+)
+
+WAITS_FOR_CHECKS_RE = re.compile(
+    r"(?i)\b(?:wait(?:s|ing)? for|poll(?:s|ing)?)\b[^.\n]{0,40}\b(?:ci|checks?)\b"
+    r"|diagnose and fix only when the failure"
+)
+
+
+def waits_for_checks(text: str) -> bool:
+    """True when `text` tells its reader to wait on a pull request's checks.
+
+    The acceptance grep `wait for (the )?(required )?(CI|checks)` misses
+    "Wait for the PR's required checks", which is the sentence that actually
+    held the instruction, so the rule here allows words between the verb and
+    the noun and is proved against that sentence below. A "Do not wait for ..."
+    sentence is the one permitted spelling, because it forbids the wait.
+    """
+    permitted = re.sub(r"Do not wait for[^.\n]*\.", "", text)
+    return bool(WAITS_FOR_CHECKS_RE.search(permitted))
+
+
+class ReviseOriginGuardTests(unittest.TestCase):
+    """pr-revise refuses a pull request of another brand, as fix step 2b does.
+
+    Issue #839. Both workflows push a commit and then invoke a rereview the
+    coordinator routes from the pull request's `pr-origin` marker, so run on a
+    pull request of the other brand either would author a change and hand it
+    to its own brand. fix asserts the rule through REQUIRED_PHRASES; this class
+    asserts that the same rule, in the same words, guards pr-revise in both
+    bundles, that it comes before anything that mutates, and that it is absent
+    from the assets that delegate the decision.
+    """
+
+    GUARDED = FIX_ASSETS + REVISE_ASSETS
+
+    def test_the_rules_are_fix_step_2b_s_own_phrases(self):
+        for rule in ORIGIN_GUARD_RULES:
+            self.assertIn(rule, REQUIRED_PHRASES)
+            self.assertNotIn(rule, FIX_ONLY_REQUIREMENTS)
+
+    def test_every_guarded_asset_carries_every_rule(self):
+        for path in self.GUARDED:
+            flattened = flat(read(path))
+            for rule in ORIGIN_GUARD_RULES:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), rule=rule):
+                    self.assertIn(flat(REQUIRED_PHRASES[rule]), flattened)
+
+    def test_each_brand_demands_its_own_marker_and_only_that_one(self):
+        for path, brand, other in (
+            (CLAUDE_FIX, "claude", "codex"),
+            (CLAUDE_REVISE, "claude", "codex"),
+            (CODEX_FIX, "codex", "claude"),
+            (CODEX_REVISE, "codex", "claude"),
+        ):
+            flattened = flat(read(path))
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertIn(
+                    f"the marker must be `<!-- pr-origin:{brand} -->`", flattened
+                )
+                self.assertNotIn(
+                    f"the marker must be `<!-- pr-origin:{other} -->`", flattened
+                )
+
+    def test_external_and_unknown_origins_stop_pr_revise_too(self):
+        for path in REVISE_ASSETS:
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertIn(
+                    "An unknown-origin or external-origin pull request",
+                    flat(read(path)),
+                )
+
+    def test_the_guard_precedes_every_step_that_can_mutate(self):
+        for path in REVISE_ASSETS:
+            text = read(path)
+            guard = text.index("## 1. Require the pull request's origin to be this brand")
+            for later in (
+                "## 2. Establish the review contract",
+                "## 3. Use an isolated, current worktree",
+                "## 5. Rerun canonical review",
+            ):
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), step=later):
+                    self.assertLess(guard, text.index(later))
+
+    def test_the_delegating_assets_carry_none_of_the_guard(self):
+        for path in ORIGIN_GUARD_DELEGATING_ASSETS:
+            flattened = flat(read(path))
+            for rule in ORIGIN_GUARD_RULES:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), rule=rule):
+                    self.assertNotIn(flat(REQUIRED_PHRASES[rule]), flattened)
+
+    def test_pr_revise_states_no_routing_rule_and_names_no_spawner(self):
+        for path in REVISE_ASSETS:
+            flattened = flat(read(path))
+            for retired in REVISE_RETIRED_TEXT:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), text=retired):
+                    self.assertNotIn(retired, flattened)
+            self.assertIn(
+                "The bundled coordinator decides which reviewer the rereview goes to",
+                flattened,
+            )
+
+    def test_the_rereview_follows_the_push_without_waiting_for_checks(self):
+        for path in REVISE_ASSETS:
+            text = read(path)
+            flattened = flat(text)
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertFalse(waits_for_checks(text))
+                self.assertNotIn("Wait for CI", text)
+                self.assertIn("## 5. Rerun canonical review", text)
+                self.assertIn(
+                    "Do not wait for, poll, or diagnose the pull request's checks: "
+                    "the rereview follows the push immediately.",
+                    flattened,
+                )
+                self.assertIn(
+                    "a statement that the pull request's checks were not awaited",
+                    flattened,
+                )
+                # Local validation is kept: dropping the wait must not drop it.
+                self.assertIn("Run the narrowest relevant tests", flattened)
+                self.assertLess(
+                    text.index("## 4. Implement and validate"),
+                    text.index("## 5. Rerun canonical review"),
+                )
+
+    def test_the_wait_rule_catches_the_sentence_that_held_the_instruction(self):
+        for planted in (
+            "Wait for the PR's required checks for the pushed head to complete.",
+            "If CI fails, diagnose and fix only when the failure is attributable.",
+            "## 4. Wait for CI and rerun canonical review",
+            "Poll the pull request's checks until they pass.",
+        ):
+            with self.subTest(planted=planted):
+                self.assertTrue(waits_for_checks(planted))
+        self.assertFalse(
+            waits_for_checks("Do not wait for, poll, or diagnose the pull request's checks.")
+        )
+
+    def test_no_pr_workflow_cites_a_retired_haskell_parser(self):
+        scanned = [
+            REPO_ROOT / "tools/command_sources" / name
+            for name in ("fix.md", "finalize.md", "pr-revise.md", "pr-review.md", "pr-rereview.md", "autosolve.md", "drain-prs.md")
+        ]
+        scanned += list(FIX_ASSETS) + list(REVISE_ASSETS) + list(ORIGIN_GUARD_DELEGATING_ASSETS)
+        scanned += [
+            REPO_ROOT / "claude-plugin/plugins/kanban/commands/finalize.md",
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
+            REPO_ROOT / "claude-plugin/README.md",
+            REPO_ROOT / "codex-plugin/README.md",
+        ]
+        for path in scanned:
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                text = read(path)
+                self.assertNotIn("originFromBody", text)
+                self.assertNotIn("PullRequestFlow", text)
 
 
 # The spelled-out counts each bundle README states about its own inventory, and

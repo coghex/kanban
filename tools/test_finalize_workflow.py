@@ -188,8 +188,8 @@ PR_VIEW_FIELDS = (
     "mergeable,mergeStateStatus,closingIssuesReferences"
 )
 
-# The origin markers, character for character as `originFromBody` spells
-# them, and as the gate has to.
+# The origin markers, character for character as the bundled coordinator's
+# `origin_from_body` spells them, and as the gate has to.
 ORIGIN_MARKERS = {
     "claude": "<!-- pr-origin:claude -->",
     "codex": "<!-- pr-origin:codex -->",
@@ -1341,7 +1341,7 @@ class GateDecisionTests(unittest.TestCase):
                 )
 
     def test_an_origin_marker_with_trailing_text_refuses(self):
-        # `originFromBody` requires it to be the body's final non-whitespace
+        # `origin_from_body` requires it to be the body's final non-whitespace
         # content, so a marker quoted mid-body is not a declaration.
         body = "Closes #7\n\n" + ORIGIN_MARKERS["claude"] + "\n\nand then some prose.\n"
         for relative_path in RENDERED_ASSETS:

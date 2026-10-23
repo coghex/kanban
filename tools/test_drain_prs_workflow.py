@@ -837,10 +837,15 @@ class DrainerDescriptionTests(unittest.TestCase):
                 "the drainer rereviews that exact head in a throwaway detached "
                 "worktree, at the provider, model and effort the roster's "
                 "`drain_rereview` cell names for this installation's operating "
-                "mode: the codex cell — GPT-6-Sol at medium by default — "
-                "when both providers are loaded, and the sole loaded provider's "
-                "own cell when one is.",
+                "mode: the codex cell when both providers are loaded, and the "
+                "sole loaded provider's own cell when one is. This workflow "
+                "names no model or effort; the cell does.",
                 flattened,
+                relative_path,
+            )
+            self.assertNotRegex(
+                flattened,
+                r"(?i)gpt-\d|opus|sonnet|haiku|\b(?:low|medium|high|xhigh) by default",
                 relative_path,
             )
             self.assertIn(

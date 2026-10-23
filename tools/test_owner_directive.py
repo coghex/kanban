@@ -664,12 +664,19 @@ AUTOSOLVE_ASSETS = (
     "google-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
-REVIEW_ASSETS = (
+# The review workflows that own the owner-directive rules. pr-rereview follows
+# pr-review for them (issue #839) and appears in FOLLOWING_REVIEW_ASSETS, where
+# it is held to follow rather than restate; both stay in REVIEW_ASSETS for the
+# rules that must hold for every review workflow's commands.
+OWNING_REVIEW_ASSETS = (
     "claude-plugin/plugins/kanban/commands/pr-review.md",
-    "claude-plugin/plugins/kanban/commands/pr-rereview.md",
     "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
 )
+FOLLOWING_REVIEW_ASSETS = (
+    ("claude-plugin/plugins/kanban/commands/pr-rereview.md", "/"),
+    ("codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md", "$"),
+)
+REVIEW_ASSETS = OWNING_REVIEW_ASSETS + tuple(path for path, _ in FOLLOWING_REVIEW_ASSETS)
 # Negative control: the solve assets never talk to the review coordinator, so
 # a rule matching every asset cannot pass while asserting nothing.
 DELEGATING_ASSETS = (
@@ -747,7 +754,7 @@ class OwnerDirectiveAssetTests(unittest.TestCase):
                     self.assertNotIn("--owner-directive", fence)
 
     def test_the_review_workflows_accept_only_the_owners_words(self):
-        for relative_path in REVIEW_ASSETS:
+        for relative_path in OWNING_REVIEW_ASSETS:
             text = flat(asset_text(relative_path))
             with self.subTest(asset=relative_path):
                 self.assertIn('pass `--owner-directive "<their words, verbatim>"`', text)
@@ -755,6 +762,19 @@ class OwnerDirectiveAssetTests(unittest.TestCase):
                 self.assertIn('"status": "owner_directive_refused"', text)
                 self.assertIn("pass the identical `--owner-directive` here", text)
                 self.assertIn("repeating the flag once per directive", text)
+
+    def test_the_rereview_follows_the_owner_and_restates_none_of_it(self):
+        for relative_path, sigil in FOLLOWING_REVIEW_ASSETS:
+            text = flat(asset_text(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    f"read and follow the complete `{sigil}pr-review` workflow", text
+                )
+                self.assertIn("`--owner-directive`", text)
+                self.assertIn("none of it is restated here", text)
+                self.assertNotIn('"status": "owner_directive_refused"', text)
+                self.assertNotIn("repeating the flag once per directive", text)
+                self.assertNotIn(NEVER_COMPOSE, text)
 
     def test_the_coordinator_accepts_the_flag_every_asset_names(self):
         for brand in COORDINATORS:
