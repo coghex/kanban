@@ -1001,17 +1001,25 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
                     # The read failed, so no bytes are in hand. Try once more:
                     # they only serve the exclusive-create fallback, and the
                     # link restores without them.
+                    # Whatever it raises, the original error stays the one
+                    # reported and the restoration below still runs.
                     try:
                         captured, _ = read_for_write(aside)
                         captured_ok = True
-                    except OSError:
+                    except Exception:  # noqa: BLE001 - cleanup must not raise
                         pass
-                if _quietly(target.stat):
-                    safe = captured_blob is not None
-                else:
-                    safe = put_back(
-                        aside, target, captured if captured_ok else None, captured_mode
-                    )
+                try:
+                    if _quietly(target.stat):
+                        safe = captured_blob is not None
+                    else:
+                        safe = put_back(
+                            aside,
+                            target,
+                            captured if captured_ok else None,
+                            captured_mode,
+                        )
+                except Exception:  # noqa: BLE001 - kept and reported below
+                    safe = False
             if safe:
                 _quietly(aside.unlink, missing_ok=True)
                 _quietly(aside.parent.rmdir)

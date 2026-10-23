@@ -3126,6 +3126,40 @@ class MovedAsideCaptureTests(PublishFixture):
 
         self.each_document(body)
 
+    def test_an_unexpected_error_in_the_cleanup_read_still_restores_and_reports(self):
+        # The retry in cleanup must not let an exception it was not written for
+        # skip the restoration or the report of where the capture is.
+        for failure in (MemoryError("no memory"), RuntimeError("unexpected")):
+            def restored(root, path, data, baseline):
+                original = publisher.read_for_write
+
+                def read(target):
+                    if self.in_aside(target):
+                        raise failure
+                    return original(target)
+
+                with mock.patch.object(publisher, "read_for_write", read):
+                    with self.assertRaises(publisher.PublishError) as caught:
+                        publisher.verify_and_write(root, path, baseline, b"new\n")
+                self.assertEqual(caught.exception.status, "internal-error")
+                self.assertEqual((root / path).read_bytes(), data)
+                self.assertEqual(self.temporaries(root), [])
+
+                (root / path).write_bytes(data)
+                with mock.patch.object(publisher, "read_for_write", read), \
+                        mock.patch.object(
+                            publisher, "link_into_place",
+                            side_effect=PermissionError(13, "denied"),
+                        ):
+                    with self.assertRaises(publisher.PublishError) as caught:
+                        publisher.verify_and_write(root, path, baseline, b"new\n")
+                self.assertFalse((root / path).exists())
+                kept = Path(caught.exception.detail["captured_file"])
+                self.assertEqual(kept.read_bytes(), data)
+
+            with self.subTest(failure=type(failure).__name__):
+                self.each_document(restored)
+
     def test_a_failed_install_restores_the_document(self):
         # Already safe before the change; kept so the table covers every step.
         def body(root, path, data, baseline):
