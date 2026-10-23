@@ -18,9 +18,10 @@ control surface, the `/fix` approved-pull-request workflow, the
 housekeeping audit, and the `/autosolve` autonomous solve-and-review loop,
 each rendered
 into both bundles from one authored source by
-`tools/render_command_sources.py`. `/autosolve` is the last of the eight
-commands that arc vendors, so with it every personal copy of a Kanban workflow
-command is retired. It exists so a
+`tools/render_command_sources.py`. `/autosolve` closed that arc, so with it
+every personal copy of a Kanban workflow command is retired, and since issue
+#837 the issue and pull-request commands render from authored sources under
+`tools/command_sources/` too. It exists so a
 clean Claude Code installation can perform these actions without depending on
 any developer's personal command collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for the
