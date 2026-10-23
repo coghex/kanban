@@ -35,7 +35,7 @@ the eight issue and pull-request pairs -- `solve`, `pr-review`, `pr-rereview`,
 `pr-revise`, `issue`, `autoissue`, `issue-review` and `issue-rereview` -- from
 hand-edited copies to authored sources, so sixteen sources render into both
 bundles. The migration added no shipped workflow, so the same class pins
-the shipped sets at twenty-three and twenty-two and pins which registered
+the shipped sets at twenty-two and twenty-one and pins which registered
 source belongs to which kind. Since EXT-2 (issue #717) it holds a third kind
 too, the external `solve` and, since EXT-3 (issue #718), the external
 `autosolve`, which render into the Grok, Kimi, and Google bundles and, since
@@ -62,7 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty-three names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-two names, and Codex's the same set minus
 # Claude-only `draft-issues`. These count the bundle files, not the authored
 # sources: issue #837's migration of eight pairs to sources added no workflow.
 # Pinned as counts and as the one documented
@@ -81,9 +81,10 @@ CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 # which vendored `autosolve` and closed the arc. Issue #685's `auto-project-review`
 # and VEND-4's `project-review` added two more, removed again with that workflow.
 # Issue #829 retired the documentation-landing workflow issue #410 had vendored,
-# which took one from each count.
-SHIPPED_CLAUDE_COUNT = 23
-SHIPPED_CODEX_COUNT = 22
+# which took one from each count. Issue #838 deleted `repair`, taking one more
+# from each.
+SHIPPED_CLAUDE_COUNT = 22
+SHIPPED_CODEX_COUNT = 21
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -697,7 +698,7 @@ class WorkflowVocabularyTests(unittest.TestCase):
         # Non-vacuous: the names a vendored command will really cross-reference
         # are in it, so a literal /solve in a source is refused rather than
         # rendered into a Codex skill.
-        self.assertLessEqual({"solve", "pr-review", "repair"}, vocabulary)
+        self.assertLessEqual({"solve", "pr-review", "pr-revise"}, vocabulary)
 
     def test_a_missing_bundle_directory_raises_rather_than_shrinking(self):
         # The fail-closed half: an empty vocabulary would disable the refusal
@@ -715,12 +716,12 @@ class WorkflowVocabularyTests(unittest.TestCase):
     def test_a_shipped_workflow_written_literally_is_refused_without_a_directive(self):
         # The failure a file-local vocabulary could not see: the author never
         # writes the directive at all, so nothing in the source itself hints
-        # that `repair` is a workflow.
-        source = SYNTHETIC.replace("Trailing paragraph.", "Then hand off to /repair.")
+        # that `pr-revise` is a workflow.
+        source = SYNTHETIC.replace("Trailing paragraph.", "Then hand off to /pr-revise.")
         vocabulary = renderer.workflow_vocabulary(REPO_ROOT)
         with self.assertRaises(renderer.CommandSourceError) as raised:
             render_text(source, "claude", vocabulary=vocabulary)
-        self.assertIn("/repair", str(raised.exception))
+        self.assertIn("/pr-revise", str(raised.exception))
 
 
 class InvocationSigilTests(unittest.TestCase):

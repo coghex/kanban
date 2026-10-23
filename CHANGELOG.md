@@ -15,6 +15,21 @@ created above it.
 
 ### Unreleased
 
+- Removed the `repair` workflow and corrected the bundle text that said the
+  board spawns commands (#838). `fix` is now the only skill that clears what
+  stands between an approved pull request and the merge queue; `/repair` and
+  `$repair`, their tests and every manifest, README and contract mention of them
+  are gone, and `docs/agent-workflow-contract.md` §2.7 is marked removed while
+  §2.9 states on its own the worktree, cross-repository and push rules it used
+  to borrow. `fix`'s origin check now cites the bundled coordinator's
+  `origin_from_body` instead of the removed Haskell `originFromBody`, and its
+  wording no longer claims a spawner chose the brand. Behavior is otherwise
+  unchanged. The Claude and Codex READMEs, manifests and plugin tests, and the
+  Grok, Kimi and Google READMEs, no longer say Kanban's CLI or the board spawns
+  workflow commands; the `HASKELL_PARITY_*` partition keeps its name. Command
+  count words drop to twenty-two (Claude) and twenty-one (Codex).
+  Bundles: Claude 1.82.0, Codex 1.81.0, Grok 1.11.6, Kimi 1.10.6, Google 1.8.6.
+
 - Fixed `publish_coordination_doc.py` deleting the document it had moved aside
   when reading it back failed (#845). Cleanup treated an unread capture as proof
   the rename never happened and unlinked the aside, so an untracked document

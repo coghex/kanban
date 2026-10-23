@@ -29,7 +29,7 @@ EXPECTED_CLASS = {
     "draft-report": "S", "issue-review": "S", "issue-rereview": "S",
     "pr-review": "S", "pr-rereview": "S",
     # A: most work -- implementing, repairing, processing.
-    "solve": "A", "autosolve": "A", "pr-revise": "A", "fix": "A", "repair": "A",
+    "solve": "A", "autosolve": "A", "pr-revise": "A", "fix": "A",
     "process-design-doc": "A", "process-report": "A", "note-problem": "A",
     "backlog-review": "A",
     # B: narrow, well-specified, operational work.

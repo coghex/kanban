@@ -3,12 +3,12 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Guards the packaging promise of issue #77: a clean Claude Code installation
-can add claude-plugin/ as a marketplace and discover exactly the five
-workflows Kanban's dashboard used to invoke by name (/solve, /pr-review, /pr-rereview,
-/pr-revise, /repair), none of which may set its own model/effort/permission-mode/
-working-directory configuration, depend on an untracked personal path, or
-drift from the invocation strings Kanban's own dashboard used to spawn them
-with, which the packaged commands still carry. The bundled coordinator is a
+can add claude-plugin/ as a marketplace and discover the issue-to-pull-request
+workflows (/solve, /pr-review, /pr-rereview, /pr-revise), none of which may set
+its own model/effort/permission-mode/working-directory configuration, depend on
+an untracked personal path, or drift from the invocation strings the board's
+retired agent control once spawned them with, which the packaged commands still
+carry. The bundled coordinator is a
 tracked copy of the Codex plugin's coordinator (issue #76), tested here
 standalone so the Claude bundle's own coverage never requires the Codex
 plugin's assets to exist.
@@ -30,9 +30,10 @@ the /drain-prs drainer control surface, the
 that arc -- the /autosolve autonomous solve-and-review loop. /project-review and
 /auto-project-review were removed again when the guide replaced them.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-three); HASKELL_PARITY_COMMAND_NAMES is the
-strictly smaller set Kanban's own dashboard used to spawn by name (the five
-above; it spawns none now, and the set stays as the packaged partition). The drafting, document, roadmap,
+commands directory (derived from the tree below, not counted here);
+HASKELL_PARITY_COMMAND_NAMES is the strictly smaller set of the four workflows
+above, which the board's retired agent control used to start (the board starts
+none now, and the set stays as the packaged partition). The drafting, document, roadmap,
 backlog-audit, drainer-control, approved-pull-request,
 manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
 workflows
@@ -52,14 +53,9 @@ bundle ships. The version gate is silent on an untouched tree by construction,
 so PlantedBundleVersionGateTests drives it against a throwaway Git repository
 rather than trusting it to fire.
 
-Issue #125 packaged /repair ahead of the key that spawns it, so it briefly
-formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
-Done-column repair branch, so /repair belongs in HASKELL_PARITY_COMMAND_NAMES
-with the rest; that third category is gone and discovery-minus-parity is the
-user-invoked set again. The dashboard no longer spawns any of them (the agent
-execution layer was removed), and the set stays as the partition it always
-was. See tools/test_repair_workflow_contract.py for
-/repair's own behavioral contract.
+The `repair` command was packaged by issue #125 and removed by issue #838, which keeps /fix
+as the one skill that clears what stands between an approved pull request and
+the merge queue.
 """
 
 from __future__ import annotations
@@ -122,13 +118,13 @@ CODEX_ROSTER_READER = (
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, which the coordinator's probe is held to.
 
-# The workflows Kanban's own dashboard used to spawn by name, kept as the
-# partition between them and the user- or daemon-invoked rest of the bundle.
-HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
+# The issue-to-pull-request workflows the board's retired agent control used to
+# start by name, kept as the partition between them and the rest of the bundle.
+HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
 
 # The drafting and canonical issue-review workflows vendored by issue #118,
 # plus the issue-rereview repair loop vendored by issue #240. User- or
-# daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# daemon-invoked, never started by the board, so they are packaged
 # and policy-checked but excluded from the parity set above.
 DRAFTING_COMMAND_NAMES = {
     "issue",
@@ -156,7 +152,7 @@ CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 
 # The roadmap workflows vendored by issues #393 and #427, slices VEND-1 and
 # VEND-2 of docs/designs/workflow_command_vendoring_design.md. Like the parity and
-# drafting sets above -- all but `repair` and Claude-only `draft-issues` --
+# drafting sets above -- all but Claude-only `draft-issues` --
 # neither is a hand-edited file: each is rendered from its own source under
 # tools/command_sources/ by tools/render_command_sources.py, and
 # tools/test_render_command_sources.py byte-compares the tracked outputs
@@ -188,12 +184,11 @@ DRAINER_COMMAND_NAMES = {"drain-prs"}
 
 # The approved-pull-request obstacle clearer. Rendered from
 # tools/command_sources/fix.md the way the five sets above are, and like them
-# user-invoked and excluded from Haskell name parity: Kanban's own CLI spawns
-# repair for a Done-column card, never this. It is its own category rather
-# than another repair name because it acts only on an already-approved pull
-# request, and because it gates on an origin marker and a merge state no other
-# workflow reads. It never reruns a check: tools/drain_prs.py owns that, and
-# repair holds the same prohibition. Its behavioral assertions live in
+# user-invoked and excluded from Haskell name parity. It is its own category
+# rather than another pull-request name because it acts only on an
+# already-approved pull request, and because it gates on an origin marker and a
+# merge state no other workflow reads. It never reruns a check:
+# tools/drain_prs.py owns that. Its behavioral assertions live in
 # tools/test_fix_workflow_contract.py.
 PULL_REQUEST_FIX_COMMAND_NAMES = {"fix"}
 
@@ -226,8 +221,9 @@ JANITOR_COMMAND_NAMES = {"janitor"}
 # and the eighth and last of the arc's commands: with it every personal copy of
 # a Kanban workflow command is retired. Rendered from
 # tools/command_sources/autosolve.md the way the eight sets above are, and like
-# them user-invoked and excluded from the parity set -- Kanban's own dashboard
-# spawned /solve and /pr-review directly and never this loop over them. It is its own category rather than another solve or review name for the
+# them user-invoked and excluded from the parity set -- the board's retired
+# agent control started /solve and /pr-review directly and never this loop over
+# them. It is its own category rather than another solve or review name for the
 # reason it is excluded from parity at all: it performs neither job itself. It
 # delegates the implementation to /solve and the verdict to /pr-review and
 # /pr-rereview, and what it contributes is the loop and the prohibitions --
@@ -252,7 +248,7 @@ EXPECTED_COMMAND_NAMES = (
 
 # Keys that would let a packaged command's frontmatter or manifest silently
 # override the model, reasoning effort, permission mode, or working
-# directory Kanban's own CLI spawn already pins
+# directory the session was started with
 # (docs/agent-workflow-contract.md §2.1-§2.2). Claude Code's own command
 # frontmatter genuinely supports `model:` (see the personal
 # ~/.claude/commands/pr-revise.md this issue replaces, which set
@@ -379,8 +375,8 @@ class CommandDiscoveryTests(unittest.TestCase):
 
     def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
         # The two concepts must stay distinct: discovery covers every packaged
-        # workflow, while HASKELL_PARITY_COMMAND_NAMES is only the ones
-        # Kanban's dashboard used to spawn. Collapsing them back into one
+        # workflow, while HASKELL_PARITY_COMMAND_NAMES is only the ones the
+        # board's retired agent control used to start. Collapsing them back into one
         # constant would silently stop discovering the drafting, document, and
         # roadmap commands.
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
@@ -446,7 +442,7 @@ class CommandDiscoveryTests(unittest.TestCase):
         # The autosolve loop is disjoint from every other category AND from the
         # Haskell parity set, which the eight checks above do not need to say:
         # it is the one vendored command whose name could plausibly belong to
-        # the set Kanban's own CLI spawns, since /solve is in that set and this
+        # the issue-to-pull-request set, since /solve is in that set and this
         # wraps it.
         self.assertEqual(
             AUTOSOLVE_COMMAND_NAMES
@@ -474,14 +470,11 @@ class CommandDiscoveryTests(unittest.TestCase):
                 "counterpart is new behavior no pinned source defines",
             )
 
-    def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
-        # Kanban's `r` spawns /repair for a red Done card (issue #127), so it
-        # is pinned by parity like the other spawned workflows — and it is
-        # still not part of the declared drafting surface
-        # docs/drafting-workflow-contract.md and
-        # tools/test_drafting_workflow_contract.py pin at exactly nine assets.
-        self.assertIn("repair", HASKELL_PARITY_COMMAND_NAMES)
-        self.assertNotIn("repair", DRAFTING_COMMAND_NAMES)
+    def test_repair_is_not_packaged(self):
+        # Issue #838 removed the `repair` command: /fix is the one skill that clears what
+        # stands between an approved pull request and the merge queue.
+        self.assertNotIn("repair", EXPECTED_COMMAND_NAMES)
+        self.assertFalse((COMMANDS_ROOT / "repair.md").exists())
 
     def test_each_command_declares_a_description_and_no_forbidden_frontmatter(self):
         for name in EXPECTED_COMMAND_NAMES:
@@ -900,7 +893,7 @@ def roster_cell(source: str, section: str) -> dict:
 
 class NestedReviewerModelPinningTests(unittest.TestCase):
     """Round-2 review finding: unlike the self-reviewed known-origin case
-    (where Kanban's own top-level spawn pins the model outside this
+    (where the session's own launch pins the model outside this
     coordinator's visibility), invoke_codex/invoke_claude fully construct
     the nested-reviewer subprocess call for /pr-revise's cross-brand
     handoff and the dual-review fallback, so they can and must pin and
@@ -1038,8 +1031,8 @@ class ClaudePluginRootReferenceTests(unittest.TestCase):
     """All three PR-flow commands locate the bundled coordinator via
     ${CLAUDE_PLUGIN_ROOT}, the portable path Claude Code substitutes to this
     plugin's own install location regardless of the invoking working
-    directory (Kanban spawns these commands with the *reviewed* repository
-    as the working directory, not this plugin's own install location)."""
+    directory (these commands run with the *reviewed* repository as the
+    working directory, not this plugin's own install location)."""
 
     def test_pr_review_family_locates_the_coordinator_via_claude_plugin_root(self):
         for name in ("pr-review", "pr-rereview", "pr-revise"):
@@ -1051,7 +1044,7 @@ class ClaudePluginRootReferenceTests(unittest.TestCase):
             )
 
     def test_every_rereview_handoff_preserves_standalone_pr_contracts(self):
-        for name in ("pr-rereview", "pr-revise", "repair"):
+        for name in ("pr-rereview", "pr-revise"):
             text = (COMMANDS_ROOT / f"{name}.md").read_text(encoding="utf-8")
             command_blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
             expected_actions = ("--rereview", "--publish-verdict") if name == "pr-rereview" else ("--rereview",)
@@ -1601,12 +1594,12 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.assertEqual(len(self.failures()), 1)
 
     def test_a_staged_addition_counts_as_content(self):
-        added = self.root / COMMANDS_PREFIX / "repair.md"
+        added = self.root / COMMANDS_PREFIX / "extra.md"
         added.write_text("---\ndescription: new\n---\n", encoding="utf-8")
         self.git("add", str(added))
         failures = self.failures()
         self.assertEqual(len(failures), 1)
-        self.assertIn(f"{COMMANDS_PREFIX}/repair.md", failures[0])
+        self.assertIn(f"{COMMANDS_PREFIX}/extra.md", failures[0])
 
     def test_a_tracked_deletion_counts_as_content(self):
         self.git("rm", "-q", str(self.command))
@@ -1648,7 +1641,7 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
 class ManifestListingParityTests(unittest.TestCase):
     """Both manifest descriptions enumerate the workflows this bundle ships,
     and both had stopped at the eight commands that existed before
-    /process-report and /repair were packaged. The shipped set is derived
+    /process-report was packaged. The shipped set is derived
     from the tracked command files rather than restated as a constant, so
     vendoring a command without describing it fails here."""
 

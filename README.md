@@ -174,7 +174,7 @@ through the executable's own lifecycle.
 ## Optional workflow skills
 
 The tracked skills — canonical issue review and the
-`solve`/`pr-review`/`pr-rereview`/`pr-revise`/`repair` workflow bundles, among
+`solve`/`pr-review`/`pr-rereview`/`pr-revise` workflow bundles, among
 others — run in your own Codex or Claude session, not from the board. Having
 Codex or Claude installed and signed in is necessary but not sufficient: the
 canonical issue-review backend and the Kanban-owned workflow bundles have to be

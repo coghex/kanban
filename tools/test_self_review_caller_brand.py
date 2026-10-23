@@ -475,10 +475,8 @@ SELF_REVIEW_RECOVERY_ASSETS = (
 # asset in both bundles would have to pass here too, which it cannot.
 SELF_REVIEW_DELEGATING_ASSETS = (
     "claude-plugin/plugins/kanban/commands/pr-revise.md",
-    "claude-plugin/plugins/kanban/commands/repair.md",
     "claude-plugin/plugins/kanban/commands/fix.md",
     "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/repair/SKILL.md",
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
 )
 

@@ -4,8 +4,8 @@ This directory is a Grok marketplace, tracked in this repository, that
 packages the Grok-side `/solve` and `/autosolve` workflows. A Grok session
 opens a pull request whose body ends with `<!-- pr-origin:grok -->`. Dual-mode
 review of that origin is Codex only — never Claude, and never both brands.
-Grok is not a Kanban-spawned provider: the board refuses revision and repair
-of a grok-origin pull request, so `/autosolve` revises in the same Grok
+Grok is not a provider the review workflows can spawn: they refuse revision
+and repair of a grok-origin pull request, so `/autosolve` revises in the same Grok
 session and asks the bundled coordinator to spawn Codex.
 
 See [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
