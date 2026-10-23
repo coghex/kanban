@@ -1665,7 +1665,20 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
                 f"{document} does not exist under {root}, so the applied "
                 "disposition cannot be verified",
             )
-        return target.read_text(encoding="utf-8", errors="replace")
+        data = target.read_bytes()
+        # The bytes resolution is verified against are the bytes the helper
+        # applied: the permission was decided before slow checks, and a hand
+        # edit made since is not the disposition's evidence.
+        applied = ref_value(root, applied_ref(record["repository"], document))
+        held = git_out(["hash-object", "--stdin"], cwd=root, input_bytes=data)
+        if not applied or held != applied:
+            raise TransactionError(
+                "local-resolution-refused",
+                f"{document} is not the content the approved-document helper "
+                "applied, so it has been changed since the permission was decided; "
+                "the record is kept",
+            )
+        return data.decode("utf-8", errors="replace")
     fresh = fetched_tip(root, branch)
     proc = git(["show", f"{fresh}:{document}"], cwd=root, check=False)
     if proc.returncode != 0:

@@ -1926,6 +1926,41 @@ class LocalCheckpointTests(RecordSeedingMixin, ApprovedFixture):
         self.assertEqual(self.resume()["status"], "published")
         self.assertEqual(self.preflight()["status"], "clear")
 
+    def edited_during_the_permission_check(self):
+        """A hand edit adding the terminal entry lands after the permission was
+        decided and before the document is read for resolution."""
+        real = tracker.local_resolution_permitted
+
+        def permitted_then_edited(*args, **kwargs):
+            result = real(*args, **kwargs)
+            self.fx.write(self.fx.work, self.STATUS)
+            return result
+
+        return unittest.mock.patch.object(tracker, "local_resolution_permitted", permitted_then_edited)
+
+    def test_a_hand_edit_after_the_permission_is_decided_does_not_resolve_a_pending_attempt(self):
+        ref = self.confirmed_transaction()
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["status"], "incomplete-publication")
+        with self.edited_during_the_permission_check():
+            with self.assertRaises(tracker.TransactionError) as caught:
+                self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
+    def test_a_hand_edit_after_the_permission_is_decided_does_not_resolve_a_legacy_record(self):
+        ref = self.confirmed_transaction()
+        publisher.publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=EDITED.encode(), message="legacy", expected_working_copy=blob_of(NOTES),
+        )
+        self.assertEqual(self.fx.applied(), blob_of(EDITED))
+        with self.edited_during_the_permission_check():
+            with self.assertRaises(tracker.TransactionError) as caught:
+                self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
     def test_a_missing_tool_leaves_the_content_and_the_record_and_no_mutation_repeats(self):
         ref = self.confirmed_transaction()
         self.remove_tool()

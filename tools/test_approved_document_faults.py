@@ -662,7 +662,8 @@ class HandoffFaults(FaultFixture):
 
     def test_T17_a_recorded_child_is_classified_by_pid_start_time_and_argv(self):
         child = {"pid": 4242, "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push", "x"]}
-        running = {"state": "running", "host": "h", "argv": child["argv"], "child": child, "result": None}
+        running = {"state": "running", "host": approved.socket.gethostname(),
+                   "argv": child["argv"], "child": child, "result": None}
         cases = (
             ("the same live process", {"start": child["start"], "args": "docs-push x"}, "live"),
             ("a reused pid, new start time", {"start": "Fri Oct 23 11:00:00 2026", "args": "other"}, "gone"),
@@ -1469,6 +1470,25 @@ class ReworkRoundFive(FaultFixture):
             permitted, why = tracker.local_resolution_permitted(self.fx.work, record, "master")
         self.assertFalse(permitted)
         self.assertIn("landed", why)
+
+    def test_a_handoff_from_another_host_is_unknown_until_the_operator_says_otherwise(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        elsewhere = dict(record["handoff"], host="another-machine.example", state="running", child={
+            "pid": 2**22 + 55, "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push"],
+        })
+        self.reseed(record, handoff=elsewhere)
+        with unittest.mock.patch.object(approved, "process_identity", lambda pid: None):
+            self.assertEqual(approved.child_state(elsewhere), "unknown")
+            calls = len(self.calls())
+            self.mode("land")
+            outcome = self.resume()
+            self.assertEqual(outcome["reason"], "tool-child-not-quiescent")
+            self.assertEqual(len(self.calls()), calls)
+            self.assertIsNotNone(self.fx.pending())
+            report = self.preflight()
+            self.assertEqual(report["handoff"]["child"], "unknown")
 
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])

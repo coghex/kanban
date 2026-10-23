@@ -1985,6 +1985,10 @@ def child_state(handoff: dict | None) -> str:
         return "none"
     if handoff["state"] == "finished":
         return "gone"
+    if handoff.get("host") != socket.gethostname():
+        # A process that is absent here says nothing about one on the machine
+        # that started it (a shared or recovered Git directory).
+        return "unknown"
     if (handoff.get("result") or {}).get("unresolved"):
         # The tool's own process ended but what it started was not known to be
         # gone: only the operator can say it is.
