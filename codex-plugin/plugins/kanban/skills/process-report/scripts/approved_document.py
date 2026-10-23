@@ -1335,6 +1335,26 @@ def finish_capture(root: Path, pending: dict, inspected: dict) -> dict:
     """Remove this attempt's leftovers and clear its descriptor. Only called once
     the actual captured bytes are restored, rooted or known equal to the rooted
     baseline; a leftover that cannot be removed keeps the descriptor."""
+    # An editor that still holds the original file descriptor can write to the
+    # captured inode at any time, so the bytes that were verified restored or
+    # rooted are looked at once more immediately before they are unlinked. Bytes
+    # that changed since are rooted and kept, and the capture stops.
+    verified_state, verified_blob = inspected["aside"]
+    if verified_state == "file":
+        state, blob = file_state(inspected["aside_path"])
+        if state != "absent" and (state, blob) != ("file", verified_blob):
+            if state == "file":
+                pending = root_capture(
+                    root, pending,
+                    preserve_captured(root, Path(inspected["aside_path"]).read_bytes()),
+                )
+            raise capture_stop(
+                "capture-changed",
+                f"the captured {pending['document']} changed after its bytes were "
+                "verified; the captured file is kept and what it holds now is "
+                "rooted, and nothing is removed until it is reconciled",
+                inspected | {"aside": (state, blob)}, pending,
+            )
     leftovers = []
     for path in (inspected["aside_path"], inspected["scratch_path"]):
         try:

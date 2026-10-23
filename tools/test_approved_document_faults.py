@@ -1586,6 +1586,67 @@ class ReworkRoundFive(FaultFixture):
                          {k: v for k, v in before.items() if k != "origin"})
         self.assertFalse((self.fx.work / DOC).exists())
 
+    def holding_the_original(self):
+        """A descriptor on the document's inode, as an editor that has the file open keeps."""
+        handle = open(self.fx.work / DOC, "r+b")
+        self.addCleanup(handle.close)
+
+        def write_late():
+            handle.seek(0)
+            handle.write(b"LATE EDIT THROUGH THE OPEN DESCRIPTOR\n")
+            handle.flush()
+
+        return write_late
+
+    def test_a_write_through_an_open_descriptor_before_installation_is_kept(self):
+        late = self.holding_the_original()
+        real = approved.link_into_place
+
+        def late_then_install(source, target):
+            late()
+            return real(source, target)
+
+        with unittest.mock.patch.object(approved, "link_into_place", late_then_install):
+            error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "capture-changed")
+        asides = sorted((self.fx.work / "docs").glob(".kanban-attempt-*/aside"))
+        self.assertEqual(len(asides), 1)
+        held = asides[0].read_bytes()
+        self.assertTrue(held.startswith(b"LATE EDIT THROUGH THE OPEN DESCRIPTOR\n"))
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertIsNotNone(record["capture"])
+        self.assertIn(approved.git_blob_hash(held), record["payloads"].values())
+        run(["git", "reflog", "expire", "--expire=now", "--all"], self.fx.work)
+        run(["git", "gc", "-q", "--prune=now"], self.fx.work)
+        run(["git", "cat-file", "-e", approved.git_blob_hash(held)], self.fx.work)
+
+    def test_a_write_through_an_open_descriptor_during_recovery_is_kept(self):
+        late = self.holding_the_original()
+        real_rename = approved.rename_aside
+
+        def crash_after_rename(target, aside):
+            real_rename(target, aside)
+            raise base.SimulatedCrash("rename_aside")
+
+        with unittest.mock.patch.object(approved, "rename_aside", crash_after_rename):
+            with self.assertRaises(base.SimulatedCrash):
+                self.approve(EDITED)
+        real_finish = approved.finish_capture
+
+        def late_then_finish(root, pending, inspected):
+            late()
+            return real_finish(root, pending, inspected)
+
+        with unittest.mock.patch.object(approved, "finish_capture", late_then_finish):
+            error = self.failure(self.resume)
+        self.assertEqual(error.status, "capture-changed")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        self.assertIsNotNone(record["capture"])
+        kept = [p.read_bytes() for p in (self.fx.work / "docs").glob(".kanban-attempt-*/aside")]
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0].startswith(b"LATE EDIT"))
+        self.assertIn(approved.git_blob_hash(kept[0]), record["payloads"].values())
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)
