@@ -2417,6 +2417,26 @@ def published_outcome(
 # ----------------------------------------------------------------- sequence --
 
 
+def unquiet_tool(
+    root: Path, owner: str, branch: str, pending: dict, operator_quiescent: bool
+) -> dict | None:
+    """The incomplete-publication outcome that refuses a recovery write while the
+    recorded tool child is live or unknown (unknown only unless the operator has
+    confirmed quiescence), or None when nothing owed a wait remains."""
+    children = child_state(pending["handoff"])
+    if children == "live" or (children == "unknown" and not operator_quiescent):
+        return incomplete(
+            root, owner, branch, pending, reason="tool-child-not-quiescent",
+            message=f"the earlier {TOOL} child is {children}; the document is not "
+            "written beside it",
+            next_action="establish that the recorded child has exited (a reused "
+            "pid is not the child), then resume; --operator-quiescent confirms "
+            "it when the identity was never recorded or the host differs",
+            reachable=None,
+        )
+    return None
+
+
 def publish_recorded(
     root: Path, owner: str, branch: str, document: str, pending: dict,
     *, resumed: str | None, operator_quiescent: bool = False,
@@ -2446,17 +2466,9 @@ def publish_recorded(
         )
     if pending["handoff"] is not None:
         # A retry: the tool already ran (or may have) and nothing landed.
-        children = child_state(pending["handoff"])
-        if children == "live" or (children == "unknown" and not operator_quiescent):
-            return incomplete(
-                root, owner, branch, pending, reason="tool-child-not-quiescent",
-                message=f"the earlier {TOOL} child is {children}; a second tool "
-                "cannot be started beside it",
-                next_action="establish that the recorded child has exited (a reused "
-                "pid is not the child), then resume; --operator-quiescent confirms "
-                "it when the identity was never recorded",
-                reachable=None,
-            )
+        blocked = unquiet_tool(root, owner, branch, pending, operator_quiescent)
+        if blocked is not None:
+            return blocked
         gate = retry_gate(owner, branch)
         if not gate["ok"]:
             return incomplete(
@@ -2517,6 +2529,9 @@ def resume_pending(
             pending_ref=pending["ref"],
         )
     if pending["capture"] is not None:
+        blocked = unquiet_tool(root, owner, branch, pending, operator_quiescent)
+        if blocked is not None:
+            return blocked
         pending = recover_capture(root, pending)
     pending, info = confirm_landing(root, branch, pending)
     if pending["approved_blob"] != approved_blob:
@@ -2573,6 +2588,11 @@ def resume_pending(
         # as it was. The original stays rooted in the replacement.
         pending = rewrite_pending(root, pending, branch=branch, root_id=root)
     if current != approved_blob:
+        # A write to the document alongside a tool that may still be running
+        # would race it; quiescence comes before any recovery write.
+        blocked = unquiet_tool(root, owner, branch, pending, operator_quiescent)
+        if blocked is not None:
+            return blocked
         pending = apply_over_baseline(root, pending, content)
         resumed = "applied-on-resume"
     record_applied_content(root, owner, pending)

@@ -1518,7 +1518,7 @@ def pending_publication_ref(repository: str, document: str) -> str:
     return f"{PENDING_PUBLICATION_NAMESPACE}/{record_key(repository, document)}"
 
 
-def local_resolution_permitted(root: Path, record: dict, branch: str):
+def local_resolution_permitted(root: Path, record: dict, branch: str, decided: dict | None = None):
     """Whether this document may be resolved against the working tree, and why
     not when it may not.
 
@@ -1546,12 +1546,15 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     The permission is derived rather than asserted: the caller says which source
     it wants, and this decides whether that source is admissible. The branch is
     fetched first, so "not landed" is a statement about the branch now rather
-    than about a cached ref.
+    than about a cached ref. When `decided` is given it receives the applied blob
+    the decision was made for, which resolution must then be held to.
     """
     fresh = fetched_tip(root, branch)
     document = record["document"]
     applied = applied_ref(record["repository"], document)
     recorded = ref_value(root, applied)
+    if decided is not None:
+        decided["applied"] = recorded
     if not recorded:
         return False, (
             f"the approved-document helper never applied a disposition to "
@@ -1646,7 +1649,9 @@ def publication_obligation(root: Path, record: dict) -> dict:
     }
 
 
-def published_document(root: Path, record: dict, source: str, branch: str) -> str:
+def published_document(
+    root: Path, record: dict, source: str, branch: str, applied: str | None = None
+) -> str:
     """The bytes resolution is verified against.
 
     `branch` is the ordinary case: the published document as the remote
@@ -1669,9 +1674,9 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
         # The bytes resolution is verified against are the bytes the helper
         # applied: the permission was decided before slow checks, and a hand
         # edit made since is not the disposition's evidence.
-        applied = ref_value(root, applied_ref(record["repository"], document))
+        current = ref_value(root, applied_ref(record["repository"], document))
         held = git_out(["hash-object", "--stdin"], cwd=root, input_bytes=data)
-        if not applied or held != applied:
+        if not current or held != current or (applied is not None and current != applied):
             raise TransactionError(
                 "local-resolution-refused",
                 f"{document} is not the content the approved-document helper "
@@ -1869,7 +1874,8 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
             **transaction_report(record, ref, observed),
         )
     if source == "local":
-        permitted, why = local_resolution_permitted(root, record, branch)
+        decided = {}
+        permitted, why = local_resolution_permitted(root, record, branch, decided)
         if not permitted:
             raise TransactionError(
                 "local-resolution-refused",
@@ -1878,7 +1884,9 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
                 source=source,
                 **transaction_report(record, ref, observed),
             )
-    text = published_document(root, record, source, branch)
+    text = published_document(
+        root, record, source, branch, decided.get("applied") if source == "local" else None
+    )
     tokens = required_document_tokens(record)
     entry_key = record["entry_key"]
     fault, lines = resolution_fault(record, text)

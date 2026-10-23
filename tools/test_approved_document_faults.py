@@ -1490,6 +1490,51 @@ class ReworkRoundFive(FaultFixture):
             report = self.preflight()
             self.assertEqual(report["handoff"]["child"], "unknown")
 
+    def test_no_recovery_write_happens_beside_a_child_that_may_still_run(self):
+        self.mode("leaves-child")
+        pid_file = self.child_pid_file()
+        with unittest.mock.patch.object(approved, "DESCENDANT_GRACE_SECONDS", 1):
+            outcome = self.approve(EDITED)
+        self.assertEqual(outcome["reason"], "tool-not-quiescent")
+        os.kill(int(pid_file.read_text()), 0)
+        # The operator puts the baseline back; the recorded descendant is still alive.
+        self.fx.write(self.fx.work, NOTES)
+        calls = len(self.calls())
+        self.mode("land")
+        blocked = self.resume()
+        self.assertEqual(blocked["reason"], "tool-child-not-quiescent")
+        self.assertEqual(self.fx.read(self.fx.work), NOTES)
+        self.assertEqual(len(self.calls()), calls)
+        # With the operator's confirmation the recovery write and the tool go ahead.
+        final = approved.apply_and_publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=None, operator_quiescent=True,
+        )
+        self.assertEqual(final["status"], "published", final)
+        self.assertEqual(len(self.calls()), calls + 1)
+
+    def test_no_recovery_write_happens_beside_a_live_recorded_child(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        live = dict(record["handoff"], state="running", child={
+            "pid": os.getpid(), "start": "Fri Oct 23 10:00:00 2026", "argv": ["docs-push"],
+        })
+        self.reseed(record, handoff=live)
+        self.fx.write(self.fx.work, NOTES)
+        identity = {"start": "Fri Oct 23 10:00:00 2026", "args": "docs-push"}
+        calls = len(self.calls())
+        with unittest.mock.patch.object(approved, "process_identity", lambda pid: identity):
+            for quiescent in (False, True):
+                with self.subTest(operator_quiescent=quiescent):
+                    outcome = approved.apply_and_publish(
+                        repository=REPOSITORY, branch="master", root=self.fx.work,
+                        document=DOC, content=None, operator_quiescent=quiescent,
+                    )
+                    self.assertEqual(outcome["reason"], "tool-child-not-quiescent")
+                    self.assertEqual(self.fx.read(self.fx.work), NOTES)
+                    self.assertEqual(len(self.calls()), calls)
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

@@ -1961,6 +1961,28 @@ class LocalCheckpointTests(RecordSeedingMixin, ApprovedFixture):
         self.assertEqual(caught.exception.status, "local-resolution-refused")
         self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
 
+    def test_the_applied_blob_that_was_checked_is_the_one_resolution_is_held_to(self):
+        ref = self.confirmed_transaction()
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["status"], "incomplete-publication")
+        real = tracker.local_resolution_permitted
+        other = self.STATUS
+
+        def swapped_after_deciding(*args, **kwargs):
+            result = real(*args, **kwargs)
+            # The applied record and the document move together to content whose
+            # landing was never examined, so the working copy still matches.
+            stored = approved._preserve(self.fx.work, other.encode())
+            run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), stored], self.fx.work)
+            self.fx.write(self.fx.work, other)
+            return result
+
+        with unittest.mock.patch.object(tracker, "local_resolution_permitted", swapped_after_deciding):
+            with self.assertRaises(tracker.TransactionError) as caught:
+                self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
     def test_a_missing_tool_leaves_the_content_and_the_record_and_no_mutation_repeats(self):
         ref = self.confirmed_transaction()
         self.remove_tool()

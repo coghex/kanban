@@ -1013,7 +1013,10 @@ and every `T-NN` row of that design is a named regression in
    another start time is not the child; a missing identity, a changed argv or a
    failed inspection is unknown, and so is an exited leader whose group still
    has members, including after a crash between the tool's exit and the check) A handoff that names another host is
-   unknown whatever this machine can see of its pid.
+   unknown whatever this machine can see of its pid. Quiescence is established before
+   any recovery write to the document or the capture (an unknown child needs
+   `--operator-quiescent`, a live one is never overridden), not only before the
+   tool is started again.
    The tool is started as the leader of its own process group; the
    capability probe, the marker and then the last check of the index entry and
    the document's bytes all precede the spawn, in that order, and a refused
@@ -1434,8 +1437,9 @@ tool child not known to have exited, a pending attempt recorded for another
 branch than the one asked about, or any unreadable evidence refuses. The branch is
 read after those checks, so a child that lands while it is being established to
 have exited is seen. The bytes then verified are the bytes read for
-resolution, hashed and held to the applied blob after those slow checks, so a hand
-edit made meanwhile refuses. For a
+resolution, hashed and held to the applied blob whose landing was checked (the
+blob the decision names, not whatever the reference holds by then), so a hand
+edit or a replaced applied record made meanwhile refuses. For a
 legacy applied-only record, which has no recorded tip, the tracker searches the
 branch's complete reachable history for the applied blob and any occurrence
 refuses — deliberately broader than a pending attempt's interval, and never used
