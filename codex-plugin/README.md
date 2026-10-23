@@ -330,9 +330,11 @@ issue-rereview skills name, the `$CODEX_HOME` cache root `$issue-rereview`
 searches for its vendored helper,
 the `git`/`awk`/`gh` commands the document skills resolve their
 docs worktree and tracker state with, and the external-command surface of all
-eight bundled Python assets — the review coordinator and its model-roster
+ten bundled Python assets — the review coordinator and its model-roster
 reader, `$solve`'s trusted-comment helper, the three document-workflow
-modules, and the janitor census with the configuration module beside it.
+modules, the janitor census with the configuration module beside it, and the
+two copies of the head-bound approval helper that `$fix` and `$finalize` each
+carry beside their `SKILL.md`.
 
 `tools/test_drafting_workflow_contract.py` reconciles the four drafting skills
 against the responsibility matrix in

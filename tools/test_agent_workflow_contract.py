@@ -215,6 +215,8 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
+    "codex-plugin/plugins/kanban/skills/fix/scripts/pr_head_approval.py",
+    "codex-plugin/plugins/kanban/skills/finalize/scripts/pr_head_approval.py",
 ]
 
 # The tracked Claude plugin's own packaged workflows (issue #77): the same
@@ -255,6 +257,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
+    "claude-plugin/plugins/kanban/scripts/pr_head_approval.py",
 ]
 
 GROK_PLUGIN_SURFACE_FILES = [
@@ -307,6 +310,19 @@ TRUSTED_SPEC_SURFACE_FILES = {
     "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
+}
+
+# Issue #842's bundled head-bound approval helper, covered exactly the way the
+# trusted-comment helper above is. `fix` and `finalize` both run it, so each
+# bundle carries a byte-identical copy (the Codex bundle one beside each caller)
+# and each copy's own external commands are reconciled against the manifest
+# rather than inheriting the tracked original's row. It reads GitHub through `gh`
+# and spawns nothing else, which is the pin: a later edit that made it shell out
+# to anything more would have to declare it here.
+APPROVAL_HELPER_SURFACE_FILES = {
+    "codex-plugin/plugins/kanban/skills/fix/scripts/pr_head_approval.py": {"gh"},
+    "codex-plugin/plugins/kanban/skills/finalize/scripts/pr_head_approval.py": {"gh"},
+    "claude-plugin/plugins/kanban/scripts/pr_head_approval.py": {"gh"},
 }
 
 # Issue #841's issue-review backend resolver: one tools/ source and ten
@@ -519,22 +535,21 @@ FIX_SURFACE_EXPECTED_COMMANDS = {
     },
 }
 
-# Issue #544's manual merge fallback, pinned as one shared set the way the
-# rendered pairs above are, because its two assets differ only in argument
-# convention and sigil: it resolves nothing under $CODEX_HOME and needs no
-# `find`/`head` search, so the fix asymmetry has no counterpart here. `gh` is
-# every GitHub call it makes -- the authenticated-user lookup, the pull-request
-# read, the paginated comment feed, the check listing, the merge, the
-# merged-state confirmation, the three cleanup reads, and the linked issue's
-# close. `git` is the primary checkout's own worktree listing, the remote URL
+# Issue #544's manual merge fallback, pinned per brand the way the fix pair is,
+# since issue #842: the Codex rendering locates its bundled approval helper with
+# a `find`/`head` search under $CODEX_HOME, while the Claude rendering reads
+# ${CLAUDE_PLUGIN_ROOT} and needs neither program. `gh` is every GitHub call the
+# workflow itself makes -- the pull-request read, the check listing, the
+# default-branch lookup, the merge, the merged-state confirmation, the three
+# cleanup reads, and the linked issue's close; the authenticated-user lookup and
+# the paginated comment feed are the bundled helper's now, and are pinned on its
+# own row. `git` is the primary checkout's own worktree listing, the remote URL
 # the repository identity is reduced from, and the post-merge cleanup; `sed`
-# performs both of those reductions; and `python3` is the review-marker gate,
-# which decides against JSON those `gh` reads already returned rather than
-# making a request of its own. `mktemp` and `rm` are the gate's: it reads the
-# paginated comment feed through a temporary file outside the checkout and
-# removes it, because that feed is the one input growing without bound and an
-# argument long enough to carry it exceeds the system limit -- on exactly the
-# long pull requests the pagination exists to read. `grep` is the one exact-match
+# performs both of those reductions; and `python3` is both the bundled approval
+# helper's invocation and the readiness checks, which decide against JSON those
+# `gh` reads already returned rather than making a request of their own. The
+# gate writes no scratch file any more -- the comment feed never reaches it -- so
+# neither `mktemp` nor `rm` is among its commands. `grep` is the one exact-match
 # test the cleanup makes -- is the primary checkout on this pull request's base
 # branch? -- and this pair is that row's first packaged consumer. `awk` reads
 # the `git worktree list --porcelain` record properly, so the merged pull
@@ -546,19 +561,17 @@ FINALIZE_SURFACE_EXPECTED_COMMANDS = {
         "gh",
         "git",
         "grep",
-        "mktemp",
         "python3",
-        "rm",
         "sed",
     },
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md": {
         "awk",
+        "find",
         "gh",
         "git",
         "grep",
-        "mktemp",
+        "head",
         "python3",
-        "rm",
         "sed",
     },
 }
@@ -1716,6 +1729,32 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
 
+    def test_the_bundled_approval_helper_is_scanned_and_declared(self):
+        # Issue #842's counterpart of the pins around it. Each copy is a member
+        # of its brand's surface list, so its commands are already reconciled
+        # against the manifest; what this adds is that dropping one from a list
+        # fails a test rather than silently un-scanning a bundled asset, and that
+        # the extractor really recovers `gh` from it.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        self.assertEqual(len(APPROVAL_HELPER_SURFACE_FILES), 3)
+        for relative_path, expected in sorted(APPROVAL_HELPER_SURFACE_FILES.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
     def test_every_issue_review_resolver_is_scanned_and_spawns_nothing(self):
         # Issue #841's counterpart of the trusted-spec pin above, for the
         # resolver the fourteen workflow assets now call instead of embedding.
@@ -2374,31 +2413,32 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     row["id"],
                     {
                         "awk-cli",
+                        "find-cli",
                         "gh-cli",
                         "git-cli",
                         "grep-cli",
-                        "mktemp-cli",
+                        "head-cli",
                         "python3-cli",
-                        "rm-cli",
                         "sed-cli",
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
-    def test_the_two_finalize_renderings_reach_the_same_commands(self):
-        # One source, two renders: the sets are equal by construction, so
-        # pinning that equality is what catches a brand block that grew a
-        # command on one side only.
+    def test_the_two_finalize_renderings_differ_only_by_the_helper_search(self):
+        # One source, two renders: the sets are equal by construction except
+        # for the one asymmetry the brand blocks carry, which is how each
+        # rendering finds its bundled approval helper. Pinning the difference as
+        # exactly that is what catches a brand block that grew some other command
+        # on one side only.
         claude = FINALIZE_SURFACE_EXPECTED_COMMANDS[
             "claude-plugin/plugins/kanban/commands/finalize.md"
         ]
         codex = FINALIZE_SURFACE_EXPECTED_COMMANDS[
             "codex-plugin/plugins/kanban/skills/finalize/SKILL.md"
         ]
-        self.assertEqual(claude, codex)
-        # And the fix pair's asymmetry is not this pair's: nothing here is
-        # searched for under $CODEX_HOME.
-        self.assertEqual(claude & {"find", "head"}, set())
+        self.assertEqual(codex - claude, {"find", "head"})
+        self.assertEqual(claude - codex, set())
+        self.assertEqual(claude & {"find", "head", "mktemp", "rm"}, set())
 
     def test_the_janitor_assets_reach_exactly_the_pinned_commands(self):
         # The housekeeping audit. Pinned per brand rather than as one shared
