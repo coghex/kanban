@@ -12,8 +12,8 @@ portable to any project that installs a Kanban plugin.
 
 Scope boundaries:
 
-- These workflows are **user-invoked and never started by the board**,
-  which starts no workflow at all. The four a dashboard once spawned by name per
+- These workflows are **user-invoked and never spawned by Kanban's CLI**,
+  which spawns no workflow at all. The four a dashboard once spawned by name per
   brand (`solve`, `pr-review`, `pr-rereview`, and `pr-revise`) remain
   a named partition, so every asset declared in §2 is deliberately excluded from
   the Haskell invocation-parity pinning in `tools/test_claude_plugin.py` and

@@ -12,8 +12,8 @@ a Kanban plugin.
 
 Scope boundaries:
 
-- These workflows are **user- or daemon-invoked**, never started by the
-  board, which starts no workflow at all. The four a dashboard once spawned
+- These workflows are **user- or daemon-invoked**, never spawned by Kanban's
+  own CLI, which spawns no workflow at all. The four a dashboard once spawned
   by name per brand (`solve`, `pr-review`, `pr-rereview`, and `pr-revise`)
   remain a named partition in `tools/test_claude_plugin.py` and
   `tools/test_codex_plugin.py`, which is why the drafting and issue-review
