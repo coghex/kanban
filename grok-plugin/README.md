@@ -9,7 +9,8 @@ and repair of a grok-origin pull request, so `/autosolve` revises in the same Gr
 session and asks the bundled coordinator to spawn Codex.
 
 See [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
-the origin routing and the trusted-comment helper these workflows call.
+the origin routing, the trusted-comment helper and the issue-review backend
+resolver these workflows call.
 
 Claude packaging is at [claude-plugin/](../claude-plugin/README.md). Codex
 packaging is at [codex-plugin/](../codex-plugin/README.md). This bundle does

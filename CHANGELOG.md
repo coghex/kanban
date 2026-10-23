@@ -15,6 +15,34 @@ created above it.
 
 ### Unreleased
 
+- The packaged workflows find the canonical issue-review backend through one
+  bundled script instead of a pasted probe (#841). The ~35-line bash-and-Python
+  fence that `solve`, `issue-review`, `issue-rereview`, `triage` and `retriage`
+  (Claude and Codex) and `solve` in the Grok, Kimi, Google and Claude-on-Copilot
+  bundles each carried is now `tools/resolve_issue_review_backend.py`, with the
+  same precedence and the same diagnostics and exit status, and ten
+  byte-identical copies: `scripts/` in the Claude bundle, `skills/<name>/scripts/`
+  in each of the five Codex skills, and beside each external `solve` skill's
+  trusted-comment helper. The external `solve` skills now locate their helper
+  directory once, ahead of the backend step, and run the resolver from it; a
+  copy inside the repository being worked never satisfies any lookup.
+  `docs/drafting-workflow-contract.md` section 6 describes the one probe (XDG
+  record first) and the script, and `docs/agent-workflow-contract.md` sections
+  4 and 5 declare the sixteen files that spell the record paths instead of the
+  fourteen assets. No bundled asset, README or script comment cites
+  `Kanban.Review.*`, `Kanban.Models.*` or the Haskell modules epic #794 removed
+  as the authority for a behavior; the comments in `kanban_models.py` (six
+  copies), `kanban_config.py` (three), the six `review_pr.py` coordinators and
+  the installers now name the Python module that owns it, and the present-tense
+  citations of the removed `Kanban.Drainer` and `Kanban.Preflight` in the same
+  files and in `drain_prs_service.py`, `service_manager.py` and
+  `approve_issues_service.py` are gone with them.
+  `tools/test_packaged_issue_review_probe.py` drives the script, every case
+  the fence drove, the exact diagnostics, and each asset's own call to it from
+  an unrelated directory against an installed-bundle fixture.
+  Bundles: Claude 1.85.0, Codex 1.84.0, Grok 1.11.7, Kimi 1.10.7, Google 1.8.7,
+  Claude-on-Copilot 1.0.6.
+
 - `fix` and `finalize` now check head-bound approval with one bundled script
   instead of two separate derivations (#842). `tools/pr_head_approval.py`
   evaluates a pull request's approval for one caller policy and prints one JSON
@@ -32,7 +60,7 @@ created above it.
   is replaced by the helper call, and `fix` now has executable approval guards
   in front of its push and its rereview handoff. `docs/agent-workflow-contract.md`
   §§2.9, 2.10 and 4 describe the helper. The coordinator is unchanged.
-  Bundles: Claude 1.85.0, Codex 1.84.0.
+  Bundles: Claude 1.86.0, Codex 1.85.0.
 
 - Corrected the text of the pull-request workflows after the board stopped
   spawning them (#839). `pr-revise` no longer waits for, polls or diagnoses the

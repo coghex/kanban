@@ -2470,8 +2470,8 @@ approve-issues-backend | personal-path | /Library/Application Support/kanban/iss
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
-issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/issue-review/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/issue-rereview/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/triage/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/retriage/scripts/resolve_issue_review_backend.py;grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;google-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/issue-review/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/issue-rereview/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/triage/scripts/resolve_issue_review_backend.py;codex-plugin/plugins/kanban/skills/retriage/scripts/resolve_issue_review_backend.py;grok-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;kimi-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;google-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/resolve_issue_review_backend.py | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
 drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py | kanban | supported | no
@@ -2488,10 +2488,10 @@ issue-approval-log-dir | personal-path | /Library/Logs/kanban/issue-approval | d
 managed-job-path-entry | personal-path | /.local/bin | docs/issue-approval.md | kanban | supported | no
 launchagents-dir | personal-path | /Library/LaunchAgents | tools/service_manager.py | kanban | supported | no
 systemd-user-unit-dir | personal-path | /.config/systemd/user | tools/service_manager.py | kanban | supported | no
-find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | kanban | supported | no
-head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | kanban | supported | no
 worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | external | supported | no
+codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md | external | supported | no
 grok-plugin-cache-root | personal-path | /.grok | grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 kimi-plugin-cache-root | personal-path | /.copilot | kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 google-plugin-cache-root | personal-path | /.copilot | google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
@@ -2523,12 +2523,17 @@ prefers. The two record rows declare no tracked module of their own:
 `tools/kanban_config.py` composes the record's path from the install directory
 above and a separate file name, so it carries neither literal whole, and the
 Haskell resolver that once spelled each one is gone. Both record rows carry
-the same twenty packaged assets, because since issue #445 each of them
+the same sixteen packaged files, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
-naming the macOS one: the fourteen Markdown workflow assets whose `bash` fence
-resolves the backend, and the six pull-request coordinators. An asset that spells
-both literals is declared against both rows, so neither spelling can be
-reverted in one asset while the other row still passes. The log directory moves
+naming the macOS one: the ten bundled copies of
+`tools/resolve_issue_review_backend.py`, and the six pull-request coordinators,
+which keep a Python probe of their own. Since issue #841 the fourteen Markdown
+workflow assets that resolve the backend call that script and spell neither
+literal, so they are not declared against these rows; the script's `tools/`
+source is held byte-identical to its copies by test rather than declared a
+seventeenth time. A file that spells both literals is declared against both
+rows, so neither spelling can be reverted in one file while the other row still
+passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
 `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, so it needs no relocation rule of the kind
 `drainer-install-dir` documents below.
@@ -2766,14 +2771,19 @@ install location — the shared review coordinator for `$pr-review`,
 helper for `$fix` and `$finalize` (issue #842), the trusted-comment issue-spec
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
-`$note-problem`, and the census
-program for `$janitor` (issue #575) — themselves optional AI
+`$note-problem`, the census
+program for `$janitor` (issue #575), and, since issue #841, the issue-review
+backend resolver for `$issue-review`, `$issue-rereview`, `$solve`, `$triage`
+and `$retriage` — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
 `/pr-review`, `/pr-rereview`, and `/pr-revise` resolve their bundled
 coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`,
 `/solve` and `/issue-rereview` their bundled helper at
-`${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`, the three document
+`${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`, `/issue-review`,
+`/issue-rereview`, `/solve`, `/triage` and `/retriage` their bundled backend
+resolver at `${CLAUDE_PLUGIN_ROOT}/scripts/resolve_issue_review_backend.py`,
+the three document
 workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py` (and the two processing
@@ -3322,10 +3332,11 @@ brand's asset speaking a tool its declaration does not carry.
   backend it placed there resolves its own directory through the record and
   the environment, never through the option it was installed with, and that
   is unchanged by the per-platform defaults.
-  Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
-  the six packaged `review_pr.py` coordinators, and
-  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok,
-  Kimi, Google, and Claude-on-Copilot `/solve`: a non-empty
+  Resolution precedence, identical in `tools/approve_issues_service.py`'s
+  `resolve_backend`, the six packaged `review_pr.py` coordinators, and
+  `tools/resolve_issue_review_backend.py`, which the packaged Codex and
+  Claude `issue-review`, `issue-rereview`, `solve`, `triage` and `retriage`
+  workflows plus Grok, Kimi, Google, and Claude-on-Copilot `/solve` call: a non-empty
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
   only when that field is absent, which is exactly how an installation
   predating the record reads — the directory holding the record. A selected
@@ -3338,13 +3349,16 @@ brand's asset speaking a tool its declaration does not carry.
   every component that imports it — `tools/approve_issues.py`,
   `tools/install_issue_review.py`, `tools/setup_workflows.py`, and
   `tools/approve_issues_service.py`. The
-  eighteen vendored plugin assets listed above probe the same two record
-  locations in the same order since issue #445, so an XDG-defaulted install is
-  discovered on every host, but they reach that answer without importing
-  either resolution point: neither a `bash` fence nor the Codex bundle's
-  per-skill vendoring can, so each spells the two literals itself and §4's two
-  record rows declare all eighteen against both. One difference from the
-  resolvers is deliberate: with *neither* record occupied a packaged asset
+  sixteen vendored plugin files listed above (the six coordinators and the ten
+  bundled copies of `tools/resolve_issue_review_backend.py`) probe the same two
+  record locations in the same order since issue #445, so an XDG-defaulted
+  install is discovered on every host, but they reach that answer without
+  importing either resolution point: an installed bundle carries none of
+  `tools/` and the Codex bundle vendors per skill, so each spells the two
+  literals itself and §4's two record rows declare all sixteen against both.
+  The fourteen Markdown workflow assets reach the answer by calling that
+  script (issue #841) and spell neither literal. One difference from the
+  resolvers is deliberate: with *neither* record occupied a packaged file
   resolves the XDG candidate on every platform and reports both locations as
   consulted, rather than branching to this platform's write default, because
   nothing it can execute should have to decide which platform it is on.

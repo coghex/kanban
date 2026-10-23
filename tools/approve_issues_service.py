@@ -140,8 +140,8 @@ GATE_APPROVED_EXIT = 0
 GATE_REFUSED_EXIT = 2
 
 # The runtime documents this controller owns. Both carry an explicit schema and
-# an integer version because `src/Kanban/Drainer.hs`'s successor for this
-# service (IAQ-4) decodes them, and a reader that cannot tell which shape it
+# an integer version because the readers of this service's state (IAQ-4)
+# decode them, and a reader that cannot tell which shape it
 # holds is a reader that guesses.
 STATUS_SCHEMA = "kanban-issue-approval-status"
 STATUS_VERSION = 1
@@ -655,7 +655,7 @@ def resolve_backend(install_dir: str | Path | None = None) -> Path:
 
     The one resolution contract, in the one order
     `docs/agent-workflow-contract.md` sections 2.3 and 3 fix and
-    `Kanban.Review.resolveCanonicalIssueReviewer` implements: a non-empty
+    `tools/resolve_issue_review_backend.py` gives the packaged workflows: a non-empty
     `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the absolute `backend_path` the
     installer recorded, then -- only when that field is absent, which is
     exactly how an installation predating the record reads -- the directory

@@ -43,10 +43,9 @@ KANBAN_MANAGED_ASSET = "kanban-managed-asset:pr-drainer/drain_prs_service.py"
 # identifier each job is named and targeted by and the definition it is
 # written from. Nothing here constructs, renders, or parses one — the seam is
 # reached through `service_backend` below, and `tools/install_drainer.py`
-# reaches the same one rather than restating any of it. `src/Kanban/Drainer.hs`
-# derives nothing at all: it reads an installed job's identifier and definition
-# path out
-# of the per-repository record under DISCOVERY_RECORD_PATH below.
+# reaches the same one rather than restating any of it. Nothing derives an
+# installed job's identifier or definition path a second way: they are read
+# back out of the per-repository record under DISCOVERY_RECORD_PATH below.
 #
 # There is one identifier, and one of every mutable runtime path, per canonical
 # GitHub repository: that partitioning is what lets several repositories be

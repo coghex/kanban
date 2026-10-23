@@ -49,9 +49,9 @@ DEFAULT_LEGACY_PATH = Path.home() / "work" / "approve-issues.py"
 # the field its result document reports each under. `approve_issues.py` imports
 # both companions at module scope, so a directory holding fewer than all three
 # is a backend that fails at import rather than a partial installation that
-# runs: `tools/setup_workflows.py` converges on the same set and
-# `Kanban.Preflight` counts an install as ready only when every one of them is
-# a marker-bearing managed link.
+# runs: `tools/setup_workflows.py` converges on the same set and counts an
+# install as ready only when every one of them is a marker-bearing managed
+# link.
 BACKEND_MODULES = {
     "kanban_link": "approve_issues.py",
     "config_module_link": "kanban_config.py",
