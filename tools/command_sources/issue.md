@@ -1,9 +1,9 @@
 ---
 name: issue
 <!-- brand:claude -->
-description: Find ONE actionable issue (bug, feature, code health), verify it's real, dedup it against the tracker, and draft it to hand-off quality — stops for signoff before creating.
+description: Draft ONE verified issue, not a survey of many ({{cmd:draft-issues}} surveys). Finds an actionable bug, feature, or code-health item, dedups it against the tracker, drafts it to hand-off quality, and stops for signoff before creating.
 <!-- brand:codex -->
-description: Find ONE actionable issue (bug, feature, code health), verify it's real, dedup it against the tracker, and draft it to hand-off quality — stops for signoff before creating. Trigger when asked to find, scout, or draft an issue.
+description: Draft ONE verified issue, not a survey of many (the Claude-only draft-issues command surveys; Codex has no survey skill). Finds an actionable bug, feature, or code-health item, dedups it against the tracker, drafts it to hand-off quality, and stops for signoff before creating. Trigger when asked to find, scout, or draft an issue.
 <!-- /brand -->
 argument-hint: "[optional: symptom, area, or idea to investigate]"
 ---

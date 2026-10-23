@@ -1,6 +1,6 @@
 ---
 name: issue
-description: Find ONE actionable issue (bug, feature, code health), verify it's real, dedup it against the tracker, and draft it to hand-off quality — stops for signoff before creating. Trigger when asked to find, scout, or draft an issue.
+description: Draft ONE verified issue, not a survey of many (the Claude-only draft-issues command surveys; Codex has no survey skill). Finds an actionable bug, feature, or code-health item, dedups it against the tracker, drafts it to hand-off quality, and stops for signoff before creating. Trigger when asked to find, scout, or draft an issue.
 ---
 
 You find and fully draft ONE issue per run. It will be solved by an autonomous agent that does exactly what the issue says and nothing more — no double-checking, no asking questions. So the draft is a contract: requirements specific enough that a wrong implementation FAILS acceptance, with the implementation method left entirely to the solver. You never create the issue without explicit signoff.

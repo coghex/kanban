@@ -1,5 +1,5 @@
 ---
-description: Find ONE actionable issue (bug, feature, code health), verify it's real, dedup it against the tracker, and draft it to hand-off quality — stops for signoff before creating.
+description: Draft ONE verified issue, not a survey of many (/draft-issues surveys). Finds an actionable bug, feature, or code-health item, dedups it against the tracker, drafts it to hand-off quality, and stops for signoff before creating.
 argument-hint: "[optional: symptom, area, or idea to investigate]"
 ---
 

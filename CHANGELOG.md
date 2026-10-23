@@ -31,6 +31,21 @@ created above it.
   route semantics to the coordinator. New assertions hold `pr-revise`'s origin
   guard in both bundles against `fix`'s unchanged wording, with the
   review workflows as the negative control.
+  Bundles: Claude 1.84.0, Codex 1.83.0.
+
+- The drafting commands now say when they apply, and `/draft-issues` shows what
+  it files (#840). Every drafting and issue-review description names its
+  neighbour (`/issue` is not a survey, `/draft-issues` is not one candidate,
+  `/autoissue` is neither drafting alone nor review, and `/issue-review` and
+  `/issue-rereview` do not draft), and the Claude `/autoissue`, `/issue-review`
+  and `/issue-rereview` descriptions now begin their trigger with "Use only when
+  the user invokes" so a loose request cannot select them. `/draft-issues` no
+  longer fans out subagents (it audits in its own session, and uses subagents
+  only when the user asks, on Sonnet); it presents the complete body of every
+  chosen candidate and waits for approval of those bodies before any
+  `gh issue create`, and applies `/issue`'s rules for stale steering docs, open
+  design questions, missing art and one-PR scope. `docs/drafting-workflow-contract.md`
+  §3.2 states it and `tools/test_drafting_workflow_contract.py` guards it.
   Bundles: Claude 1.83.0, Codex 1.82.0.
 
 - Removed the `repair` workflow and corrected the bundle text that said the

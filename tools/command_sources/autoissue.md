@@ -1,9 +1,9 @@
 ---
 name: autoissue
 <!-- brand:claude -->
-description: Draft one issue with {{cmd:issue}}, create it after signoff, then run the canonical opposite-agent issue review
+description: Draft one issue with {{cmd:issue}}, create it after signoff, then run the canonical opposite-agent issue review — not drafting alone (use {{cmd:issue}}), not review of an existing issue (use {{cmd:issue-review}}). Use only when the user invokes {{cmd:autoissue}} or explicitly asks for this combined draft-create-review workflow.
 <!-- brand:codex -->
-description: Draft one verified, deduplicated GitHub issue with {{cmd:issue}}, create it only after explicit user signoff, then immediately run the canonical {{cmd:issue-review}} opposite-agent readiness gate. Use only when the user invokes {{cmd:autoissue}} or explicitly asks for this combined draft-create-review workflow.
+description: Draft one verified, deduplicated GitHub issue with {{cmd:issue}}, create it only after explicit user signoff, then immediately run the canonical {{cmd:issue-review}} opposite-agent readiness gate — not drafting alone (use {{cmd:issue}}), not review of an existing issue (use {{cmd:issue-review}}). Use only when the user invokes {{cmd:autoissue}} or explicitly asks for this combined draft-create-review workflow.
 <!-- /brand -->
 argument-hint: "[optional: symptom, area, or idea to investigate]"
 ---

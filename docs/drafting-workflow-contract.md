@@ -56,7 +56,7 @@ here; their absence from the list above is that split, not a gap.
 | Workflow | Brands | Breadth | Creates issues? | Reviews afterward? |
 | --- | --- | --- | --- | --- |
 | `/issue`, `$issue` | Claude and Codex | Exactly **one** candidate per run | Only after explicit user signoff | No |
-| `/draft-issues` | **Claude only** | **Many** candidates surveyed per run | Only the candidates the user selects, after a stop-and-ask | No |
+| `/draft-issues` | **Claude only** | **Many** candidates surveyed per run | Only the drafts whose complete bodies the user approves; selecting candidates from the list is not that approval | No |
 | `/autoissue`, `$autoissue` | Claude and Codex | Delegates to the one-candidate workflow | Via its delegate, after signoff | Yes — immediately, with no second confirmation |
 | `/issue-review`, `$issue-review` | Claude and Codex | One numbered issue | No | Is the review itself |
 | `/issue-rereview`, `$issue-rereview` | Claude and Codex | One numbered changes-requested issue | No — repairs an existing one | Yes — resubmits the repaired spec through the backend |
@@ -79,11 +79,38 @@ Both workflows **stop for explicit user signoff** and must not run
 
 `/draft-issues` is the **breadth counterpart** to `/issue`: it surveys many
 candidates across the whole repository, presents them as a categorized list,
-stops to ask which to create, and only then expands the chosen ones to the
-same hand-off bar. It is **packaged for the Claude brand only** — there is
-deliberately no `$draft-issues` Codex skill, and the Codex plugin must not
-grow one under this contract. The Codex side covers drafting through the
-one-candidate `$issue` workflow instead.
+stops to ask which to draft, expands the chosen ones to the same hand-off bar,
+and creates nothing until the user has approved the drafts. It is **packaged
+for the Claude brand only** — there is deliberately no `$draft-issues` Codex
+skill, and the Codex plugin must not grow one under this contract. The Codex
+side covers drafting through the one-candidate `$issue` workflow instead, and
+`$issue`'s description names the Claude-only `/draft-issues` as the survey
+alternative without implying a Codex skill of that name.
+
+`/draft-issues` audits the repository in its own session and spawns no
+subagent unless the user asked for subagents for that task, in which case they
+run on Sonnet.
+
+Choosing candidates from the list is **selection, not signoff**. Before any
+`gh issue create`, `/draft-issues` presents each proposed issue — including
+each piece of a split candidate — with its title, labels, and complete body,
+and creates only the drafts the user explicitly approves. A requested revision
+is presented again as a complete revised draft. The hand-off bar is `/issue`'s,
+so `/draft-issues` also applies the rules `/issue` applies:
+
+- an invalidated statement in the repository's agent instructions or a
+  load-bearing comment makes updating that file a requirement;
+- a design question is never silently resolved: it is surfaced for the user, or
+  recorded as "Deliberately open" with a stop-and-ask instruction;
+- missing art is named per asset and recorded as an explicit blocker, with art
+  in its own issue. The missing asset is an execution dependency rather than a
+  readiness failure: the issue lists its purpose, visual constraints,
+  dependencies, and the criteria the user applies to approve the finished
+  image, keeps a supply method the user already chose, and otherwise leaves the
+  choice of method and the authorization to generate until the solver needs the
+  asset. A placeholder never substitutes for it and the requirement is never
+  dropped;
+- a candidate larger than one pull request is split at signoff.
 
 ### 3.3 Delegation plus review: `/autoissue` and `$autoissue`
 
