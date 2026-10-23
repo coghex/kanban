@@ -1,10 +1,10 @@
 # Approved-document recovery design
 
-This is the focused recovery contract for the paused #830 implementation in
+This is the focused recovery contract for the #830 implementation in
 PR #836, not a new epic. Its purpose is to replace successive recovery patches
 with a state model whose interruption behavior can be reviewed as a whole.
 
-Design state: `exploring`
+Design state: `ready for issue processing`
 
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
@@ -159,9 +159,10 @@ The reply identifies Q-1 as manager approval and Q-2/Q-3 as direct owner
 decisions. The present user instruction also relays those choices. This
 signoff approves the contract below. The opposite-brand review of `9d1e0f8680`
 was relayed in `b249chw3p5ydcr5937kx3zu7qa`; its five findings are addressed
-below. Review acceptance and readiness remain outstanding.
+below. Review acceptance and readiness were signed off in
+`2bs2da6zj8jwpim3a4thenwbis` against revision `815c3b5183`.
 
-## Approved design, pending review
+## Approved and reviewed design
 
 ### P-1 (D-4). One retained intent, with capture recovery inside it
 
@@ -615,11 +616,12 @@ affects REC-1's resume behavior, T-17–T-22 and T-30 acceptance signals.
 **Resolved by D-6**, direct owner decision relayed in
 `y6mj9vvpy3r9gapeapm7zn244w`. Yes: the manager files and routes a separate live
 fix; #830/REC-1 scope is unchanged. This session neither implements nor files
-it. #836 remains paused until the design-review endpoint is satisfied.
+it. The design-review endpoint is satisfied by the acceptance recorded below;
+the manager directs implementation separately.
 
 No original design-choice question remains open. F1's owner clarification is
-recorded in D-5. Acceptance of the review fixes and explicit readiness signoff
-remain pending; additional review findings may require further decisions.
+recorded in D-5. The manager accepted F1–F5 and explicitly signed off readiness
+in `2bs2da6zj8jwpim3a4thenwbis`; no design question remains outstanding.
 
 ## Delivery plan
 
@@ -637,8 +639,8 @@ remain pending; additional review findings may require further decisions.
   map, consuming-repository and bundled-copy checks.
 - **Out of scope:** filing new tracker artifacts in this design session, consumer switch-over, classification
   retirement, external tool changes, and unapproved publisher scope changes.
-- **Open questions:** Q-1–Q-3 resolved; review acceptance and readiness signoff
-  remain outstanding. Conditional split activation belongs to the manager.
+- **Open questions:** none; Q-1–Q-3 resolved, review accepted and readiness
+  signed off. Conditional split activation belongs to the manager.
 
 ### Size budget and ordered fallback (F3)
 
@@ -689,7 +691,7 @@ Manager signoff on `6f006a1447` was received in verified reply
 `y6mj9vvpy3r9gapeapm7zn244w`, answering `r4d4zwr4itj3m7q4p7n8j3sm9a`.
 The manager relayed the opposite-brand review of `9d1e0f8680` in verified reply
 `b249chw3p5ydcr5937kx3zu7qa`, answering status
-`piry5ucf4xy5ejeqj29ihwb7un`. Resolution map for review acceptance:
+`piry5ucf4xy5ejeqj29ihwb7un`. Accepted resolution map:
 
 | Finding | Document resolution |
 | --- | --- |
@@ -699,7 +701,11 @@ The manager relayed the opposite-brand review of `9d1e0f8680` in verified reply
 | F4 — child quiescence | Handoff records PID, process start time and exact argv; reused PID is distinguished and unreadable identity stops. T-17 fixtures cover each classification. |
 | F5 — deterministic crashes | Named test-harness fault seams invoke `os._exit(86)` in the child with a seam receipt; no timing-dependent signals; error injection and recovery assertions share the same boundaries. |
 
-Publish this revision's commit in #kan-backlog for acceptance of the fixes.
-Keep `exploring` until explicit readiness signoff and completed review; addressed
-findings are not a self-issued approval. No tracker artifact is filed by this
-design session; a cap-triggered split is managed as described above.
+On 2026-10-23, verified `kan-manager` reply
+`2bs2da6zj8jwpim3a4thenwbis`, answering `qq39thsk278ww235hggedqtxua`, accepted
+F1–F5 as resolved at `815c3b5183` and explicitly signed off readiness. The design
+is therefore `ready for issue processing`. This focused work already belongs
+to #830; readiness creates no new epic or child issue. The manager's endpoint
+for `kan-designer-1` is to land this status update, post its commit in
+#kan-backlog, and stop. `kan-solver-40` owns the #836 implementation rework;
+any cap-triggered split is managed as described above.
