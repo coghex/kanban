@@ -1,8 +1,8 @@
 # Kanban Claude plugin
 
 This directory is a Claude Code marketplace, tracked in this repository, that
-packages the Claude-side workflows Kanban invokes by name — `/solve`,
-`/pr-review`, `/pr-rereview`, `/pr-revise`, and `/repair` — plus the issue-drafting and
+packages the Claude-side issue-to-pull-request workflows — `/solve`,
+`/pr-review`, `/pr-rereview`, and `/pr-revise` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
 `/issue`, `/draft-issues`, `/autoissue`, `/issue-review`, and
 `/issue-rereview`. Since issue #229
@@ -38,11 +38,10 @@ packaging.
 
 `claude plugin marketplace add` and `claude plugin install` both accept a
 `--scope` flag (`user`, `project`, or `local`) controlling where the
-resulting registration is declared. Kanban spawns `/solve`, `/pr-review`,
-`/pr-rereview`, and `/pr-revise` with the *target* repository — the one
-selected by `--path`, not necessarily a checkout of this repository — as the
-working directory, so which scope to use depends on where that
-registration needs to be discoverable from:
+resulting registration is declared. You run `/solve`, `/pr-review`,
+`/pr-rereview`, and `/pr-revise` in a session whose working directory is the
+*target* repository — not necessarily a checkout of this repository — so which
+scope to use depends on where that registration needs to be discoverable from:
 
 **Project scope, declared in the Kanban-selected repository itself.** From
 the repository Kanban is pointed at (the one you actually want `/solve` and
@@ -102,9 +101,9 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all twenty-three workflow names should be
+`kanban@kanban` should be listed, and all twenty-two workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
-`/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
+`/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`,
 `/design-epic`, `/process-design-doc`, `/draft-report`, `/note-problem`,
 `/process-report`, `/triage`, `/retriage`, `/backlog-review`,
 `/drain-prs`, `/fix`, `/finalize`, `/janitor`, and `/autosolve`.
@@ -116,32 +115,29 @@ those subcommands cannot install this plugin.
 
 ## What's packaged
 
-Kanban's own CLI spawns five of these by name: the first four, plus `/repair`,
-which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other eighteen are drafting, readiness-gate, document, roadmap,
+The first four are the issue-to-pull-request workflows the board's retired
+agent control once started by name (the board starts no workflow now).
+The other eighteen are drafting, readiness-gate, document, roadmap,
 backlog-audit, drainer-control, approved-pull-request,
 manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
 workflows a user or the review daemon invokes directly;
 see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
-`/repair` is not part of either declared surface. Only those eighteen are
-excluded from the Haskell invocation-parity pinning in
-`tools/test_claude_plugin.py`, which covers exactly the names Kanban's own
-code spawns.
+Only those eighteen are excluded from the invocation-parity pinning in
+`tools/test_claude_plugin.py`, which covers exactly the first four names.
 
 | Command | Invocation | Boundary |
 | --- | --- | --- |
 | `commands/solve.md` | `/solve` | Claims an issue, implements it in an isolated worktree, opens a PR. Stops after opening the PR; never reviews or merges. |
 | `commands/pr-review.md` | `/pr-review` | Review-only. Runs the canonical issue-gated, opposite-brand (or dual, for unknown origin) review and publishes one verdict. Never edits, labels beyond the verdict, or merges. |
-| `commands/pr-rereview.md` | `/pr-rereview` | Same as `/pr-review` for a changed PR; also removes a lingering `reviewed:revised` label after publishing, the one label mutation Kanban's own invocation prompts require of a review-only workflow. |
+| `commands/pr-rereview.md` | `/pr-rereview` | Same as `/pr-review` for a changed PR; also removes a lingering `reviewed:revised` label after publishing, the one label mutation a review-only workflow owes. |
 | `commands/pr-revise.md` | `/pr-revise` | Repairs a `reviewed:changes` PR in an isolated worktree, pushes safely, then hands off to exactly one canonical rereview. Never self-approves or merges. |
 | `commands/issue.md` | `/issue` | Finds, verifies, and deduplicates **exactly one** candidate and drafts it to hand-off quality. Stops for explicit signoff; never creates without it. |
 | `commands/draft-issues.md` | `/draft-issues` | The **breadth** counterpart: surveys many candidates repo-wide, stops to ask which to create, then expands only those to the same bar. Claude-only — there is deliberately no Codex equivalent. |
 | `commands/autoissue.md` | `/autoissue` | Delegates drafting to `/issue`, and on signoff creates the issue and immediately runs `/issue-review` with no second confirmation. Stops without reviewing if drafting stops before creation. |
 | `commands/issue-review.md` | `/issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
 | `commands/issue-rereview.md` | `/issue-rereview` | Repairs one `reviewed:changes` issue's specification with explicit signoff and resubmits it through the same backend until that backend approves it. Never solves the issue, posts a verdict, or sets a verdict label. |
-| `commands/repair.md` | `/repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
 | `commands/design-epic.md` | `/design-epic` | Captures and refines an epic-sized design in one durable `*_design.md` document. Creates no tracker items at all; hands off to `/process-design-doc` only once the user declares the design ready. Paired with the Codex `$design-epic` skill. |
 | `commands/process-design-doc.md` | `/process-design-doc` | Turns a ready design document into tracker artifacts, the epic first and then **one** dependency-ready child per invocation, using the document's ledger as the durable cursor. Stops for approval before every tracker mutation. Paired with the Codex `$process-design-doc` skill. |
 | `commands/draft-report.md` | `/draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. Paired with the Codex `$draft-report` skill it is transposed from. |
@@ -156,8 +152,8 @@ code spawns.
 | `commands/janitor.md` | `/janitor` | Audits one repository's agent-pipeline state — claims and issue worktrees, every registered worktree, workflow branches and refs, pull-request and drainer health, stashes and drainer recovery objects, stray content, and default-branch drift — and mutates nothing until the user approves individual items. Reasons over the `janitor-census/v1` snapshot this bundle's own `scripts/census.py` emits (issue #574) rather than hand-walking the repository, and stops before its first read if that helper cannot be resolved. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. A `null` or unavailable collection in the census is an anomaly to diagnose, never a clean result. Bulk `all-safe` approval covers only the five fully-proved gates — worktree removal, branch deletion, review metadata prune, tracking-ref prune, and the default fast-forward — and excludes dirty or unmerged work, limbo worktrees, permanent-worktree content, every recovery object, coordinated-test worktrees, and any ambiguous disposition. Every apply-path command reaches the approved item and nothing else: the one operation Git offers no per-item form for, `git worktree prune --expire now`, is refused unless every record its dry run names is approved; a stale tracking ref is deleted by name with its recorded value rather than by `git fetch --prune`; and remote branch deletions go one push per branch, carrying the proved SHA as a `--force-with-lease` so a branch that moved after the `ls-remote` proof is refused instead of losing unreviewed work. A stash is dropped only while its selector still resolves to the object the report recorded, since a selector is a reflog position that any other writer shifts; the drop is verified afterwards against the object Git says it took, and a mismatch is put straight back with `git stash store` before the item fails. Releasing a stale claim is two independent commands, since a claim is an assignee *or* a `wip` label. Paired with the Codex `$janitor` skill. |
 | `commands/autosolve.md` | `/autosolve` | Runs `/solve` for one issue and then drives up to five opposite-brand review rounds — `/pr-review` in round one, `/pr-rereview` after each pushed fix — until the pull request carries `reviewed:approve`. **Never reviews, comments on, labels, merges, or finalizes the pull request it authored.** It overrides two things the workflows it delegates to say: `/solve`'s stop condition ends that workflow rather than this run, and the `--self-review` those review workflows instruct a canonical reviewer to pass is never passed here, because this session is the pull request's own origin brand rather than its reviewer. Confirms the route with the coordinator's `--dry-run` before trusting a verdict, requires the published `pr-review:v2` marker to name the current head and an opposite-brand `reviewers` value, and treats a marker naming its own brand as a publication failure rather than an approval. Resolves the repository once and passes `-R "$REPO"` on every `gh` call. Stops at approval and merges nothing: an installed PR drainer owns merging eligible approved pull requests, and manual `/finalize` is the user's own fallback for when that drainer cannot be used. Paired with the Codex `$autosolve` skill. |
 
-The five document commands are user-invoked only. Kanban's CLI never spawns
-one, because each has a mandatory human approval stop in the middle; see
+The five document commands are user-invoked only. None is started by the
+board, because each has a mandatory human approval stop in the middle; see
 [docs/document-workflow-contract.md §5](../docs/document-workflow-contract.md#5-one-artifact-per-invocation-and-the-approval-stop).
 Its status markers are a cross-brand compatibility surface rather than local
 formatting: `$process-report` in [codex-plugin/](../codex-plugin/README.md) is
@@ -185,7 +181,7 @@ refused to do. The `/draft-issues` boundary above is now the only asymmetry
 left, and it runs the other way; see
 [docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-now-closed).
 
-`pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
+`pr-review`, `pr-rereview`, and `pr-revise` all delegate publication
 to the bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
 `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so each command
 resolves the coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`
@@ -209,8 +205,8 @@ exists is the installation, so a macOS host that installed under XDG and a
 Linux host that inherited a `~/Library` install each keep the one they have;
 when neither exists the XDG candidate supplies the answer and the diagnostic
 names both. None of the packaged commands set their own
-model, reasoning effort, permission mode, or working directory — Kanban's own
-CLI invocation pins those per action, and `tools/test_claude_plugin.py`
+model, reasoning effort, permission mode, or working directory — the session
+that runs a command is started with those, and `tools/test_claude_plugin.py`
 asserts none of the packaged manifests override them.
 
 `/solve` bundles a second script, `scripts/trusted_issue_spec.py`, and reads the
@@ -277,24 +273,24 @@ selecting the opposite-agent reviewer is the backend's job, and its own
 default already resolves the canonical one. The personal model pins carried by
 the pre-vendoring sources were dropped for exactly that reason.
 
-For known-origin `/pr-review`/`/pr-rereview` — the case Kanban's own
-invocation always produces — the calling session already *is* the
+For known-origin `/pr-review`/`/pr-rereview` — the case a session started as
+the opposite-brand reviewer produces — the calling session already *is* the
 correctly-pinned canonical reviewer, so it reviews directly and uses the
 coordinator (`--self-review`) only for safe publication; no nested reviewer
 is spawned, and this coordinator still cannot verify which model actually
 ran that top-level session (that pin happened outside its visibility), so
 it publishes `models=unspecified` for this path, matching
 [docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md#22-pr-review-rereview-and-revise).
-Only the cross-brand handoffs of `pr-revise` and `repair` (each runs on the
-PR's own origin brand but must hand off to the opposite brand) and the rare dual-review
-fallback for unknown/external origin — which Kanban's own invocation never
-triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
+Only the cross-brand handoff of `pr-revise` (it runs on the PR's own origin
+brand but must hand off to the opposite brand) and the rare dual-review
+fallback for unknown/external origin — which a session started as the canonical
+reviewer never triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
 self-reviewed path, this coordinator fully constructs that nested
 subprocess call itself, so — for this plugin's bundled coordinator only,
 per a round-2 review finding on issue #77 — it pins that nested reviewer to
 the same canonical `gpt-6-sol`/`claude-opus-5-5` at `xhigh` values the
 `roles.pr_review.*` cells of `models.toml.example` declare — the cells
-Kanban's own top-level review invocation resolves from the model roster — and
+a top-level review session resolves from the model roster — and
 binds the verified model in the published `pr-review:v2` marker instead of
 `unspecified`. Since issue #483 it reaches those values the same way Kanban
 does: `scripts/kanban_models.py`, a byte-identical copy of
@@ -335,10 +331,8 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the twenty-three packaged workflows,
-  and the five Kanban spawns exactly match the `/`-prefixed tokens
-  `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
-  two separate assertions, since Kanban's Haskell code must *not* spawn the
+- the commands directory contains exactly the twenty-two packaged workflows,
+  and the four issue-to-pull-request commands are pinned separately from the
   eighteen user-invoked commands;
 - the Codex-only document-workflow set is empty, so no counterpart is withheld
   from this bundle;
@@ -352,7 +346,7 @@ runs) checks that:
   same way Kanban's Haskell code does, and its self-test passes standalone;
 - the coordinator's nested-reviewer compiled fallbacks match the exact
   values the `roles.pr_review.*` cells of `models.toml.example` declare —
-  the cells Kanban's own review invocation resolves — so the two cannot
+  the cells a review session resolves — so the two cannot
   silently drift apart, and all three copies of the reader
   (`scripts/kanban_models.py`, `tools/kanban_models.py`, and the Codex
   bundle's own) stay byte-identical, with the diagnostic naming whichever
@@ -370,7 +364,7 @@ not a comment block — so a fix landing in one copy only fails there, which is 
 the issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (all twenty-three commands under
+surface (all twenty-two commands under
 `claude-plugin/plugins/kanban/commands/`)
 and
 all seven bundled Python assets — the review coordinator and its
@@ -388,12 +382,6 @@ counterpart — the two copies must stay byte-identical — and drives both over
 every signal that must grant no comment body, proving no untrusted body or
 body-derived content survives serialization and that each copy resolves from its
 own installed bundle while the working directory is the repository being solved.
-
-`tools/test_repair_workflow_contract.py` pins `/repair`'s own behavioral
-contract — the ordered diagnosis branches, worktree selection and safe push,
-the never-merge/never-label authority limits, and the exactly-one-rereview
-handoff — against both this command and its Codex counterpart, so the two
-brands' copies cannot diverge.
 
 `tools/test_drafting_workflow_contract.py` reconciles the five drafting
 commands against the responsibility matrix in

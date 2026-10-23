@@ -22,7 +22,7 @@ takes Codex's layout with Claude's sigil (issue #716):
   projection here is an allowlist per brand, and the source's own key set is
   an allowlist too, so a
   `model:` or `permission-mode:` key that would override the model, effort, or
-  permission mode Kanban's CLI spawn already pins
+  permission mode the session was started with
   (`docs/agent-workflow-contract.md` §2.1-§2.2) cannot reach a rendered file at
   all — the same keys `tools/test_claude_plugin.py` forbids in the shipped
   bundle, refused one step earlier.
@@ -222,12 +222,12 @@ CODEX_SKILLS_DIR = "codex-plugin/plugins/kanban/skills"
 BUNDLE_OUTPUTS = MappingProxyType(
     {"claude": CLAUDE_COMMANDS_DIR, "codex": CODEX_SKILLS_DIR}
 )
-# Where the four external bundles discover theirs. None is a spawned
-# provider's own bundle and each ships only the workflows its session opens a
-# pull request with, so an entry rendering here ships in those bundles and in
-# neither of the two above. The Claude-on-Copilot bundle is external in that
-# sense although its brand is Claude: Kanban spawns Claude through Claude Code,
-# never through the Copilot CLI.
+# Where the four external bundles discover theirs. None is the Claude or Codex
+# bundle and each ships only the workflows its session opens a pull request
+# with, so an entry rendering here ships in those bundles and in neither of the
+# two above. The Claude-on-Copilot bundle is external in that sense although
+# its brand is Claude: its sessions run through the Copilot CLI, not Claude
+# Code.
 EXTERNAL_OUTPUTS = MappingProxyType(
     {
         "grok": "grok-plugin/plugins/kanban/skills",
@@ -373,12 +373,11 @@ COMMAND_SOURCES = (
         note=(
             "The approved-pull-request obstacle clearer. Authored here rather "
             "than as a hand-edited pair because it restates the worktree, "
-            "cross-repository, and safe-push rules the repair pair already "
+            "cross-repository, and safe-push rules the pr-revise pair already "
             "carries: two copies of that text is exactly the drift D-3 exists "
             "to prevent. It is the one registry entry whose body references "
-            "three other workflows -- {{cmd:pr-review}}, {{cmd:pr-revise}} and "
-            "{{cmd:repair}} -- naming each through the token rather than a "
-            "literal sigil."
+            "other workflows, among them {{cmd:pr-review}} and {{cmd:pr-revise}}, "
+            "naming each through the token rather than a literal sigil."
         ),
     ),
     CommandSource(

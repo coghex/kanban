@@ -4,8 +4,8 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` pin that both
 plugins *discover* a `fix` workflow and that it sits outside the Haskell
-name-parity set, since Kanban's own CLI spawns `repair` for a Done-column card
-and never this. Discovery and name parity are not the contract, though: `fix`
+name-parity set: it is a user-invoked workflow, started by neither the board
+nor the issue-to-pull-request set. Discovery and name parity are not the contract, though: `fix`
 is user-invoked, so nothing upstream establishes the approval, the origin
 brand, or the obstacle it acts on — the packaged text is the only place those
 decisions are made, and it is the part that must not drift.
@@ -26,9 +26,9 @@ which of them mutate anything, and the push/rereview authority boundary -- speci
 invalidates the approval and therefore always invokes exactly one rereview,
 while every non-mutating branch invokes none.
 
-`RepairDelegationTests` is the negative control this module owes under
+`RevisionDelegationTests` is the negative control this module owes under
 CLAUDE.md's "Quality gates": the fix-specific rules are asserted absent from the
-repair pair, so a phrase table that had degenerated into fragments present in
+pr-revise pair, so a phrase table that had degenerated into fragments present in
 every packaged workflow would fail here rather than pass everywhere.
 """
 
@@ -46,10 +46,10 @@ CLAUDE_FIX = REPO_ROOT / "claude-plugin/plugins/kanban/commands/fix.md"
 
 FIX_ASSETS = (CODEX_FIX, CLAUDE_FIX)
 
-CODEX_REPAIR = REPO_ROOT / "codex-plugin/plugins/kanban/skills/repair/SKILL.md"
-CLAUDE_REPAIR = REPO_ROOT / "claude-plugin/plugins/kanban/commands/repair.md"
+CODEX_REVISE = REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md"
+CLAUDE_REVISE = REPO_ROOT / "claude-plugin/plugins/kanban/commands/pr-revise.md"
 
-REPAIR_ASSETS = (CODEX_REPAIR, CLAUDE_REPAIR)
+REVISE_ASSETS = (CODEX_REVISE, CLAUDE_REVISE)
 
 WORKFLOW_HS = REPO_ROOT / "src/Kanban/Workflow.hs"
 DRAINER = REPO_ROOT / "tools/drain_prs.py"
@@ -120,13 +120,14 @@ REQUIRED_PHRASES = {
 
     # --- The origin gate: this brand may only fix its own brand's work. ---
     "the-origin-marker-is-validated-before-any-mutation": (
-        "Kanban's own CLI resolves a pull request's origin and spawns the "
-        "matching\nbrand's executable"
+        "This workflow is user-invoked: the user chose which brand's session "
+        "runs it,\nand nothing upstream has checked that the choice matches the "
+        "pull request, so it\nchecks here, before any mutation."
     ),
-    "the-origin-rules-are-the-haskell-ones": (
-        "apply exactly the\nrules `originFromBody` applies in "
-        "`src/Kanban/PullRequestFlow.hs`: the body must\ncarry exactly ONE "
-        "marker, of exactly one kind, as its final non-whitespace\ncontent."
+    "the-origin-rules-are-the-coordinators": (
+        "apply exactly the\nrules `origin_from_body` applies in the bundled "
+        "coordinator's `review_pr.py`:\nthe body must carry exactly ONE "
+        "marker, of exactly one kind, as its final\nnon-whitespace content."
     ),
     "every-malformed-origin-is-a-refusal-not-a-default": (
         "Both markers present, the same marker twice, a marker with trailing\n"
@@ -533,7 +534,7 @@ REQUIRED_PHRASES = {
     "ambiguity-goes-to-the-user": (
         "ask the user through the session's question mechanism\nrather than choosing"
     ),
-    # --- Head safety, inherited from the repair contract by construction. ---
+    # --- Head safety. ---
     "a-local-ahead-reused-worktree-stops-the-run": (
         "**But a reused worktree whose HEAD is not the recorded head stops the "
         "run.** Uncommitted work is safe to keep — it reaches the remote only "
@@ -603,7 +604,7 @@ DIAGNOSIS_ORDER = (
     "**Nothing to fix**",
 )
 
-# Requirements that belong to fix alone. The repair pair must carry none of
+# Requirements that belong to fix alone. The pr-revise pair must carry none of
 # them, which is what proves the table above is measuring this workflow rather
 # than matching text every packaged workflow happens to contain.
 FIX_ONLY_REQUIREMENTS = (
@@ -637,7 +638,7 @@ FIX_ONLY_REQUIREMENTS = (
     "nothing-to-fix-requires-a-ready-merge-state",
     "an-unknown-merge-state-is-not-a-clearance",
     "the-origin-marker-is-validated-before-any-mutation",
-    "the-origin-rules-are-the-haskell-ones",
+    "the-origin-rules-are-the-coordinators",
     "every-malformed-origin-is-a-refusal-not-a-default",
     "a-wrong-brand-origin-stops-with-nothing-changed",
     "why-the-origin-gate-exists",
@@ -1272,10 +1273,6 @@ class NoRerunTests(unittest.TestCase):
         self.assertIn("MAX_CI_RERUN_ATTEMPTS = ", drainer)
         self.assertIn("def rerun_failed_ci(", drainer)
 
-    def test_repair_still_holds_the_same_prohibition(self):
-        for path in REPAIR_ASSETS:
-            self.assertIn("no retry loops", read(path))
-
 
 class MergeStateCoverageTests(unittest.TestCase):
     """Every non-ready merge state has a defined branch, and only one of them
@@ -1313,8 +1310,7 @@ class ContractDocumentationTests(unittest.TestCase):
     Manifest rows declare what it *reaches*; they are not a statement of its
     invocation, authority, or durable state. A workflow that may push a
     reviewed head and spawn a nested canonical review owes
-    docs/agent-workflow-contract.md its own section, the way §2.7 gives repair
-    one.
+    docs/agent-workflow-contract.md its own section.
     """
 
     CONTRACT = REPO_ROOT / "docs/agent-workflow-contract.md"
@@ -1345,7 +1341,7 @@ class ContractDocumentationTests(unittest.TestCase):
             "**Mandatory/optional:**",
         ):
             self.assertIn(heading, section, f"§2.9 omits {heading}")
-        # The two properties that make this action different from repair.
+        # The two properties that make this action different from a revision.
         self.assertIn("approvedPullRequest", section)
         self.assertIn("MergeBehind", section)
         # The precedence the contract states must be the one the assets use:
@@ -1430,8 +1426,8 @@ class HeadBoundApprovalTests(unittest.TestCase):
     """
 
     # Every rule the head binding added. Each is asserted present in both
-    # rendered assets by the table above and ABSENT from the repair pair by
-    # RepairDelegationTests, so this tuple is the join between the two.
+    # rendered assets by the table above and ABSENT from the pr-revise pair by
+    # RevisionDelegationTests, so this tuple is the join between the two.
     HEAD_BINDING_RULES = (
         "approval-modes-are-read-never-accepted-on-their-own",
         "an-unbound-signal-is-never-sufficient",
@@ -1468,7 +1464,7 @@ class HeadBoundApprovalTests(unittest.TestCase):
             self.assertIn(
                 requirement,
                 FIX_ONLY_REQUIREMENTS,
-                f"{requirement} is not in the repair negative control",
+                f"{requirement} is not in the pr-revise negative control",
             )
 
     def test_the_binding_is_stated_before_every_step_that_can_mutate(self):
@@ -1561,11 +1557,11 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
     """Bind each review-history condition to its actual shipped command.
 
     The descriptive phrases alone survive a wrong command choice. Exercise
-    the same assertions against wrong-route mutations and the repair assets,
+    the same assertions against wrong-route mutations and the pr-revise assets,
     which do not own fix's approval-refusal remedy.
     """
 
-    ASSETS = ((CODEX_FIX, CODEX_REPAIR, "$"), (CLAUDE_FIX, CLAUDE_REPAIR, "/"))
+    ASSETS = ((CODEX_FIX, CODEX_REVISE, "$"), (CLAUDE_FIX, CLAUDE_REVISE, "/"))
     ROUTES = (
         (
             "pr-rereview",
@@ -1608,7 +1604,7 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         self.assert_remedy_routes(mutated, sigil)
 
-    def test_repair_assets_do_not_carry_the_fix_remedy_rules(self):
+    def test_revise_assets_do_not_carry_the_fix_remedy_rules(self):
         for _, path, sigil in self.ASSETS:
             for command, phrase in self.ROUTES:
                 with self.subTest(asset=path, command=command):
@@ -1618,7 +1614,7 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
 class VacuousRuleControlTests(unittest.TestCase):
     """The negative control the new rules owe, exercised rather than asserted.
 
-    `RepairDelegationTests` proves today's table is fix-specific, but it does
+    `RevisionDelegationTests` proves today's table is fix-specific, but it does
     that by passing -- on a table that had decayed into fragments common to
     every packaged workflow it would fail, and nothing demonstrates that it
     still CAN. These two tests run the same predicates over a deliberately
@@ -1630,28 +1626,28 @@ class VacuousRuleControlTests(unittest.TestCase):
 
     def test_a_phrase_present_in_every_asset_fails_the_fix_only_control(self):
         # The phrase matches every fix asset, so the positive test would pass
-        # on it. The repair control is what has to refuse it.
+        # on it. The pr-revise control is what has to refuse it.
         for path in FIX_ASSETS:
             self.assertIn(self.VACUOUS_PHRASE, flat(read(path)))
         leaked = [
             path.relative_to(REPO_ROOT)
-            for path in REPAIR_ASSETS
+            for path in REVISE_ASSETS
             if self.VACUOUS_PHRASE in flat(read(path))
         ]
         self.assertNotEqual(
             leaked,
             [],
             "a phrase common to every packaged workflow slipped past the "
-            "repair negative control, which therefore proves nothing about "
+            "pr-revise negative control, which therefore proves nothing about "
             "the head-binding rules either",
         )
 
-    def test_a_head_binding_rule_is_absent_from_the_repair_pair(self):
+    def test_a_head_binding_rule_is_absent_from_the_revise_pair(self):
         # The other half of the same control: a real rule must NOT match, or
         # the test above would be refusing everything indiscriminately.
         for requirement in HeadBoundApprovalTests.HEAD_BINDING_RULES:
             phrase = flat(REQUIRED_PHRASES[requirement])
-            for path in REPAIR_ASSETS:
+            for path in REVISE_ASSETS:
                 self.assertNotIn(
                     phrase,
                     flat(read(path)),
@@ -1659,18 +1655,18 @@ class VacuousRuleControlTests(unittest.TestCase):
                 )
 
 
-class RepairDelegationTests(unittest.TestCase):
+class RevisionDelegationTests(unittest.TestCase):
     """The negative control CLAUDE.md's quality gates require.
 
-    Every rule that belongs to fix alone is asserted ABSENT from the repair
+    Every rule that belongs to fix alone is asserted ABSENT from the pr-revise
     pair. Without this, a phrase table that had decayed into fragments common
     to every packaged workflow would pass the positive test above while
     asserting nothing about this workflow in particular.
     """
 
-    def test_repair_carries_none_of_the_fix_only_rules(self):
+    def test_pr_revise_carries_none_of_the_fix_only_rules(self):
         leaked = []
-        for path in REPAIR_ASSETS:
+        for path in REVISE_ASSETS:
             text = read(path)
             flattened = flat(text)
             for requirement in FIX_ONLY_REQUIREMENTS:
@@ -1679,26 +1675,13 @@ class RepairDelegationTests(unittest.TestCase):
         self.assertEqual(
             leaked,
             [],
-            "repair must not carry fix's approval or origin gates:\n"
+            "pr-revise must not carry fix's approval or origin gates:\n"
             + "\n".join(leaked),
         )
 
     def test_the_fix_only_set_is_a_real_subset_of_the_required_table(self):
         self.assertTrue(set(FIX_ONLY_REQUIREMENTS) < set(REQUIRED_PHRASES))
         self.assertGreaterEqual(len(FIX_ONLY_REQUIREMENTS), 10)
-
-    def test_both_workflows_now_agree_about_retrying(self):
-        # These two once disagreed: fix was going to retry an infrastructure
-        # failure that repair refuses. Dropping that capability makes the rule
-        # one rule, held in both places, with the drainer as the only
-        # rerunner -- so the agreement is asserted rather than left to drift
-        # back apart.
-        for path in REPAIR_ASSETS:
-            self.assertIn("no retry loops", read(path))
-        for path in FIX_ASSETS:
-            self.assertIn(
-                "This workflow does not retry a red check, ever.", read(path)
-            )
 
 
 # The spelled-out counts each bundle README states about its own inventory, and
@@ -1742,11 +1725,11 @@ BUNDLE_READMES = {
     ),
 }
 
-# The workflows Kanban's own Haskell spawns, which every README states as the
+# The issue-to-pull-request workflows (the HASKELL_PARITY set), which every README states as the
 # complement of its user-invoked count. Restated here rather than imported,
 # because the plugin modules that own it are not importable under this
 # module's own load path.
-HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
+HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise"}
 
 
 def workflow_names_from_paths(prefix: str, paths) -> set[str]:
