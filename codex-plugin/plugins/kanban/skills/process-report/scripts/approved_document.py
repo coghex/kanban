@@ -1342,7 +1342,12 @@ def finish_capture(root: Path, pending: dict, inspected: dict) -> dict:
     verified_state, verified_blob = inspected["aside"]
     if verified_state == "file":
         state, blob = file_state(inspected["aside_path"])
-        if state != "absent" and (state, blob) != ("file", verified_blob):
+        # Bytes and, where the replacement was made to carry one, permissions.
+        moved_mode = (
+            state == "file" and "mode" in inspected
+            and stat.S_IMODE(os.lstat(inspected["aside_path"]).st_mode) != inspected["mode"]
+        )
+        if state != "absent" and ((state, blob) != ("file", verified_blob) or moved_mode):
             if state == "file":
                 pending = root_capture(
                     root, pending,
@@ -1595,6 +1600,12 @@ def apply_over_baseline(root: Path, pending: dict, content: bytes) -> dict:
             pending_ref=pending["ref"],
         )
     try:
+        # The replacement carries the mode the captured file has now: a
+        # permission change made after the mode was first read is not lost.
+        captured_mode = stat.S_IMODE(os.lstat(aside).st_mode)
+        if captured_mode != mode:
+            os.chmod(scratch, captured_mode)
+        inspected["mode"] = captured_mode
         link_into_place(scratch, target)
     except FileExistsError:
         raise DocumentError(

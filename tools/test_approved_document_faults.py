@@ -1658,6 +1658,35 @@ class ReworkRoundFive(FaultFixture):
         self.assertFalse((self.fx.work / DOC).exists())
         self.assertEqual(len(list((self.fx.work / "docs").glob(".kanban-attempt-*/aside"))), 1)
 
+    def test_a_permission_change_made_just_before_the_capture_carries_to_the_replacement(self):
+        self.mode("refuse")
+        real = approved.rename_aside
+
+        def restricted_then_renamed(target, aside):
+            os.chmod(target, 0o600)
+            return real(target, aside)
+
+        with unittest.mock.patch.object(approved, "rename_aside", restricted_then_renamed):
+            outcome = self.approve(EDITED)
+        self.assertEqual(outcome["reason"], "tool-refused")
+        self.assertEqual(os.stat(self.fx.work / DOC).st_mode & 0o777, 0o600)
+
+    def test_a_permission_change_after_installation_stops_the_cleanup(self):
+        real = approved.link_into_place
+
+        def installed_then_restricted(source, target):
+            real(source, target)
+            for aside in (self.fx.work / "docs").glob(".kanban-attempt-*/aside"):
+                os.chmod(aside, 0o600)
+
+        with unittest.mock.patch.object(approved, "link_into_place", installed_then_restricted):
+            error = self.failure(self.approve, EDITED)
+        self.assertEqual(error.status, "capture-changed")
+        asides = list((self.fx.work / "docs").glob(".kanban-attempt-*/aside"))
+        self.assertEqual(len(asides), 1)
+        self.assertEqual(asides[0].stat().st_mode & 0o777, 0o600)
+        self.assertIsNotNone(approved.read_pending(self.fx.work, REPOSITORY, DOC)["capture"])
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

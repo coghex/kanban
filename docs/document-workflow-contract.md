@@ -988,7 +988,9 @@ and every `T-NN` row of that design is a named regression in
    `captured-<n>` in the same rewrite. The captured file is read once more immediately
    before it is unlinked: an editor holding the original descriptor can still
    write to that inode, so bytes that changed since they were verified are rooted
-   and kept and the capture stops (`capture-changed`). A resume validates the record's landing
+   and kept and the capture stops (`capture-changed`). The replacement carries the mode the captured
+   file has when it is installed, and a mode change after that stops the cleanup
+   the same way. A resume validates the record's landing
    evidence read-only (a stale or unverifiable record refuses) and the document's
    index entry (a staged change refuses) before it settles
    a capture or writes anything. `refs/kanban/applied-locally/<key>`
