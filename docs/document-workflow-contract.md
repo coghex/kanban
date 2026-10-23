@@ -953,7 +953,9 @@ and every `T-NN` row of that design is a named regression in
    unlinked only after its restoration or its retention is verified. An outside
    edit captured in the swap is rooted in the intent and put back; a writer who
    recreated the document in the gap keeps their file. A file that cannot be read
-   is neither absent nor empty. The write root is the owning repository's
+   is neither absent nor empty, and a document whose path passes through a
+   symbolic link is refused before anything moves, so a write or a recovery never
+   leaves the write root. The write root is the owning repository's
    current isolated worktree; `docs-wip` is neither required nor selected, and
    the helper never checks out, resets, switches or stages anything.
 2. **Per-document serialization.** One lock per (repository, document), keyed by
@@ -974,7 +976,9 @@ and every `T-NN` row of that design is a named regression in
    written, with the original rooted in the replacement. An operator sets an
    intent aside with `--abandon-intent`, which refuses while a capture is
    unresolved or a tool ever had the document and moves the record to
-   `refs/kanban/abandoned-publication/<key>`, never deleting what it rooted.
+   `refs/kanban/abandoned-publication/<key>/<commit>` (one absent-only reference per
+   intent, verified before the pending reference is deleted), never deleting what
+   it rooted.
 4. **The preflight** (`--check-pending`), which keeps the publisher's contract:
    `status` is `clear` or `pending`; `publication_tip` is a freshly fetched tip;
    `working_copy_blob`, `pending_kinds` and the `tracker_transaction` report are

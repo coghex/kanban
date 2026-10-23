@@ -800,6 +800,102 @@ class RetryGateFaults(FaultFixture):
         self.assertEqual(self.gh_calls(), [])
 
 
+class ReviewRegressions(FaultFixture):
+    """Reproduced by the first rereview of the reworked branch (PR #836)."""
+
+    def test_a_symlinked_ancestor_confines_nothing_outside_the_write_root(self):
+        outside = self.fx.dir / "outside"
+        outside.mkdir()
+        (outside / "note.md").write_text("an external file\n")
+        (self.fx.work / "linked").symlink_to(outside)
+        before = self.facts()
+        code, payload, _ = self.start(
+            [], "an external file\n\n- approved\n", document="linked/note.md",
+            baseline=blob_of("an external file\n"),
+        )
+        self.assertEqual((code, payload["status"]), (1, "document-path-unsafe"))
+        self.assertEqual((outside / "note.md").read_text(), "an external file\n")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["note.md"])
+        self.assertEqual(self.calls(), [])
+        self.assertIsNone(self.fx.pending("linked/note.md"))
+        report = self.child([], "--branch", "master", "--check-pending", document="linked/note.md")[1]
+        self.assertEqual(report["status"], "document-path-unsafe")
+        self.assertEqual(self.facts()["origin"], before["origin"])
+
+    def test_an_unreadable_document_is_pending_not_clear(self):
+        path = self.fx.work / DOC
+        os.chmod(path, 0)
+        try:
+            code, report, _ = self.check_child()
+        finally:
+            os.chmod(path, 0o644)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "pending")
+        self.assertIn("publication", report["pending_kinds"])
+        self.assertEqual(report["record_fault"]["status"], "file-unreadable")
+        self.assertIsNone(report["working_copy_blob"])
+
+    def test_two_abandoned_intents_are_both_retained(self):
+        first = self.helper_record(text=EDITED)
+        record = approved.read_pending(self.fx.work, REPOSITORY, DOC)
+        first_blob = record["approved_blob"]
+        code, one, _ = self.child([], "--branch", "master", "--abandon-intent")
+        self.assertEqual(one["status"], "abandoned")
+        other_text = EDITED.replace("- line 6\n", "- line 6, a second attempt\n")
+        self.helper_record(text=other_text)
+        second_blob = approved.read_pending(self.fx.work, REPOSITORY, DOC)["approved_blob"]
+        code, two, _ = self.child([], "--branch", "master", "--abandon-intent")
+        self.assertEqual(two["status"], "abandoned")
+        self.assertNotEqual(one["abandoned_ref"], two["abandoned_ref"])
+        run(["git", "reflog", "expire", "--expire=now", "--all"], self.fx.work)
+        run(["git", "gc", "-q", "--prune=now"], self.fx.work)
+        for blob in (first_blob, second_blob):
+            run(["git", "cat-file", "-e", blob], self.fx.work)
+        self.assertEqual(self.fx.ref(one["abandoned_ref"]), first)
+
+    def test_a_contradicting_applied_record_stops_the_settlement(self):
+        self.crash([self.fault("settle_landed.before", "T-26.contradiction")])
+        other = approved._preserve(self.fx.work, b"unrelated but valid applied content\n")
+        run(["git", "update-ref", approved.applied_ref(REPOSITORY, DOC), other], self.fx.work)
+        pending = self.fx.pending()
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "applied-conflict")
+        self.assertEqual((self.fx.pending(), self.fx.applied()), (pending, other))
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.check_child()[1]["status"], "pending")
+
+    def test_a_legacy_commit_that_changes_more_than_the_document_is_malformed(self):
+        for name in ("a second path", "a merge commit"):
+            with self.subTest(case=name):
+                self.setUp()
+                root, tip = self.fx.work, self.fx.origin_tip()
+                stored = approved._preserve(root, EDITED.encode())
+                if name == "a second path":
+                    commit = base.publisher.build_commit(root, tip, DOC, stored, "legacy")
+                    other = approved._preserve(root, b"# Other, quietly changed\n")
+                    index = root / "scratch-index"
+                    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+                    subprocess.run(["git", "read-tree", commit], cwd=root, env=env, check=True)
+                    subprocess.run(["git", "update-index", "--cacheinfo", f"100644,{other},{OTHER}"],
+                                   cwd=root, env=env, check=True)
+                    tree = subprocess.run(["git", "write-tree"], cwd=root, env=env, check=True,
+                                          capture_output=True, text=True).stdout.strip()
+                    index.unlink()
+                    commit = run(["git", "commit-tree", tree, "-p", tip, "-m", "legacy"], root)
+                else:
+                    first = base.publisher.build_commit(root, tip, DOC, stored, "legacy")
+                    commit = run(["git", "commit-tree", f"{first}^{{tree}}", "-p", tip, "-p", first,
+                                  "-m", "legacy merge"], root)
+                run(["git", "update-ref", base.publisher.pending_ref(REPOSITORY, DOC), commit], root)
+                self.fx.write(root, EDITED)
+                report = self.check_child()[1]
+                self.assertEqual(report["record_fault"]["status"], "pending-malformed")
+                code, stop, _ = self.resume_child()
+                self.assertEqual(stop["status"], "pending-malformed")
+                self.assertEqual(self.fx.pending(), commit)
+                self.assertEqual(self.calls(), [])
+
+
 class NegativeControls(FaultFixture):
     """Each guard must fail its test when removed: the tests have teeth."""
 

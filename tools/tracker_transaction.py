@@ -1507,6 +1507,12 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
         return True, f"{document} was applied locally and has not landed on {branch}"
     if "\n" in document:
         return False, f"{document} has a newline in its name, so its history cannot be searched"
+    shallow = git(["rev-parse", "--is-shallow-repository"], cwd=root, check=False)
+    if shallow.returncode != 0 or shallow.stdout.decode().strip() != "false":
+        return False, (
+            f"the history of origin/{branch} is shallow or its depth cannot be "
+            "read, so whether the applied content already landed cannot be decided"
+        )
     commits = git(["rev-list", f"origin/{branch}"], cwd=root, check=False)
     if commits.returncode != 0:
         return False, (

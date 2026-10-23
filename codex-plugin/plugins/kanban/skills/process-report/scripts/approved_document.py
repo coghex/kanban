@@ -571,6 +571,30 @@ def check_supported_name(document: str) -> None:
         )
 
 
+def confine(root: Path, document: str) -> None:
+    """Refuse a document whose path leaves the verified worktree: every existing
+    component below the root must be a real directory (or the final file), never
+    a symlink, so a link cannot carry a write or a recovery outside it."""
+    current = root
+    for part in PurePosixPath(document).parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise DocumentError(
+                "document-path-unsafe", f"{current} could not be inspected ({error})"
+            ) from error
+        if stat.S_ISLNK(info.st_mode):
+            raise DocumentError(
+                "document-path-unsafe",
+                f"{current} is a symbolic link, so {document} is not confined to "
+                f"the write root {root}; nothing was moved or written",
+                path=str(current),
+            )
+
+
 def receipt_line(pending: dict) -> str:
     """The one line that binds a commit on the branch to a recorded attempt.
 
@@ -764,14 +788,21 @@ def read_pending(root: Path, owner: str, document: str) -> dict | None:
         recorded = tree.get(document)
         if recorded is None:
             raise _malformed(ref, commit, f"does not carry {document}")
-        parent = git(["rev-parse", f"{commit}^"], cwd=root, check=False)
-        if parent.returncode != 0:
+        parents = git(
+            ["rev-list", "--parents", "-n", "1", commit], cwd=root, check=False
+        ).stdout.decode().split()[1:]
+        if len(parents) != 1:
             raise _malformed(
-                ref, commit, "is neither this module's record nor a publisher commit"
+                ref, commit,
+                "is neither this module's record nor a single-parent publisher commit",
+            )
+        if receipt_paths(root, commit) != [document]:
+            raise _malformed(
+                ref, commit, f"does not change {document} alone, as a publisher commit does"
             )
         return base | {
             "form": FORM_PUBLISHER, "version": 0, "approved_blob": recorded,
-            "baseline": None, "rendered_tip": parent.stdout.decode().strip(),
+            "baseline": None, "rendered_tip": parents[0],
             "attempt": None, "payloads": {"approved": recorded},
         }
     try:
@@ -1225,6 +1256,7 @@ def recover_capture(root: Path, pending: dict) -> dict:
     """Settle an interrupted capture from what is actually on disk, never from a
     flag: inspect the recorded locations, restore or retain, and return the
     intent with its descriptor cleared — or stop with the state reported."""
+    confine(root, pending["document"])
     inspected = inspect_capture(root, pending)
     approved, baseline = pending["approved_blob"], pending["baseline"]
     target_state, target_blob = inspected["target"]
@@ -1296,6 +1328,7 @@ def apply_over_baseline(root: Path, pending: dict, content: bytes) -> dict:
     unless its restoration or retention is verified.
     """
     document = pending["document"]
+    confine(root, document)
     target = root / document
     state, blob = file_state(target)
     if state != "file" or blob != pending["baseline"]:
@@ -2032,8 +2065,18 @@ def settle_landed(
                     applied_ref=applied_ref(owner, document), pending_ref=pending["ref"],
                 )
             cleared["applied"] = "cleared"
+        elif applied == pending["payloads"].get("predecessor"):
+            cleared["applied"] = "kept: it is the rooted predecessor"
         else:
-            cleared["applied"] = "kept: it names other content"
+            raise DocumentError(
+                "applied-conflict",
+                f"{document} reached {branch}, but its applied record names other "
+                "content than this attempt applied or rooted; both records are kept "
+                "until it is reconciled",
+                remote_contains_commit=True, published_blob=published,
+                applied_ref=applied_ref(owner, document), applied_object=applied,
+                pending_ref=pending["ref"],
+            )
     if not delete_ref(root, pending["ref"], pending["commit"]):
         raise DocumentError(
             "record-retained",
@@ -2327,8 +2370,15 @@ def abandon_intent(root: Path, owner: str, document: str) -> dict:
             "abandoned: settle the capture and establish what landed first",
             pending_ref=pending["ref"],
         )
-    kept = ABANDONED_NAMESPACE + "/" + pending["ref"].rsplit("/", 1)[1]
-    git(["update-ref", kept, pending["commit"]], cwd=root)
+    kept = f"{ABANDONED_NAMESPACE}/{pending['ref'].rsplit('/', 1)[1]}/{pending['commit']}"
+    made = git(["update-ref", kept, pending["commit"], ""], cwd=root, check=False)
+    if read_ref(root, kept) != pending["commit"]:
+        raise DocumentError(
+            "abandon-refused",
+            "the intent could not be retained under its own archive reference, so "
+            "it was not set aside" + (f" ({made.stderr.decode().strip()})" if made.returncode else ""),
+            pending_ref=pending["ref"],
+        )
     if not delete_ref(root, pending["ref"], pending["commit"]):
         raise DocumentError(
             "record-retained", "the intent could not be set aside", pending_ref=pending["ref"]
@@ -2345,6 +2395,7 @@ def locked_sequence(
     expected_tip: str | None, operator_quiescent: bool,
 ) -> dict:
     check_supported_name(document)
+    confine(root, document)
     pending = read_pending(root, owner, document)
     validate_applied(root, owner, document)
     if content is None:
@@ -2552,6 +2603,7 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
     check_supported_name(document)
+    confine(resolved, document)
     pending_name = pending_ref(owner, document)
     module = tracker_transaction_module()
     try:
@@ -2567,6 +2619,12 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
         validate_applied(resolved, owner, document)
     except DocumentError as error:
         fault = error
+    working = None
+    try:
+        working = file_state(resolved / document)[1]
+    except DocumentError as error:
+        # An unreadable document is neither clear nor absent: it is pending.
+        fault = fault or error
     kinds = []
     if record is not None or fault is not None:
         kinds.append("publication")
@@ -2579,10 +2637,6 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
         # Not check=False: the tip this returns becomes the caller's binding,
         # and one minted from a stale cached ref reads as current.
         fresh = fresh_tip(resolved, branch)
-        try:
-            working = file_state(resolved / document)[1]
-        except DocumentError as error:
-            working, fault = None, fault or error
         outcome = {
             "status": "pending" if kinds else "clear",
             "document": document,

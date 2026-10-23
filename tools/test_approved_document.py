@@ -2061,6 +2061,32 @@ class LocalCheckpointTests(RecordSeedingMixin, ApprovedFixture):
             )
         self.assertEqual(caught.exception.status, "resolution-unverified")
 
+    def test_a_shallow_history_cannot_license_a_legacy_local_resolution(self):
+        # PR #836 rework round 1. A legacy applied-only landing, then its terminal
+        # entry removed upstream; a shallow boundary hides the landing from
+        # rev-list. A successful but incomplete listing is not a negative.
+        ref = self.confirmed_transaction()
+        outcome = publisher.publish(
+            repository=REPOSITORY, branch="master", root=self.fx.work, document=DOC,
+            content=self.STATUS.encode(), message="legacy",
+            expected_working_copy=blob_of(NOTES),
+        )
+        self.assertEqual(outcome["status"], "not-published")
+        self.fx.upstream_edit(self.STATUS)
+        self.fx.upstream_edit(NOTES + "\nthe entry is gone\n")
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.work)
+        tip = self.fx.origin_tip()
+        common = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], self.fx.work)
+        Path(common, "shallow").write_text(tip + "\n")
+        self.assertEqual(
+            run(["git", "rev-parse", "--is-shallow-repository"], self.fx.work), "true"
+        )
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.resolve_local(ref)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("shallow", caught.exception.message)
+        self.assertIsNotNone(tracker.read_record(self.fx.work, ref)[0])
+
     def test_a_malformed_applied_record_licenses_nothing(self):
         ref = self.confirmed_transaction()
         self.fx.write(self.fx.work, self.STATUS)
