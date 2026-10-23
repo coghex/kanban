@@ -34,9 +34,19 @@ every packaged workflow would fail here rather than pass everywhere.
 
 from __future__ import annotations
 
+import importlib.util
+import inspect
+import json
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+import fake_cli
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -62,9 +72,11 @@ COORDINATORS = (
 
 # Every shell variable the assets point a redirect at. The hygiene rules below
 # are asserted over this tuple rather than over one hard-coded name, because a
-# rule naming only the first scratch file would leave a later one unmeasured --
-# and the head-binding evidence fences added two.
-SCRATCH_VARIABLES = ("ROLLUP", "COMMENTS", "REVIEWS")
+# rule naming only the first scratch file would leave a later one unmeasured.
+# The head-binding evidence fences once added two; the bundled approval helper
+# reads those feeds in its own process now, so the check rollup is the only
+# scratch file the assets still write.
+SCRATCH_VARIABLES = ("ROLLUP",)
 
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):", re.MULTILINE)
@@ -236,10 +248,36 @@ REQUIRED_PHRASES = {
         "nothing about."
     ),
     "the-two-evidence-paths-are-weighed-independently": (
-        "`label` requires the canonical-marker evidence below, `review` "
-        "requires the\nnative-approval evidence below, and `either` is met "
-        "by whichever of the two\nholds — one path failing never vetoes "
-        "valid evidence from the other."
+        "`label` requires the canonical-marker evidence, `review` requires the "
+        "native-approval evidence, and `either` is met by whichever of the two "
+        "holds — one path failing never vetoes valid evidence from the other."
+    ),
+    "the-success-test-is-exit-approved-and-recorded-head": (
+        "**The success test is all three of these, and nothing weaker.** The "
+        "helper must exit 0, its `approved` must be exactly `true`, and its "
+        "`head` must equal `RECORDED_HEAD`."
+    ),
+    "a-refusal-object-is-never-success": (
+        "Nonempty output, a refusal object, missing or malformed output, a "
+        "nonzero status, and an approval evaluated at any other head are each "
+        "a refusal"
+    ),
+    "the-recorded-head-is-the-approved-head": (
+        "Record the `headRefOid` that read returned as `RECORDED_HEAD`. It is "
+        "the head this run diagnoses and edits"
+    ),
+    "the-pre-push-guard-runs-only-behind-the-initial-one": (
+        "it can run only behind the initial guard"
+    ),
+    "the-push-is-reachable-only-through-the-fresh-guard": (
+        "The push is reachable only through the fresh guard above"
+    ),
+    "a-single-path-failure-does-not-veto-the-other-path": (
+        "Under `either`, a read or parse failure confined to one evidence path "
+        "is that path's unmet outcome and does not veto the other"
+    ),
+    "the-remedy-is-chosen-from-the-marker-history": (
+        "This workflow chooses the command, not the helper"
     ),
     "problem-labels-refuse-under-every-mode": (
         "The\nconfigured changes-requested and blocking labels remain "
@@ -247,35 +285,30 @@ REQUIRED_PHRASES = {
         "neither path."
     ),
     "an-unresolved-publisher-fails-closed": (
-        "Resolve the authenticated publisher first, and fail closed when it "
-        "cannot be\nresolved: an unresolved login makes every ownership test "
-        "below vacuously true."
+        "The helper resolves the authenticated login before it reads any "
+        "evidence and refuses when it cannot: an unresolved login makes every "
+        "ownership test vacuously true."
     ),
     "the-whole-paginated-comment-feed-is-read": (
-        "Read the COMPLETE paginated feed rather than a bounded view — on a "
-        "long pull\nrequest the newest marker falls outside a capped one, "
-        "and an older verdict\nwould then speak for a head nobody reviewed."
+        "chosen from the COMPLETE paginated feed by creation time with the "
+        "comment id breaking ties"
     ),
     "the-marker-is-selected-by-recency-before-it-is-tested": (
-        "Among the comments that publisher\nwrote, select the newest "
-        "marker-bearing comment by creation time with the\ncomment id "
-        "breaking ties, and only THEN test what it says. Accept the\n"
-        "established v2 shape and the legacy v1 shape."
+        "The helper reads the complete feed because a bounded view can leave "
+        "the newest marker outside it, and an older verdict would then speak "
+        "for a head nobody reviewed; it selects the newest comment BEFORE it "
+        "tests what that comment says, and it accepts the established v2 "
+        "shape and the legacy v1 shape."
     ),
     "the-label-path-needs-a-current-head-approve-marker": (
-        "The configured approval label stays necessary and stops being "
-        "sufficient, in\n`either` mode exactly as in `label` mode. The "
-        "`label` path is met only when\nthat label is still attached, the "
-        "selected comment carries `verdict=APPROVE`,\nits `head=` equals the "
-        "current `headRefOid`, and its `reviewers=` list does not\nname the "
-        "origin brand step 2b validated"
+        "the path is met only when that label is attached AND the newest "
+        "marker the authenticated publisher wrote"
     ),
     "missing-or-malformed-evidence-never-falls-back": (
-        "**Missing evidence, an unreadable feed, and\na malformed or "
-        "multiply-markered selected comment each leave this path unmet\n"
-        "rather than falling back to an older approval**, and so does a "
-        "newer\nnon-approval standing over an older approval: the selection "
-        "is by recency, not\nby verdict."
+        "Missing evidence, an unreadable feed, and a malformed or "
+        "multiply-markered newest comment each leave the path unmet rather "
+        "than falling back to an older approval, and so does a newer "
+        "non-approval over an older approval."
     ),
     "the-aggregate-review-decision-is-necessary-not-sufficient": (
         "`reviewDecision == APPROVED` stays necessary and stops being "
@@ -283,28 +316,21 @@ REQUIRED_PHRASES = {
         "statement about a commit."
     ),
     "the-effective-review-per-author-is-the-native-evidence": (
-        "Keep only the opinionated reviews — `APPROVED` and "
-        "`CHANGES_REQUESTED` — and\nfor each author keep only their newest "
-        "one by `submitted_at`, with the review\nid breaking ties. A "
-        "`DISMISSED` review is not evidence, and an author's later\nopinion "
-        "supersedes their earlier one."
+        "one author's newest opinionated review (`APPROVED` or "
+        "`CHANGES_REQUESTED`, by `submitted_at` with the review id breaking "
+        "ties)"
     ),
     "the-review-path-needs-an-approval-naming-the-current-commit": (
-        "**The `review` path is met only when one\nof those surviving "
-        "reviews is `APPROVED` and its `commit_id` equals the current\n"
-        "`headRefOid`.**"
+        "is an `APPROVED` whose `commit_id` equals the current head."
     ),
     "stale-or-unattributed-native-approval-is-insufficient": (
-        "A superseded or dismissed approval, the aggregate\n"
-        "`reviewDecision` on its own, and a review whose commit attribution "
-        "is absent or\nunreadable are each insufficient rather than assumed "
-        "current."
+        "A dismissed, superseded, stale or unattributed approval is "
+        "insufficient."
     ),
     "the-refusal-names-both-heads-or-says-there-is-none": (
-        "Report the mismatch concretely and stop: the current `headRefOid`, "
-        "the head the\napproval actually belongs to when the evidence names "
-        "one, and — when it does\nnot — that the evidence is missing or "
-        "unreadable rather than naming any head at\nall."
+        "the `head` it evaluated, the `approval_head` the evidence names — or, "
+        "when that is null, that the evidence is missing or unreadable rather "
+        "than naming any head at all"
     ),
     "the-review-path-is-not-cleared-by-a-canonical-review": (
         "A `review` path left unmet is NOT\ncleared that way: the canonical "
@@ -321,17 +347,14 @@ REQUIRED_PHRASES = {
         "which a run stopping here never reaches."
     ),
     "the-head-binding-is-re-established-before-the-push": (
-        "**Re-run step 2c against freshly fetched evidence as well.** "
-        "Re-read the\ncomment feed for the `label` path, or the reviews for "
-        "the `review` path,\nwhichever the configured mode selected, and "
-        "re-establish the head binding from\nwhat comes back."
+        "IMMEDIATELY before the push, run the approval helper again. It "
+        "re-reads the pull request, the authenticated publisher, and the "
+        "evidence itself"
     ),
     "a-cached-initial-reading-cannot-answer-for-the-push": (
-        "The marker read at step 2c and the reviews read there cannot\n"
-        "answer for this moment: a canonical verdict can be superseded and a "
-        "native\napproval dismissed while the head never moves, so a cached "
-        "initial reading\nwould carry an authority that has since been "
-        "withdrawn straight into the push."
+        "so nothing cached from step 2c can answer for this moment: a "
+        "canonical verdict can be superseded and a native approval dismissed "
+        "while the head never moves"
     ),
     "a-pre-push-stop-preserves-the-worktree": (
         "Leave the worktree's existing work exactly as it is: a\nstop here "
@@ -562,21 +585,22 @@ REQUIRED_PHRASES = {
         "repository and verify its remote head still equals the recorded SHA."
     ),
     "revalidates-mutable-authority-immediately-before-push": (
-        "After that head check and IMMEDIATELY before the push, re-read the pull "
-        "request from the resolved repository with the same authority-bearing "
-        "fields step 2 used"
+        "After that head check and IMMEDIATELY before the push, run the "
+        "approval helper again."
     ),
     "reapplies-approval-problem-label-and-origin-gates": (
-        "Reapply step 2's configured approval decision to that FRESH `labels` "
-        "and `reviewDecision`, reapply its configured changes-requested and "
-        "blocking-label refusal, and reapply step 2b's complete origin-marker "
-        "parse — including that the result still names THIS bundle's active brand."
+        "The helper repeats every check of step 2b and step 2c against what it "
+        "reads now: the configured approval decision, the changes-requested "
+        "and blocking labels, the complete origin-marker parse including that "
+        "it still names THIS bundle's active brand, and the selected mode's "
+        "head-bound evidence"
     ),
     "lost-pre-push-authority-stops-without-pushing": (
         "If approval was withdrawn, the selected mode's head-bound evidence no "
         "longer holds, any configured problem label appeared, the origin "
         "became missing, malformed, or a different brand, or the head no "
-        "longer matches, STOP with no push and no rereview."
+        "longer matches, STOP with no push and no rereview, and leave "
+        "`PUSH_APPROVED_HEAD` empty."
     ),
     "an-unchanged-head-does-not-prove-authority": (
         "A pull request's body, labels, `reviewDecision`, canonical marker, and "
@@ -658,6 +682,13 @@ FIX_ONLY_REQUIREMENTS = (
     "the-drainer-already-keys-on-the-approved-head",
     "carrying-the-approval-forward-is-not-available-here",
     "the-two-evidence-paths-are-weighed-independently",
+    "the-success-test-is-exit-approved-and-recorded-head",
+    "a-refusal-object-is-never-success",
+    "the-recorded-head-is-the-approved-head",
+    "the-pre-push-guard-runs-only-behind-the-initial-one",
+    "the-push-is-reachable-only-through-the-fresh-guard",
+    "a-single-path-failure-does-not-veto-the-other-path",
+    "the-remedy-is-chosen-from-the-marker-history",
     "problem-labels-refuse-under-every-mode",
     "an-unresolved-publisher-fails-closed",
     "the-whole-paginated-comment-feed-is-read",
@@ -993,29 +1024,40 @@ class PrePushAuthorityRevalidationTests(unittest.TestCase):
     """A stable branch ref does not prove the workflow still has authority.
 
     Approval, labels, and the PR body are mutable GitHub metadata. The initial
-    read bounds diagnosis, while a second read immediately before push closes
-    the window in which authority can be withdrawn without changing the SHA.
+    read bounds diagnosis, while a second, fresh evaluation immediately before
+    the push closes the window in which authority can be withdrawn without
+    changing the SHA. Since issue #842 that second evaluation is the bundled
+    approval helper run again, so the pull request is read once by the workflow
+    (for the facts the diagnosis needs) and once more by the helper on each of
+    its two runs.
     """
 
     PR_VIEW_PREFIX = "gh pr view <pr> -R <owner/name> --json "
+    HELPER_CALL = "python3 \"$APPROVAL_HELPER\" --policy fix"
 
-    def test_both_assets_fetch_authority_metadata_twice(self):
+    def test_both_assets_read_the_diagnosis_facts_once_and_the_helper_twice(self):
         for path in FIX_ASSETS:
             text = read(path)
             self.assertEqual(
                 text.count(self.PR_VIEW_PREFIX),
+                1,
+                f"{path} reads the pull request for the diagnosis once; the "
+                "authority is read by the helper, not by a second workflow read",
+            )
+            self.assertEqual(
+                text.count(self.HELPER_CALL),
                 2,
-                f"{path} must read the PR once for diagnosis and once before push",
+                f"{path} must run the approval helper at step 2c and again "
+                "immediately before the push",
             )
 
-    def test_the_second_read_carries_every_mutable_gate_field(self):
+    def test_the_diagnosis_read_no_longer_carries_the_authority_fields_twice(self):
         for path in FIX_ASSETS:
             text = read(path)
-            second = text.rindex(self.PR_VIEW_PREFIX)
-            command_end = text.index("\n", second)
-            command = text[second:command_end]
-            for field in ("body", "headRefOid", "labels", "reviewDecision"):
-                self.assertIn(field, command, f"{path}: pre-push read omits {field}")
+            command = text[text.index(self.PR_VIEW_PREFIX):]
+            command = command[: command.index("\n")]
+            self.assertIn("headRefOid", command, path)
+            self.assertIn("baseRefName", command, path)
 
     def test_revalidation_is_after_the_remote_head_check_and_before_push(self):
         for path in FIX_ASSETS:
@@ -1029,6 +1071,15 @@ class PrePushAuthorityRevalidationTests(unittest.TestCase):
             self.assertLess(remote_head_check, fresh_gate, path)
             self.assertLess(fresh_gate, push, path)
             self.assertLess(push, post_push, path)
+
+    def test_the_second_helper_run_sits_between_the_head_check_and_the_push(self):
+        for path in FIX_ASSETS:
+            text = read(path)
+            fresh_gate = text.index("IMMEDIATELY before the push")
+            second_call = text.index(self.HELPER_CALL, fresh_gate)
+            push = text.index("Only after BOTH pre-push checks pass, push", fresh_gate)
+            self.assertLess(fresh_gate, second_call, path)
+            self.assertLess(second_call, push, path)
 
     def test_the_problem_label_helper_the_assets_follow_still_exists(self):
         workflow = read(WORKFLOW_HS)
@@ -1436,6 +1487,13 @@ class HeadBoundApprovalTests(unittest.TestCase):
         "the-drainer-already-keys-on-the-approved-head",
         "carrying-the-approval-forward-is-not-available-here",
         "the-two-evidence-paths-are-weighed-independently",
+        "the-success-test-is-exit-approved-and-recorded-head",
+        "a-refusal-object-is-never-success",
+        "the-recorded-head-is-the-approved-head",
+        "the-pre-push-guard-runs-only-behind-the-initial-one",
+        "the-push-is-reachable-only-through-the-fresh-guard",
+        "a-single-path-failure-does-not-veto-the-other-path",
+        "the-remedy-is-chosen-from-the-marker-history",
         "problem-labels-refuse-under-every-mode",
         "an-unresolved-publisher-fails-closed",
         "the-whole-paginated-comment-feed-is-read",
@@ -1481,27 +1539,29 @@ class HeadBoundApprovalTests(unittest.TestCase):
 
     def test_both_evidence_feeds_are_fetched_in_full(self):
         # An approval bound to a head read off a capped view is not bound at
-        # all: the newest marker or review can be the one outside the cap.
+        # all: the newest marker or review can be the one outside the cap. The
+        # feeds are the bundled helper's to read now, so the assertion is on the
+        # program the assets run, and `test_pr_head_approval.py` runs it.
+        helper = read(REPO_ROOT / "tools/pr_head_approval.py")
+        for endpoint in (
+            'f"repos/{repo}/issues/{pr}/comments?per_page=100"',
+            'f"repos/{repo}/pulls/{pr}/reviews?per_page=100"',
+        ):
+            self.assertIn(endpoint, helper)
+        self.assertEqual(helper.count('"--paginate", "--slurp"'), 2)
         for path in FIX_ASSETS:
             text = read(path)
-            for command in (
-                'gh api --paginate --slurp '
-                '"repos/<owner>/<name>/issues/<pr>/comments?per_page=100" '
-                '> "$COMMENTS"',
-                'gh api --paginate --slurp '
-                '"repos/<owner>/<name>/pulls/<pr>/reviews?per_page=100" '
-                '> "$REVIEWS"',
-            ):
-                self.assertIn(command, text, f"{path} omits: {command}")
+            self.assertNotIn("gh api --paginate", text, path)
+            self.assertIn("COMPLETE paginated feed", text, path)
 
     def test_the_binding_is_re_established_inside_the_pre_push_gate(self):
-        # The re-read has to sit between the remote-head check and the push,
-        # in the same window step 4's other authority checks occupy.
+        # The fresh evaluation has to sit between the remote-head check and the
+        # push, in the same window step 4's other authority checks occupy.
         for path in FIX_ASSETS:
             text = read(path)
             fresh_gate = text.index("IMMEDIATELY before the push")
             rebind = text.index(
-                "**Re-run step 2c against freshly fetched evidence as well.**"
+                "so nothing cached from step 2c can answer for this moment"
             )
             push = text.index("Only after BOTH pre-push checks pass, push", fresh_gate)
             self.assertLess(fresh_gate, rebind, path)
@@ -1525,21 +1585,29 @@ class HeadBoundApprovalTests(unittest.TestCase):
             self.assertIn("REVIEW_MARKER_RE = ", source, coordinator)
             self.assertIn("head=(?P<head>[0-9a-f]{40})", source, coordinator)
             self.assertIn("def latest_owned_review_marker(", source, coordinator)
-        for path in FIX_ASSETS:
-            self.assertIn("`latest_owned_review_marker`", read(path))
+        # The helper reads the head the same way the coordinator writes it. The
+        # coordinator's own selector is NOT the helper's oracle: it takes the
+        # last parsable match, where the helper applies finalize's complete
+        # selection and malformed-marker rules.
+        helper = read(REPO_ROOT / "tools/pr_head_approval.py")
+        self.assertIn("head=(?P<head>[0-9a-f]{40})", helper)
 
-    def test_the_selection_rule_matches_the_finalize_gate_it_cites(self):
+    def test_the_selection_rule_is_one_implementation_both_callers_share(self):
         # Non-vacuous anchor for "newest by creation time, comment id breaking
-        # ties": that is the ordering finalize's gate actually implements, and
-        # the assets point a reader at it by name.
-        gate = read(FINALIZE_SOURCE)
+        # ties": the ordering lives in the one helper both callers run, and
+        # neither workflow source carries a second copy of it.
+        helper = read(REPO_ROOT / "tools/pr_head_approval.py")
         self.assertIn(
             'key=lambda item: (str(item.get("created_at") or ""), '
             'int(item.get("id") or 0)),',
-            gate,
-            "finalize's gate no longer orders the feed by created_at then id",
+            helper,
+            "the helper no longer orders the feed by created_at then id",
         )
-        self.assertIn("reverse=True,", gate)
+        self.assertIn("reverse=True,", helper)
+        for source in (FINALIZE_SOURCE, FIX_SOURCE):
+            self.assertNotIn(
+                'int(item.get("id") or 0)', read(source), f"{source} re-implements it"
+            )
 
     def test_the_approval_modes_the_binding_branches_on_are_the_haskell_ones(self):
         # The binding is per mode, so the three modes must still be the three
@@ -1565,13 +1633,13 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
     ROUTES = (
         (
             "pr-rereview",
-            "cleared by a fresh canonical review of the current head: name "
-            "{sigil}pr-rereview when the comment feed already read for this step "
-            "contains any canonical `pr-review` marker for this pull request",
+            "name {sigil}pr-rereview when `marker_history` is `true` — the "
+            "authenticated publisher has published a canonical `pr-review` "
+            "marker on this pull request at all",
         ),
         (
             "pr-review",
-            "and name {sigil}pr-review only when that feed contains none.",
+            "and name {sigil}pr-review only when it is `false`.",
         ),
     )
 
@@ -1893,6 +1961,566 @@ class ReviseOriginGuardTests(unittest.TestCase):
 # than reporting a mismatched count, and the failure then names the map instead
 # of the README that is actually stale. Two spare entries beyond today's
 # totals, extended whenever a slice consumes one.
+
+# --------------------------------------------------------------------------
+# The approval guards, executed.
+#
+# Issue #842. Before it, fix's approval derivation was prose and the pre-push
+# revalidation was a phrase: no test could run either. The two guard fences now
+# run as written, so what follows runs them through each bundled copy of the
+# helper against a scripted `gh`, `git` and coordinator, and asserts what the
+# recorded logs do and do not contain.
+# --------------------------------------------------------------------------
+
+PR_NUMBER = "42"
+REPO_SLUG = "coghex/kanban"
+RECORDED = "1a2b3c4d5e6f70819293a4b5c6d7e8f900112233"
+STALE = "99887766554433221100ffeeddccbbaa99887766"
+MOVED = "0f0e0d0c0b0a09080706050403020100ffeeddcc"
+WORKTREE = "/tmp/worktrees/coghex/kanban/pr-42-example"
+HEAD_BRANCH = "issue-7-example"
+HELPER_FIELDS = "number,body,headRefOid,labels,reviewDecision"
+CLAUDE_HELPER = "claude-plugin/plugins/kanban/scripts/pr_head_approval.py"
+CODEX_HELPER = "codex-plugin/plugins/kanban/skills/fix/scripts/pr_head_approval.py"
+CLAUDE_COORDINATOR = "claude-plugin/plugins/kanban/scripts/review_pr.py"
+
+BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
+AVAILABLE_SHELLS = [
+    name for name in ("sh", "bash", "dash", "zsh") if shutil.which(name)
+]
+
+
+def bash_fences(text: str) -> list[str]:
+    return [match.group("body") for match in BASH_FENCE_RE.finditer(text)]
+
+
+def guard_fences(path: Path) -> dict[str, str]:
+    """The four fences the approval guards chain, by role, from a rendering.
+
+    Exactly one of each, deliberately: a guard duplicated into a second fence is
+    a rendering an executing agent could run half of.
+    """
+    fences = bash_fences(read(path))
+    roles = {
+        "initial": lambda f: "--policy fix" in f and "PUSH_APPROVED_HEAD" not in f,
+        "pre_push": lambda f: "PUSH_APPROVED_HEAD=\"\"" in f,
+        "push": lambda f: 'push "${HEAD_REMOTE:?}"' in f,
+        "handoff": lambda f: '--rereview "$PR"' in f,
+    }
+    found = {}
+    for role, test in roles.items():
+        matching = [fence for fence in fences if test(fence)]
+        assert len(matching) == 1, f"{path}: expected one {role} fence, got {len(matching)}"
+        found[role] = matching[0]
+    return found
+
+
+def marker_for(head: str, verdict: str, reviewers: list[str]) -> str:
+    spec = importlib.util.spec_from_file_location(
+        "kanban_fix_guard_review_pr", REPO_ROOT / CLAUDE_COORDINATOR
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    lookup = {"codex": module.CODEX_REVIEWER, "claude": module.CLAUDE_REVIEWER}
+    selected = [lookup[key] for key in reviewers]
+    models = [f"model-{key}@xhigh" for key in reviewers]
+    if len(inspect.signature(module.review_marker).parameters) == 3:
+        return module.review_marker(selected, head, verdict)
+    return module.review_marker(selected, models, head, verdict)
+
+
+def feed(*markers: str) -> list:
+    return [
+        [
+            {
+                "id": index + 1,
+                "created_at": f"2026-08-0{index + 1}T00:00:00Z",
+                "user": {"login": "coghex"},
+                "body": marker,
+            }
+            for index, marker in enumerate(markers)
+        ]
+    ]
+
+
+def pull_request(
+    *,
+    head: str = RECORDED,
+    labels: tuple[str, ...] = ("reviewed:approve",),
+    origin: str = "claude",
+    review_decision: str = "",
+) -> dict:
+    return {
+        "number": int(PR_NUMBER),
+        "body": f"Closes #7\n\n<!-- pr-origin:{origin} -->\n",
+        "headRefOid": head,
+        "labels": [{"name": name} for name in labels],
+        "reviewDecision": review_decision,
+    }
+
+
+class GuardHarness:
+    """A scripted `gh`/`git` pair, both bundles' layouts, and a coordinator stub."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.fake = fake_cli.FakeCli(root)
+        self.fake.install("gh")
+        self.fake.install("git")
+        self.coordinator_log = root / "coordinator.calls"
+        stub = (
+            "import json, sys\n"
+            f"open({str(self.coordinator_log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        )
+        self.claude_plugin_root = root / "claude-plugin-root"
+        (self.claude_plugin_root / "scripts").mkdir(parents=True)
+        shutil.copy(
+            REPO_ROOT / CLAUDE_HELPER,
+            self.claude_plugin_root / "scripts" / "pr_head_approval.py",
+        )
+        (self.claude_plugin_root / "scripts" / "review_pr.py").write_text(stub)
+        self.codex_home = root / "codex-home"
+        cache = self.codex_home / "plugins" / "cache" / "market" / "kanban" / "1.0.0" / "skills"
+        (cache / "fix" / "scripts").mkdir(parents=True)
+        (cache / "pr-review" / "scripts").mkdir(parents=True)
+        shutil.copy(REPO_ROOT / CODEX_HELPER, cache / "fix" / "scripts" / "pr_head_approval.py")
+        (cache / "pr-review" / "scripts" / "review_pr.py").write_text(stub)
+        self.config_home = root / "config"
+        (self.config_home / "kanban").mkdir(parents=True)
+
+    def configure(self, text: str) -> Path:
+        path = self.config_home / "kanban" / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def stub_helper(self, stdout: str, exit_code: int = 0) -> None:
+        source = f"import sys\nsys.stdout.write({stdout!r})\nsys.exit({exit_code})\n"
+        for target in (
+            self.claude_plugin_root / "scripts" / "pr_head_approval.py",
+            *self.codex_home.rglob("pr_head_approval.py"),
+        ):
+            target.write_text(source, encoding="utf-8")
+
+    def script_github(
+        self,
+        *,
+        states,
+        runs_of_comments,
+        runs_of_reviews=None,
+        viewer: str | None = "coghex",
+    ) -> None:
+        if viewer is None:
+            self.fake.script("gh", ["api", "user", "--jq", ".login"], stderr="no\n", exit_code=1)
+        else:
+            self.fake.script("gh", ["api", "user", "--jq", ".login"], stdout=viewer + "\n")
+        for state in states:
+            self.fake.script(
+                "gh",
+                ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json", HELPER_FIELDS],
+                stdout=json.dumps(state),
+            )
+        for pages in runs_of_comments:
+            self.fake.script(
+                "gh",
+                [
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{REPO_SLUG}/issues/{PR_NUMBER}/comments?per_page=100",
+                ],
+                stdout=json.dumps(pages),
+            )
+        for pages in runs_of_reviews or [[[]]]:
+            self.fake.script(
+                "gh",
+                [
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{REPO_SLUG}/pulls/{PR_NUMBER}/reviews?per_page=100",
+                ],
+                stdout=json.dumps(pages),
+            )
+        self.fake.script("git", ["-C", WORKTREE, "push"], stdout="")
+        self.fake.script("git", ["rev-parse", "--show-toplevel"], stdout=WORKTREE + "\n")
+
+    def run(self, script: str, *, recorded: str = RECORDED, config: str = "") -> subprocess.CompletedProcess:
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(self.root / "home"),
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "CLAUDE_PLUGIN_ROOT": str(self.claude_plugin_root),
+            "CODEX_HOME": str(self.codex_home),
+            "PR": PR_NUMBER,
+            "REPO": REPO_SLUG,
+            "CONFIG": config,
+            "RECORDED_HEAD": recorded,
+            "WORKTREE": WORKTREE,
+            "HEAD_REMOTE": "origin",
+            "HEAD_BRANCH": HEAD_BRANCH,
+        }
+        env.update(self.fake.environ_overrides())
+        return subprocess.run(
+            ["sh", "-c", script],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+
+    def gh_calls(self) -> list[list[str]]:
+        return [call["args"] for call in self.fake.calls("gh")]
+
+    def pushes(self) -> list[list[str]]:
+        return [call["args"] for call in self.fake.calls("git") if "push" in call["args"]]
+
+    def handoffs(self) -> list[list[str]]:
+        if not self.coordinator_log.exists():
+            return []
+        return [json.loads(line) for line in self.coordinator_log.read_text().splitlines()]
+
+
+class Scenario:
+    """The pull request a rendering fixes: its own brand's, approved by the
+    other brand. The Codex rendering fixes `pr-origin:codex` pull requests, so a
+    scenario built for the Claude rendering would be refused on its origin."""
+
+    def __init__(self, path: Path):
+        self.brand = "claude" if path == CLAUDE_FIX else "codex"
+        self.other = "codex" if self.brand == "claude" else "claude"
+
+    def pr(self, **overrides) -> dict:
+        overrides.setdefault("origin", self.brand)
+        return pull_request(**overrides)
+
+    def marker(self, head: str = RECORDED, verdict: str = "APPROVE", reviewers=None) -> str:
+        return marker_for(head, verdict, reviewers or [self.other])
+
+
+class ApprovalGuardExecutionTests(unittest.TestCase):
+    """Requirement 8: the guards run, refusals reach no mutation, and the
+    positive control reaches the authorized mutation with the validated head."""
+
+    FULL_CHAIN = ("initial", "pre_push", "push", "handoff")
+    VIEW = ["pr", "view", PR_NUMBER, "-R", REPO_SLUG, "--json", HELPER_FIELDS]
+
+    def chain(self, path: Path, roles) -> str:
+        fences = guard_fences(path)
+        return "\n".join(fences[role] for role in roles)
+
+    def execute(
+        self,
+        path: Path,
+        build=None,
+        *,
+        roles=FULL_CHAIN,
+        recorded: str = RECORDED,
+        config_text: str | None = None,
+        config_path: bool = False,
+        stub: tuple[str, int] | None = None,
+    ):
+        """Run the chain of `roles` for `path`'s rendering.
+
+        `build` maps the rendering's `Scenario` to the `script_github`
+        arguments; absent, the pull request is the ordinary approved one.
+        """
+        scenario = Scenario(path)
+        scripted = build(scenario) if build is not None else {}
+        scripted.setdefault("states", [scenario.pr()])
+        scripted.setdefault("runs_of_comments", [feed(scenario.marker())])
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        harness = GuardHarness(Path(directory.name))
+        harness.script_github(**scripted)
+        config = ""
+        if config_text is not None:
+            written = harness.configure(config_text)
+            config = str(written) if config_path else ""
+        if stub is not None:
+            harness.stub_helper(*stub)
+        completed = harness.run(self.chain(path, roles), recorded=recorded, config=config)
+        return completed, harness
+
+    def assertNoMutation(self, harness: GuardHarness):
+        self.assertEqual(harness.pushes(), [], harness.gh_calls())
+        self.assertEqual(harness.handoffs(), [])
+
+    # -- the positive control ------------------------------------------------
+
+    def test_an_approved_head_reaches_the_push_and_the_handoff_with_it(self):
+        for path in FIX_ASSETS:
+            with self.subTest(asset=path.name):
+                completed, harness = self.execute(path)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    harness.pushes(),
+                    [["-C", WORKTREE, "push", "origin", f"HEAD:refs/heads/{HEAD_BRANCH}"]],
+                )
+                handoffs = harness.handoffs()
+                self.assertEqual(len(handoffs), 1, handoffs)
+                self.assertEqual(handoffs[0][handoffs[0].index("--rereview") + 1], PR_NUMBER)
+
+    def test_the_helper_is_run_fresh_before_the_push_not_reused(self):
+        # Two guard runs mean two of every read, which is what makes the
+        # re-fetch observable rather than assumed.
+        feed_path = f"repos/{REPO_SLUG}/issues/{PR_NUMBER}/comments?per_page=100"
+        for path in FIX_ASSETS:
+            with self.subTest(asset=path.name):
+                _, harness = self.execute(path)
+                calls = harness.gh_calls()
+                self.assertEqual(calls.count(self.VIEW), 2, calls)
+                self.assertEqual(sum(1 for call in calls if call[-1] == feed_path), 2, calls)
+                self.assertEqual(calls.count(["api", "user", "--jq", ".login"]), 2, calls)
+
+    def test_the_explicit_config_path_is_forwarded_to_the_helper(self):
+        text = '[workflow]\napproval_label = "ready:to-land"\n'
+        for path in FIX_ASSETS:
+            with self.subTest(asset=path.name):
+                completed, harness = self.execute(
+                    path,
+                    lambda s: {"states": [s.pr(labels=("ready:to-land",))]},
+                    config_text=text,
+                    config_path=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(len(harness.pushes()), 1)
+                # The default label alone would have refused: the file named
+                # by the caller was the one read.
+                refused, harness = self.execute(path, config_text=text, config_path=True)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertNoMutation(harness)
+
+    # -- an initial refusal reaches nothing ------------------------------------
+
+    def test_an_initial_refusal_prevents_every_later_step(self):
+        refusals = {
+            "no approval label": lambda s: {"states": [s.pr(labels=())]},
+            "a changes-requested label": lambda s: {
+                "states": [s.pr(labels=("reviewed:approve", "reviewed:changes"))]
+            },
+            "a blocking label": lambda s: {
+                "states": [s.pr(labels=("reviewed:approve", "blocked"))]
+            },
+            "a marker for another head": lambda s: {
+                "runs_of_comments": [feed(s.marker(STALE))]
+            },
+            "a changes-requested verdict": lambda s: {
+                "runs_of_comments": [feed(s.marker(RECORDED, "CHANGES_REQUESTED"))]
+            },
+            "a self-review": lambda s: {
+                "runs_of_comments": [feed(s.marker(RECORDED, "APPROVE", [s.brand]))]
+            },
+            "a newer non-approval over an older approval": lambda s: {
+                "runs_of_comments": [feed(s.marker(), s.marker(RECORDED, "CHANGES_REQUESTED"))]
+            },
+            "the other brand's origin": lambda s: {"states": [s.pr(origin=s.other)]},
+            "an unresolved publisher": lambda s: {"viewer": None},
+        }
+        for path in FIX_ASSETS:
+            for reason, build in refusals.items():
+                with self.subTest(asset=path.name, reason=reason):
+                    completed, harness = self.execute(path, build)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    self.assertIn("no head-bound approval at the recorded head", completed.stderr)
+                    self.assertIn("the initial approval guard did not pass", completed.stderr)
+                    self.assertNoMutation(harness)
+                    # A refusal stops before the second, fresh read.
+                    self.assertLessEqual(harness.gh_calls().count(self.VIEW), 1)
+
+    def test_an_approval_evaluated_at_another_head_than_the_recorded_one_refuses(self):
+        # The helper approves, and does so at the head IT read; the diagnosis
+        # works on the head this run recorded. They must be one value.
+        for path in FIX_ASSETS:
+            for recorded in (STALE, ""):
+                with self.subTest(asset=path.name, recorded=recorded or "unset"):
+                    completed, harness = self.execute(path, recorded=recorded)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("no head-bound approval at the recorded head", completed.stderr)
+                    self.assertNoMutation(harness)
+
+    def test_the_guard_accepts_only_exit_zero_with_an_approved_true_result(self):
+        refusal = json.dumps({"approved": False, "head": RECORDED, "reason": "scripted refusal"})
+        approved = json.dumps({"approved": True, "head": RECORDED})
+        cases = {
+            "a nonempty refusal object with a nonzero status": (refusal, 1),
+            "a refusal object with a zero status": (refusal, 0),
+            "an approved result with a nonzero status": (approved, 1),
+            "malformed output with a zero status": ("approved", 0),
+            "an empty result with a zero status": ("", 0),
+            "approved as a string": (json.dumps({"approved": "true", "head": RECORDED}), 0),
+            "an approval naming no head": (json.dumps({"approved": True}), 0),
+            "an approval naming another head": (json.dumps({"approved": True, "head": STALE}), 0),
+            "a failed helper": ("", 2),
+        }
+        for path in FIX_ASSETS:
+            for label, stub in cases.items():
+                with self.subTest(asset=path.name, case=label):
+                    completed, harness = self.execute(path, stub=stub)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    self.assertNoMutation(harness)
+        # The positive control for the table: the same stub with a real
+        # approval of the recorded head reaches the push and the handoff.
+        for path in FIX_ASSETS:
+            with self.subTest(asset=path.name, case="the positive control"):
+                completed, harness = self.execute(path, stub=(approved, 0))
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(len(harness.pushes()), 1)
+                self.assertEqual(len(harness.handoffs()), 1)
+
+    # -- authority withdrawn after the initial pass ------------------------------
+
+    def test_approval_withdrawn_without_head_movement_stops_the_push(self):
+        review_mode = '[workflow]\napproval_mode = "review"\n'
+
+        def native(commit=RECORDED, state="APPROVED", identifier=1, when="2026-08-01T00:00:00Z"):
+            return {
+                "id": identifier,
+                "submitted_at": when,
+                "state": state,
+                "user": {"login": "alice"},
+                "commit_id": commit,
+            }
+
+        cases = {
+            "the approval label removed": (None, lambda s: {
+                "states": [s.pr(), s.pr(labels=())],
+            }),
+            "a newer non-approval marker": (None, lambda s: {
+                "runs_of_comments": [
+                    feed(s.marker()),
+                    feed(s.marker(), s.marker(RECORDED, "CHANGES_REQUESTED")),
+                ],
+            }),
+            "the marker gone from the feed": (None, lambda s: {
+                "runs_of_comments": [feed(s.marker()), [[]]],
+            }),
+            "a changes-requested label": (None, lambda s: {
+                "states": [s.pr(), s.pr(labels=("reviewed:approve", "reviewed:changes"))],
+            }),
+            "a blocking label": (None, lambda s: {
+                "states": [s.pr(), s.pr(labels=("reviewed:approve", "blocked"))],
+            }),
+            "the origin becoming the other brand": (None, lambda s: {
+                "states": [s.pr(), s.pr(origin=s.other)],
+            }),
+            "the origin marker removed": (None, lambda s: {
+                "states": [s.pr(), {**s.pr(), "body": "Closes #7\n"}],
+            }),
+            "a native approval superseded": (review_mode, lambda s: {
+                "states": [s.pr(labels=(), review_decision="APPROVED")] * 2,
+                "runs_of_reviews": [
+                    [[native()]],
+                    [[native(), native(state="CHANGES_REQUESTED", identifier=2, when="2026-08-02T00:00:00Z")]],
+                ],
+            }),
+            "a native approval dismissed": (review_mode, lambda s: {
+                "states": [s.pr(labels=(), review_decision="APPROVED")] * 2,
+                "runs_of_reviews": [[[native()]], [[native(state="DISMISSED")]]],
+            }),
+            "the aggregate review decision withdrawn": (review_mode, lambda s: {
+                "states": [
+                    s.pr(labels=(), review_decision="APPROVED"),
+                    s.pr(labels=(), review_decision=""),
+                ],
+                "runs_of_reviews": [[[native()]], [[native()]]],
+            }),
+        }
+        for path in FIX_ASSETS:
+            for label, (config_text, build) in cases.items():
+                with self.subTest(asset=path.name, withdrawal=label):
+                    completed, harness = self.execute(path, build, config_text=config_text)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    # It passed the initial guard and stopped at the fresh one.
+                    self.assertIn("authority to push was lost", completed.stderr)
+                    self.assertNoMutation(harness)
+                    self.assertEqual(harness.gh_calls().count(self.VIEW), 2)
+
+    def test_the_head_moving_before_the_push_stops_it_both_ways(self):
+        cases = {
+            # The new head carries no approval of its own.
+            "an unapproved new head": lambda s: {
+                "states": [s.pr(), s.pr(head=MOVED)],
+                "runs_of_comments": [feed(s.marker()), feed(s.marker())],
+            },
+            # The new head IS approved -- and that is still not the head this
+            # run diagnosed and edited, so the guard refuses on the mismatch.
+            "an approved new head that is not the recorded one": lambda s: {
+                "states": [s.pr(), s.pr(head=MOVED)],
+                "runs_of_comments": [feed(s.marker()), feed(s.marker(MOVED))],
+            },
+        }
+        for path in FIX_ASSETS:
+            for label, build in cases.items():
+                with self.subTest(asset=path.name, case=label):
+                    completed, harness = self.execute(path, build)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("authority to push was lost", completed.stderr)
+                    self.assertNoMutation(harness)
+
+    def test_an_approval_of_a_moved_head_names_it_in_the_helper_result(self):
+        # The mismatch case above is refused by the GUARD, not by the helper:
+        # the helper approves the head it read, and says which one.
+        path = CLAUDE_FIX
+        scenario = Scenario(path)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        harness = GuardHarness(Path(directory.name))
+        harness.script_github(
+            states=[scenario.pr(head=MOVED)],
+            runs_of_comments=[feed(scenario.marker(MOVED))],
+        )
+        completed = harness.run(
+            'python3 "$CLAUDE_PLUGIN_ROOT/scripts/pr_head_approval.py" --policy fix '
+            '--brand claude --repo "$REPO" --pr "$PR" --config ""'
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["head"], MOVED)
+
+    # -- the order the chain enforces --------------------------------------------
+
+    def test_neither_the_push_nor_the_handoff_is_reachable_around_the_guards(self):
+        skips = {
+            "the pre-push guard skipped before the push": ("initial", "push"),
+            "the pre-push guard skipped before the handoff": ("initial", "handoff"),
+            "the pre-push guard run with no initial guard": ("pre_push",),
+            "the push run with no guard at all": ("push",),
+            "the handoff run with no guard at all": ("handoff",),
+        }
+        for path in FIX_ASSETS:
+            for label, roles in skips.items():
+                with self.subTest(asset=path.name, skipped=label):
+                    completed, harness = self.execute(path, roles=roles)
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    self.assertNoMutation(harness)
+
+    def test_every_guard_fence_parses_under_every_shell(self):
+        for path in FIX_ASSETS:
+            for role, fence in guard_fences(path).items():
+                for shell in AVAILABLE_SHELLS:
+                    with self.subTest(asset=path.name, fence=role, shell=shell):
+                        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+                            handle.write(fence + "\n")
+                        self.addCleanup(os.unlink, handle.name)
+                        completed = subprocess.run(
+                            [shell, "-n", handle.name],
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_the_fence_finder_is_not_vacuous(self):
+        # The control for every `assertNoMutation` above: the chain really does
+        # contain a push and a coordinator call, so an absence in the logs is
+        # an absence the harness could have observed.
+        for path in FIX_ASSETS:
+            fences = guard_fences(path)
+            self.assertEqual(len(fences), 4)
+            self.assertIn("push", fences["push"])
+            self.assertIn("review_pr.py", fences["handoff"] + read(path))
+
+
 NUMBER_WORDS = {
     15: "fifteen",
     16: "sixteen",

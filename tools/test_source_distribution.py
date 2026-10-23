@@ -298,19 +298,28 @@ PROVIDER_MANIFESTS = (
 # The tracked issue-creation tool joins them beside the transaction module it
 # loads from beside itself: the processing workflows create every tracked issue
 # through it, so a bundle without it cannot create one at all.
-# Seventeen modules: six in the Claude bundle, seven in the Codex bundle, and
+# The head-bound approval helper (issue #842) joins them on the same terms: `fix`
+# and `finalize` both run it to decide whether an approval names the pull
+# request's current head, so a bundle that shipped either workflow without it
+# would install one that refuses everything. `tools/pr_head_approval.py` is the
+# owning source, and the Codex bundle carries one copy beside each caller
+# because it has no shared scripts root.
+# Twenty modules: seven in the Claude bundle, nine in the Codex bundle, and
 # the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers.
 BUNDLED_MECHANISM_MODULES = (
     "claude-copilot-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
+    "claude-plugin/plugins/kanban/scripts/pr_head_approval.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
     "google-plugin/plugins/kanban/scripts/kanban_models.py",
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "codex-plugin/plugins/kanban/skills/finalize/scripts/pr_head_approval.py",
+    "codex-plugin/plugins/kanban/skills/fix/scripts/pr_head_approval.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
