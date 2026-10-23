@@ -15,6 +15,17 @@ created above it.
 
 ### Unreleased
 
+- `finalize`, `janitor` §5 and `fix` §3 (Claude and Codex) lose the paragraphs
+  that only argued for a rule (#843). Every instruction, refusal condition,
+  command, ordering constraint and stop rule stays, and the executable fences
+  are untouched. Measured on the rendered Claude files: `finalize` goes from
+  32,882 to 29,534 bytes, `janitor` §5 from 9,589 to 4,999 and `fix` §3 from
+  7,668 to 4,953. The removed explanation moved into
+  `docs/agent-workflow-contract.md` sections 2.9, 2.10 and 2.11. The three test
+  modules keep every rule-pinning assertion, with some quotations updated to the
+  shortened wording and four rationale-only ones removed. Claude bundle 1.87.0,
+  Codex bundle 1.86.0.
+
 - The packaged workflows find the canonical issue-review backend through one
   bundled script instead of a pasted probe (#841). The ~35-line bash-and-Python
   fence that `solve`, `issue-review`, `issue-rereview`, `triage` and `retriage`

@@ -308,9 +308,8 @@ off to after a real push, which a run stopping here never reaches.
 
 Read the whole check rollup first — the obstacle is the SET of entries, never
 the first one you looked at. Fetch it with the SAME query and fields
-`src/Kanban/GitHub/Fetch.hs` uses, because the identity and recency fields are
-what make the next paragraph possible and `gh pr view --json statusCheckRollup`
-omits them:
+`src/Kanban/GitHub/Fetch.hs` uses, because `gh pr view --json statusCheckRollup`
+omits the identity and recency fields the next paragraph needs:
 
 ```bash
 ROLLUP="$(mktemp)"
@@ -319,31 +318,20 @@ gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){pullRequest(
 rm -f "$ROLLUP"
 ```
 
-Argument-free `mktemp` is portable across BSD/macOS and GNU/Linux, and puts
-that file OUTSIDE the checkout; the `rm` is not optional.
-Nothing this workflow does may leave a file in the working tree: CLAUDE.md's
-hygiene rule is explicit about scratch files, `tools/drain_prs.py` has to
-relocate any untracked file it finds before a fast-forward, and step 4 tells
-you to PRESERVE untracked content in a reused worktree — so a stray artifact
-here is one an obstacle-fixing run could fold into its own focused commit.
+Argument-free `mktemp` puts that file OUTSIDE the checkout, and the `rm` is not
+optional. Nothing this workflow does may leave a file in the working tree.
 
 **A rollup entry is not the same thing as a CHECK.** GitHub returns every
-context on the commit, including ones a later run superseded, so the same check
-can appear twice — an old failure beside the passing rerun that replaced it.
-Kanban never judges the raw list: `src/Kanban/GitHub/Decode.hs` keys each
-context (`check:<app-slug>:<name>` for a `CheckRun`,
-`status:<creator-login>:<context>` for a `StatusContext`), keeps only the most
-recent context per key (`startedAt` falling back to `completedAt` for a check
-run, `createdAt` for a status), and reads the verdict off THAT set alone. Do
-the same before applying any branch below. Skipping it means treating a
-superseded failure as current — and since the PR drainer reruns required checks
-on its own schedule, a superseded failure is a state this repository actually
-produces, not a hypothetical.
+context on the commit, including ones a later run superseded. As
+`src/Kanban/GitHub/Decode.hs` does, key each context (`check:<app-slug>:<name>`
+for a `CheckRun`, `status:<creator-login>:<context>` for a `StatusContext`),
+keep only the most recent per key (`startedAt` falling back to `completedAt` for
+a check run, `createdAt` for a status), and read the verdict off THAT set alone
+before applying any branch below.
 
 **If any entry lacks the fields that rule needs** — no `__typename` you
 recognise, no key, or no timestamp on a context that shares a key with another
-— the rollup falls to branch 2 and the run stops. Deduplicating on a guess is
-how an "already green" pull request gets edited and rereviewed for nothing.
+— the rollup falls to branch 2 and the run stops. Never deduplicate on a guess.
 
 With approval established, address the highest-priority obstacle you find, in
 this order:
@@ -354,73 +342,48 @@ this order:
    rollup test below.
 2. **A rollup you cannot trust** — before any branch below draws a conclusion
    from the rollup, that rollup must be COMPLETE. GitHub caps the contexts it
-   returns, so it can be truncated, and an entry can carry a shape this
-   workflow does not understand. Kanban models both as `ChecksUnknown`
-   (`src/Kanban/GitHub/Decode.hs` returns it when `totalCount` exceeds the
-   nodes returned, and again when a context will not decode), and
-   `src/Kanban/Workflow.hs` makes it neither ready nor pending — it is never a
-   clearance. Establish completeness rather than assuming it:
+   returns, and an entry can carry a shape this workflow does not understand;
+   Kanban models both as `ChecksUnknown` (`src/Kanban/GitHub/Decode.hs`), which
+   is never a clearance. Establish completeness:
 
-   One shape is a trusted empty set, not an unreadable rollup: when
-   `statusCheckRollup` itself is `null` or absent, treat it as `ChecksNone`,
-   exactly as `parseChecks` does in `src/Kanban/GitHub/Decode.hs`. There is no
-   `contexts` object to compare in that shape because GitHub is reporting NO
-   checks; continue through the later branches with no failed or pending
-   checks. Do not confuse that with a PRESENT, non-null rollup whose
-   `contexts`, `totalCount`, or nodes cannot be read — that still fails closed.
+   When `statusCheckRollup` itself is `null` or absent, treat it as `ChecksNone`,
+   exactly as `parseChecks` does in `src/Kanban/GitHub/Decode.hs`: GitHub is
+   reporting NO checks, so continue through the later branches with no failed or
+   pending checks. A PRESENT, non-null rollup whose `contexts`, `totalCount`, or
+   nodes cannot be read still fails closed.
 
    Compare the `totalCount` the query above returned against the number of
-   nodes it returned beside it. They must be equal — the same comparison
-   `src/Kanban/GitHub/Decode.hs` makes before it decodes a single context.
-   This is why the rollup is fetched once, with `totalCount` alongside the
-   nodes, rather than read from a convenience view that reports neither.
+   nodes it returned beside it. They must be equal.
 
    **A truncated rollup, or any entry you cannot classify, fails closed:**
    report that the check state cannot be read completely and stop without
-   pushing or invoking a rereview. An incomplete rollup can be hiding exactly
-   the failed or pending entry the branches below test for, so treating it as
-   absence would turn "I did not see one" into "there is none".
+   pushing or invoking a rereview.
 3. **Failed check** — EVERY failed check in the DEDUPLICATED set above,
-   required or not, not only required checks, and not only the first one you
-   notice. Fix the causes
-   in the worktree of step 4, push, and hand off the rereview of step 6. Never
-   delete or skip a test, never weaken an assertion, and never retry a failure
-   instead of fixing it — see step 5, which forbids that outright. A failure
-   you judge to be pre-existing on the recorded base branch is reported to the
-   user and stops the run rather than being papered over.
+   required or not, not only the first one you notice. Fix the causes in the
+   worktree of step 4, push, and hand off the rereview of step 6. Never delete
+   or skip a test, never weaken an assertion, and never retry a failure instead
+   of fixing it — see step 5. A failure you judge to be pre-existing on the
+   recorded base branch is reported to the user and stops the run.
 4. **A check still running** — no conflict, a rollup you can trust, no failed
-   check, and a pending one in that same deduplicated set. This branch MUTATES NOTHING. Report which checks
-   are still running and stop: do not update the branch, do not push, and do
-   not invoke a rereview. `pullRequestStatus` ranks it this way too —
-   `checksPending` is guarded BEFORE the merge-state test — and the reason is
-   the same one that ranks it here: replacing the approved head while CI is
-   still running discards the very run that would have told you whether there
-   was anything to fix, and starts the whole thing again on a head nobody has
-   reviewed.
+   check, and a pending one in that same deduplicated set. This branch MUTATES
+   NOTHING. Report which checks are still running and stop: do not update the
+   branch, do not push, and do not invoke a rereview. `pullRequestStatus` guards
+   `checksPending` BEFORE the merge-state test.
 5. **Behind its base** — no conflict, no failed check, no pending check, and
-   the merge state is exactly `BEHIND`, which
-   `src/Kanban/Workflow.hs`'s `pullRequestStatus` classifies as `merge
-   pending` and `src/Kanban/UI/Details.hs` explains as "the base has advanced
-   past this head; update the branch before merging". Green checks do not make
-   such a pull request mergeable. Update it from the recorded `baseRefName`
-   through step 4, exactly as the conflict branch does — incorporating a base
-   tip is one operation, and a conflict is only its harder case.
-6. **Any other merge state that is not ready** — `BLOCKED` and `UNSTABLE` are
-   real states (`MergeBlocked`, `MergeUnstable`), and `pullRequestStatus`
-   reports them as `merge pending` exactly as it does `BEHIND`. They are NOT
-   the same problem: a branch update cannot clear a branch-protection
-   requirement or an unstable required check, so applying `BEHIND`'s remedy to
-   them would replace the reviewed head and leave the pull request just as
-   unmergeable. This branch fails closed: report the exact merge state, say
-   that this workflow has no remedy for it, and stop without pushing or
-   invoking a rereview. Only `MergeClean` and `MergeProtected` are ready
-   (`mergeStateReady`); everything else that is not `BEHIND` lands here.
+   the merge state is exactly `BEHIND`.
+   Green checks do not make it mergeable. Update it from the recorded
+   `baseRefName` through step 4, exactly as the conflict branch does.
+6. **Any other merge state that is not ready** — `BLOCKED` and `UNSTABLE`
+   (`MergeBlocked`, `MergeUnstable`) are not `BEHIND`'s problem:
+   a branch update cannot clear a branch-protection requirement or an unstable
+   required check, and would replace the reviewed head for nothing. This branch
+   fails closed: report the exact merge state, say that this workflow has no
+   remedy for it, and stop without pushing or invoking a rereview. Only
+   `MergeClean` and `MergeProtected` are ready (`mergeStateReady`); everything
+   else that is not `BEHIND` lands here, `UNKNOWN` included.
 7. **Nothing to fix** — no conflict, no failed check, no pending check, and a
    merge state that is ready. Report the pull request's merge state and check
-   state and stop without pushing and without invoking a rereview. `UNKNOWN`
-   is not a clearance either — GitHub has not finished computing
-   mergeability, so it lands in branch 6 and stops rather than being reported
-   ready when it may yet come back `BEHIND` or `DIRTY`.
+   state and stop without pushing and without invoking a rereview.
 
 ## 4. Work in the pull request's own worktree
 

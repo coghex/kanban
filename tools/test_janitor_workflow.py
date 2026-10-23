@@ -982,8 +982,7 @@ class PerItemApprovalTests(HarnessCase):
                     missing(
                         read(relative_path),
                         (
-                            "`git fetch --prune origin` would additionally remove "
-                            "every other ref that happens to be stale",
+                            "never with `git fetch --prune origin`",
                             "never with a bare `--delete`",
                         ),
                     ),
@@ -2087,17 +2086,13 @@ class PreservationGateTests(unittest.TestCase):
 # is shown redacted.
 ENDPOINT_PROOF_CONTRACT = (
     "**The lease binds the branch; nothing in it binds the destination.**",
-    "`remote.origin.pushurl` replaces the fetch URL for pushes when it is "
-    "set, it is multi-valued and every one of its values receives the same "
-    "push, and a `url.<base>.pushInsteadOf` rule redirects the push with no "
-    "`pushurl` in the configuration at all",
     "answers with exactly one entry equal to `origin`'s own effective fetch "
     "URL",
     "Any other answer refuses the push, an empty one included.",
     "the branch stays as visible cleanup debt, and the report names the "
     "destination that could not be proved",
-    "That comparison is made against the URLs Git reports rather than against "
-    "the redacted `$ENDPOINT` or the reduced `$REPO`",
+    "Compare the URLs Git reports, never the redacted `$ENDPOINT` or the "
+    "reduced `$REPO`",
     "A branch whose deletion would reach any destination other than "
     "`$ENDPOINT` is reported as visible cleanup debt",
     "It goes through §0's redaction, character for character, because this "
@@ -2184,6 +2179,38 @@ NULL_RULE = (
     "Report the failure as its own item; never let it collapse into "
     '"nothing to clean".',
 )
+
+
+# The apply step's rules whose explanations moved to the contract (#843). Each
+# is a sentence an agent obeys, so it stays in both renderings in its own words.
+APPLY_RULES = (
+    "Remove a worktree by its exact registered path.",
+    "Delete a remote branch one push per branch, never with a bare `--delete`.",
+    "drop the highest selector index first",
+    "a drop that raced it is put back with `git stash store` and fails the item",
+    "Never take Git's index lock.",
+    "Record each selector and its full object id before dropping, and re-run "
+    "the census before touching stashes again.",
+    "An all-zero value deletes unconditionally",
+    "An empty or unrecorded value is a missing recheck: stop and re-report.",
+    "an empty one refuses every prune",
+    "name the `$UNAPPROVED` records and ask",
+    "Keep the block exactly as written",
+)
+
+
+class ApplyRuleTests(unittest.TestCase):
+    def test_the_rules_survive_in_both_renderings(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertEqual(missing(read(relative_path), APPLY_RULES), [])
+
+    def test_the_control_catches_a_dropped_rule(self):
+        text = read(CODEX_ASSET)
+        for phrase in APPLY_RULES:
+            with self.subTest(phrase=phrase):
+                planted = flat(text).replace(flat(phrase), "")
+                self.assertNotEqual(missing(planted, (phrase,)), [])
 
 
 class NullIsNotEmptyTests(unittest.TestCase):

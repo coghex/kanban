@@ -266,6 +266,32 @@ SERVICE_MANAGER_NAMES = ("launchd", "systemd", "launchctl", "systemctl")
 # rule. Matched against whitespace-flattened text, so re-wrapping a paragraph
 # does not fail the assertion while deleting the rule still does.
 PRESERVED_BEHAVIOR = {
+    "logins compare case-insensitively": (
+        "Logins are compared case-insensitively."
+    ),
+    "the feed reaches the helper's process, never an argument": (
+        "The feed reaches the helper's own process, never an argument."
+    ),
+    "an unresolvable default branch refuses": (
+        "A default branch that cannot be resolved refuses too."
+    ),
+    "a behind pull request is fixed, not finalized": (
+        "A `BEHIND` pull request is not finalized here"
+    ),
+    "the check test is wider than the drainer's": (
+        "This is deliberately wider than the drainer's single configured "
+        "`required_ci_check`."
+    ),
+    "the merge is never a squash or a rebase": (
+        "Never `--squash` and never `--rebase`."
+    ),
+    "a blocking label refuses like changes-requested": (
+        "A blocking label refuses as the changes-requested label does"
+    ),
+    "an unreadable configuration keeps the defaults": (
+        "An unreadable or absent configuration file keeps the documented "
+        "defaults."
+    ),
     "the drainer owns ordinary merges": (
         "The service-managed PR drainer controlled by"
     ),
