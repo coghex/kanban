@@ -1647,6 +1647,17 @@ class ReworkRoundFive(FaultFixture):
         self.assertTrue(kept[0].startswith(b"LATE EDIT"))
         self.assertIn(approved.git_blob_hash(kept[0]), record["payloads"].values())
 
+    def test_a_staged_deletion_stops_a_capture_recovery_before_it_restores(self):
+        self.crash([self.fault("rename_aside.after", "R12.capture")])
+        run(["git", "update-index", "--force-remove", DOC], self.fx.work)
+        before = self.facts()
+        self.assertFalse((self.fx.work / DOC).exists())
+        code, stop, _ = self.resume_child()
+        self.assertEqual(stop["status"], "document-staged")
+        self.assertEqual(self.facts(), before)
+        self.assertFalse((self.fx.work / DOC).exists())
+        self.assertEqual(len(list((self.fx.work / "docs").glob(".kanban-attempt-*/aside"))), 1)
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

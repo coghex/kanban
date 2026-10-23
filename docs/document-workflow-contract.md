@@ -989,7 +989,8 @@ and every `T-NN` row of that design is a named regression in
    before it is unlinked: an editor holding the original descriptor can still
    write to that inode, so bytes that changed since they were verified are rooted
    and kept and the capture stops (`capture-changed`). A resume validates the record's landing
-   evidence read-only (a stale or unverifiable record refuses) before it settles
+   evidence read-only (a stale or unverifiable record refuses) and the document's
+   index entry (a staged change refuses) before it settles
    a capture or writes anything. `refs/kanban/applied-locally/<key>`
    is the blob the protocol applied, never proof of publication. The helper also
    reads the paused branch's version-1 record and the publisher's commit-shaped

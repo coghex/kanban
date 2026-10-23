@@ -2581,6 +2581,9 @@ def resume_pending(
         # verified is refused with the capture, the document and the record as
         # they were.
         landing(root, branch, pending)
+        # Restoring the document is a write to it: the index entry is looked at
+        # before, so a staged change is refused with the capture left as it is.
+        require_unstaged(root, document)
         blocked = unquiet_tool(root, owner, branch, pending, operator_quiescent)
         if blocked is not None:
             return blocked
