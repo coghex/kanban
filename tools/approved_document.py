@@ -351,9 +351,10 @@ def read_lock_owner(root: Path, ref: str) -> dict | None:
         return None
     subject = git_out(["log", "-1", "--format=%s", ref], cwd=root)
     try:
-        return json.loads(subject)
+        owner = json.loads(subject)
     except json.JSONDecodeError:
-        return {"host": None, "pid": None, "raw": subject}
+        owner = None
+    return owner if isinstance(owner, dict) else {"host": None, "pid": None, "raw": subject}
 
 
 def acquire_lock(
@@ -431,7 +432,16 @@ def clear_stale_lock(root: Path, ref: str) -> dict:
             lock_ref=ref,
             lock_owner=holder,
         )
-    if isinstance(pid, int) and process_is_live(pid):
+    if type(pid) is not int or pid <= 1:
+        # A lock that names no usable owner does not show its owner is dead.
+        raise DocumentError(
+            "lock-owner-unusable",
+            f"the lock names no usable owner process ({pid!r}), so it cannot be "
+            "shown to be stale; it is left as it is",
+            lock_ref=ref,
+            lock_owner=holder,
+        )
+    if process_is_live(pid):
         raise DocumentError(
             "lock-owner-live",
             f"the lock owner pid {pid} is still running",

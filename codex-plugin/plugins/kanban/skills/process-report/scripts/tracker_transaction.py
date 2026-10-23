@@ -1459,9 +1459,7 @@ def fetched_tip(root: Path, branch: str) -> str:
     return git_out(["rev-parse", "--verify", f"{destination}^{{commit}}"], cwd=root)
 
 
-def recorded_publication_landed(
-    root: Path, record: dict, branch: str, applied: str | None = None, fresh: str | None = None
-):
+def recorded_publication_landed(root: Path, record: dict, branch: str, applied: str | None = None):
     """(landed, why) for the publication the helper recorded, if it recorded one.
 
     Fails closed: a record that cannot be read, a module that cannot be loaded,
@@ -1500,7 +1498,10 @@ def recorded_publication_landed(
                 f"the tool child of the publication recorded at {ref} is not known "
                 "to have exited"
             )
-        info = module.landing(root, branch, pending, fresh)
+        # Fetched here, after the checks above: a child that was running when
+        # the caller began may land and exit before it is known to be gone, and
+        # history read earlier would say it had not.
+        info = module.landing(root, branch, pending)
     except Exception as error:  # noqa: BLE001 - reported, never raised bare
         return None, (
             f"whether the publication recorded at {ref} landed could not be "
@@ -1587,7 +1588,7 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     if pending_exists:
         # A pending attempt has its own recorded interval and one validator, the
         # helper's: a second, weaker heuristic here would only disagree with it.
-        landed, why = recorded_publication_landed(root, record, branch, recorded, fresh)
+        landed, why = recorded_publication_landed(root, record, branch, recorded)
         if landed is None:
             return False, why
         if landed:

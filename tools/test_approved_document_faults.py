@@ -1430,6 +1430,46 @@ class ReworkRoundFive(FaultFixture):
         self.assertFalse(permitted)
         self.assertIn("landed", why)
 
+    def test_a_lock_without_a_usable_owner_pid_is_never_cleared(self):
+        lock = approved.lock_ref(REPOSITORY, DOC)
+        host = approved.socket.gethostname()
+        for label, payload in (
+            ("missing", {"host": host, "repository": REPOSITORY, "document": DOC}),
+            ("string", {"host": host, "pid": "4242", "repository": REPOSITORY, "document": DOC}),
+            ("boolean", {"host": host, "pid": True, "repository": REPOSITORY, "document": DOC}),
+            ("zero", {"host": host, "pid": 0, "repository": REPOSITORY, "document": DOC}),
+            ("not-an-object", [host, 4242]),
+        ):
+            with self.subTest(owner=label):
+                subject = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                commit = run(["git", "commit-tree", "HEAD^{tree}", "-m", subject], self.fx.work)
+                run(["git", "update-ref", lock, commit], self.fx.work)
+                code, stop, _ = self.child([], "--branch", "master", "--clear-stale-lock")
+                self.assertEqual(code, 1)
+                self.assertIn(stop["status"], ("lock-owner-unusable", "lock-foreign-owner"))
+                self.assertEqual(self.fx.ref(lock), commit)
+                run(["git", "update-ref", "-d", lock], self.fx.work)
+
+    def test_the_tracker_reads_the_branch_after_the_child_is_known_to_be_gone(self):
+        self.mode("refuse")
+        self.assertEqual(self.approve(EDITED)["reason"], "tool-refused")
+        helper = tracker.approved_document_module()
+        real = helper.child_state
+
+        def landing_while_it_exits(handoff):
+            # The child lands and exits after the caller began, and the
+            # branch is edited again before the child is known to be gone.
+            self.fx.upstream_edit(EDITED, message="the child publishes")
+            self.fx.upstream_edit(NOTES, message="then it is reverted upstream")
+            return real(handoff)
+
+        record = {"repository": REPOSITORY, "document": DOC}
+        helper.child_state = landing_while_it_exits
+        with unittest.mock.patch.object(tracker, "approved_document_module", lambda: helper):
+            permitted, why = tracker.local_resolution_permitted(self.fx.work, record, "master")
+        self.assertFalse(permitted)
+        self.assertIn("landed", why)
+
     def test_the_tracker_refuses_a_local_resolution_for_another_branch(self):
         self.crash([self.fault("record_applied_content.after", "R5.applied")])
         run(["git", "push", "-q", "origin", "master:refs/heads/other"], self.fx.work)

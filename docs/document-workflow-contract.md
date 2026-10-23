@@ -972,7 +972,9 @@ and every `T-NN` row of that design is a named regression in
    (`applied-conflict`). The tracker applies the same filesystem-spelling rule at every entry
    point, and the lock-clearing command never overrides a tool child known to be
    live, with or without `--operator-quiescent`. A lock whose owner
-   is dead is cleared only when the tool's child is also known to have exited.
+   is dead is cleared only when the tool's child is also known to have exited, and
+   a lock naming no usable owner (no integer pid above 1, or a payload that is
+   not an object) is kept with an error rather than read as an owner that exited.
 3. **One retained intent.** `refs/kanban/pending-publication/<key>` is a
    parentless version-2 commit: the repository, branch, path, attempt id, write
    root, baseline `B`, approved blob `A`, the tip `R` it was prepared against, the
@@ -1428,7 +1430,9 @@ blob, the working copy must still be that blob, and landing must be a verified
 *no*. For a pending attempt that verdict is the helper's own landing validator
 (the same interval, receipts and saved evidence), and an unresolved capture, a
 tool child not known to have exited, a pending attempt recorded for another
-branch than the one asked about, or any unreadable evidence refuses. For a
+branch than the one asked about, or any unreadable evidence refuses. The branch is
+read after those checks, so a child that lands while it is being established to
+have exited is seen. For a
 legacy applied-only record, which has no recorded tip, the tracker searches the
 branch's complete reachable history for the applied blob and any occurrence
 refuses — deliberately broader than a pending attempt's interval, and never used
