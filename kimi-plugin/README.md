@@ -5,8 +5,8 @@ packages the Kimi-side `/solve` and `/autosolve` skills. A Kimi session — the
 Copilot CLI running a Kimi model, e.g. `copilot --model kimi-k3` — opens a
 pull request whose body ends with `<!-- pr-origin:kimi -->`. Dual-mode review
 of that origin is Codex only — never Claude, and never both brands. Kimi is
-not a Kanban-spawned provider: the board refuses revision and repair of a
-kimi-origin pull request, so `autosolve` revises in the same Kimi session and
+not a provider the review workflows can spawn: they refuse revision and repair
+of a kimi-origin pull request, so `autosolve` revises in the same Kimi session and
 asks the bundled coordinator to spawn Codex.
 
 See [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for

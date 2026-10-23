@@ -9,7 +9,7 @@ argument-hint: "[PR number]"
 Clear the one thing standing between an approved pull request and the merge
 queue, taking its number from the argument below. This workflow touches the
 pull request's own code, so this session runs on the pull request's own origin
-brand, the same way {{cmd:pr-revise}} and {{cmd:repair}} do.
+brand, the same way {{cmd:pr-revise}} does.
 
 Run this in a **Class A** session (see the `model-classes` skill).
 
@@ -107,15 +107,14 @@ guessed default branch.
 
 ## 2b. Require the pull request's origin to be this brand
 
-Kanban's own CLI resolves a pull request's origin and spawns the matching
-brand's executable, which is why {{cmd:repair}} and {{cmd:pr-revise}} can take
-their brand as given. This workflow is user-invoked: nothing upstream has made
-that choice, so it makes it here, before any mutation.
+This workflow is user-invoked: the user chose which brand's session runs it,
+and nothing upstream has checked that the choice matches the pull request, so it
+checks here, before any mutation.
 
 Read the `pr-origin` marker out of the body fetched above and apply exactly the
-rules `originFromBody` applies in `src/Kanban/PullRequestFlow.hs`: the body must
-carry exactly ONE marker, of exactly one kind, as its final non-whitespace
-content. Both markers present, the same marker twice, a marker with trailing
+rules `origin_from_body` applies in the bundled coordinator's `review_pr.py`:
+the body must carry exactly ONE marker, of exactly one kind, as its final
+non-whitespace content. Both markers present, the same marker twice, a marker with trailing
 text after it, and no marker at all are each a refusal — not a default.
 
 <!-- brand:claude -->
@@ -527,7 +526,7 @@ approved head, with a duplicate-request barrier and a quarantine once its
 `MAX_CI_RERUN_ATTEMPTS` allowance is spent. Retrying is that daemon's job, it
 does it more carefully than a one-shot invocation can, and a second rerunner
 with its own ceiling would mean two components disagreeing about the same
-pull request. {{cmd:repair}} holds the same prohibition for the same reason.
+pull request.
 
 So: no `gh run rerun`, no "just once to see", and no retry loop. A failure you
 believe is flaky is still a failure this workflow reports rather than retries —

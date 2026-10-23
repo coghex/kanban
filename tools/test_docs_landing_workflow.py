@@ -56,8 +56,6 @@ SOLVE_ASSETS = (
 PR_FIX_ASSETS = (
     "claude-plugin/plugins/kanban/commands/pr-revise.md",
     "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
-    "claude-plugin/plugins/kanban/commands/repair.md",
-    "codex-plugin/plugins/kanban/skills/repair/SKILL.md",
     "tools/command_sources/fix.md",
     "claude-plugin/plugins/kanban/commands/fix.md",
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",

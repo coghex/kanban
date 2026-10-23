@@ -13,9 +13,9 @@ a Kanban plugin.
 Scope boundaries:
 
 - These workflows are **user- or daemon-invoked**, never spawned by Kanban's
-  own CLI, which spawns no workflow at all. The five a dashboard once spawned
-  by name per brand (`solve`, `pr-review`, `pr-rereview`, `pr-revise`, and
-  `repair`) remain a named partition in `tools/test_claude_plugin.py` and
+  own CLI, which spawns no workflow at all. The four a dashboard once spawned
+  by name per brand (`solve`, `pr-review`, `pr-rereview`, and `pr-revise`)
+  remain a named partition in `tools/test_claude_plugin.py` and
   `tools/test_codex_plugin.py`, which is why the drafting and issue-review
   assets are deliberately excluded from that Haskell invocation-parity pinning.
   See [agent-workflow-contract.md](agent-workflow-contract.md) for those

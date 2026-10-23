@@ -5,8 +5,8 @@ packages the Google-side `/solve` and `/autosolve` skills. A Google session — 
 Copilot CLI running a Gemini model, e.g. `copilot --model gemini-3.8-flash` — opens a
 pull request whose body ends with `<!-- pr-origin:google -->`. Dual-mode review
 of that origin is Codex only — never Claude, and never both brands. Google is
-not a Kanban-spawned provider: the board refuses revision and repair of a
-google-origin pull request, so `autosolve` revises in the same Google session and
+not a provider the review workflows can spawn: they refuse revision and repair
+of a google-origin pull request, so `autosolve` revises in the same Google session and
 asks the bundled coordinator to spawn Codex.
 
 See [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
