@@ -3,12 +3,12 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Guards the packaging promise of issue #76: a clean Codex installation can
-add codex-plugin/ as a project-scoped marketplace and discover exactly the
-five workflows Kanban's dashboard used to invoke by name ($solve, $pr-review, $pr-rereview,
-$pr-revise, $repair), none of which may set its own model/effort/sandbox/approval/
+add codex-plugin/ as a project-scoped marketplace and discover the
+issue-to-pull-request workflows ($solve, $pr-review, $pr-rereview, $pr-revise),
+none of which may set its own model/effort/sandbox/approval/
 working-directory configuration, depend on an untracked personal path, or
-drift from the invocation strings Kanban's own dashboard used to spawn them
-with, which the packaged skills still carry.
+drift from the invocation strings the board's retired agent control once
+spawned them with, which the packaged skills still carry.
 
 Issue #118 added three more packaged skills — the drafting and canonical
 issue-review workflows $issue, $autoissue, and $issue-review — so discovery
@@ -27,9 +27,10 @@ housekeeping audit, and — issue #576, the eighth and last of that arc — the
 $autosolve autonomous solve-and-review loop. $project-review and
 $auto-project-review were removed again when the guide replaced them.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-two); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set
-Kanban's own dashboard used to spawn by name (the five above; it spawns none
-now, and the set stays as the packaged partition). Every later set is user- or
+(derived from the tree, not counted here); HASKELL_PARITY_SKILL_NAMES is the
+strictly smaller set of the four workflows above, which the board's retired
+agent control used to start (the board starts none now, and the set stays as
+the packaged partition). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
 by design, and no document workflow is Codex-only any more.
@@ -48,12 +49,9 @@ version gate is silent on an untouched tree by construction, so
 PlantedBundleVersionGateTests drives it against a throwaway Git repository
 rather than trusting it to fire.
 
-Issue #125 packaged $repair ahead of the key that spawns it, so it briefly
-formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
-Done-column repair branch, so $repair belongs in HASKELL_PARITY_SKILL_NAMES
-with the rest; that third category is gone and discovery-minus-parity is the
-user-invoked set again. See tools/test_repair_workflow_contract.py for
-$repair's own behavioral contract.
+The `repair` skill was packaged by issue #125 and removed by issue #838, which keeps $fix
+as the one skill that clears what stands between an approved pull request and
+the merge queue.
 """
 
 from __future__ import annotations
@@ -105,13 +103,13 @@ NON_WORKFLOW_KEYWORDS = {"kanban"}
 # Since issue #444 the record's own location is resolved for both managed
 # installations by one module, which the coordinator's probe is held to.
 
-# The workflows Kanban's own dashboard used to spawn by name, kept as the
-# partition between them and the user- or daemon-invoked rest of the bundle.
-HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
+# The issue-to-pull-request workflows the board's retired agent control used to
+# start by name, kept as the partition between them and the rest of the bundle.
+HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
 
 # The drafting and canonical issue-review workflows vendored by issue #118,
 # plus the issue-rereview repair loop vendored by issue #240. User- or
-# daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# daemon-invoked, never started by the board, so they are packaged
 # and policy-checked but excluded from the parity set above. draft-issues
 # is deliberately absent: it is a Claude-only breadth workflow
 # (docs/drafting-workflow-contract.md §3.2).
@@ -133,7 +131,7 @@ DOCUMENT_SKILL_NAMES = {
 
 # The roadmap workflows vendored by issues #393 and #427, slices VEND-1 and
 # VEND-2 of docs/designs/workflow_command_vendoring_design.md. Like the parity and
-# drafting sets above -- all but `repair` --
+# drafting sets above --
 # neither is a hand-edited file: each is rendered from its own source under
 # tools/command_sources/ by tools/render_command_sources.py, and
 # tools/test_render_command_sources.py byte-compares the tracked outputs
@@ -165,12 +163,11 @@ DRAINER_SKILL_NAMES = {"drain-prs"}
 
 # The approved-pull-request obstacle clearer. Rendered from
 # tools/command_sources/fix.md the way the five sets above are, and like them
-# user-invoked and excluded from Haskell name parity: Kanban's own CLI spawns
-# repair for a Done-column card, never this. It is its own category rather
-# than another repair name because it acts only on an already-approved pull
-# request, and because it gates on an origin marker and a merge state no other
-# workflow reads. It never reruns a check: tools/drain_prs.py owns that, and
-# repair holds the same prohibition. Its behavioral assertions live in
+# user-invoked and excluded from Haskell name parity. It is its own category
+# rather than another pull-request name because it acts only on an
+# already-approved pull request, and because it gates on an origin marker and a
+# merge state no other workflow reads. It never reruns a check:
+# tools/drain_prs.py owns that. Its behavioral assertions live in
 # tools/test_fix_workflow_contract.py.
 PULL_REQUEST_FIX_SKILL_NAMES = {"fix"}
 
@@ -206,8 +203,9 @@ JANITOR_SKILL_NAMES = {"janitor"}
 # and the eighth and last of the arc's commands: with it every personal copy of
 # a Kanban workflow is retired. Rendered from
 # tools/command_sources/autosolve.md the way the nine sets above are, and like
-# them user-invoked and excluded from the parity set -- Kanban's own dashboard
-# spawned $solve and $pr-review directly and never this loop over them. It is its own category rather than another solve or review name for the
+# them user-invoked and excluded from the parity set -- the board's retired
+# agent control started $solve and $pr-review directly and never this loop over
+# them. It is its own category rather than another solve or review name for the
 # reason it is excluded from parity at all: it performs neither job itself. It
 # delegates the implementation to $solve and the verdict to $pr-review and
 # $pr-rereview, and what it contributes is the loop and the prohibitions --
@@ -250,8 +248,8 @@ EXPECTED_SKILL_NAMES = (
 SCRIPTS_ONLY_SKILL_DIRECTORIES: frozenset[str] = frozenset()
 
 # Keys that would let a packaged manifest silently override the model,
-# reasoning effort, sandbox/approval policy, or working directory Kanban's
-# own CLI spawn already pins (docs/agent-workflow-contract.md §2.1-§2.2).
+# reasoning effort, sandbox/approval policy, or working directory the session
+# was started with (docs/agent-workflow-contract.md §2.1-§2.2).
 FORBIDDEN_MANIFEST_KEYS = {
     "model",
     "models",
@@ -580,8 +578,8 @@ class SkillDiscoveryTests(unittest.TestCase):
 
     def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
         # The two concepts must stay distinct: discovery covers every packaged
-        # workflow, while HASKELL_PARITY_SKILL_NAMES is only the ones
-        # Kanban's dashboard used to spawn. Collapsing them back into one
+        # workflow, while HASKELL_PARITY_SKILL_NAMES is only the ones the
+        # board's retired agent control used to start. Collapsing them back into one
         # constant would silently stop discovering the drafting, document, and
         # roadmap skills.
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
@@ -647,7 +645,7 @@ class SkillDiscoveryTests(unittest.TestCase):
         # The autosolve loop is disjoint from every other category AND from the
         # Haskell parity set, which the nine checks above do not need to say:
         # it is the one vendored skill whose name could plausibly belong to the
-        # set Kanban's own CLI spawns, since $solve is in that set and this
+        # issue-to-pull-request set, since $solve is in that set and this
         # wraps it.
         self.assertEqual(
             AUTOSOLVE_SKILL_NAMES
@@ -665,14 +663,11 @@ class SkillDiscoveryTests(unittest.TestCase):
             set(),
         )
 
-    def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
-        # Kanban's `r` spawns $repair for a red Done card (issue #127), so it
-        # is pinned by parity like the other spawned workflows — and it is
-        # still not part of the declared drafting surface
-        # docs/drafting-workflow-contract.md and
-        # tools/test_drafting_workflow_contract.py pin at exactly nine assets.
-        self.assertIn("repair", HASKELL_PARITY_SKILL_NAMES)
-        self.assertNotIn("repair", DRAFTING_SKILL_NAMES)
+    def test_repair_is_not_packaged(self):
+        # Issue #838 removed the `repair` skill: $fix is the one skill that clears what
+        # stands between an approved pull request and the merge queue.
+        self.assertNotIn("repair", EXPECTED_SKILL_NAMES)
+        self.assertFalse((SKILLS_ROOT / "repair").exists())
 
     def test_the_claude_only_breadth_workflow_is_not_packaged_here(self):
         self.assertNotIn("draft-issues", EXPECTED_SKILL_NAMES)
@@ -1470,7 +1465,7 @@ COORDINATOR_LOOKUP = (
 class SharedCoordinatorReferenceTests(unittest.TestCase):
     """All three PR-flow skills locate the installed coordinator by
     searching under $CODEX_HOME rather than a path relative to the current
-    directory: Kanban spawns these workflows with the *reviewed* repository
+    directory: these workflows run with the *reviewed* repository
     as the working directory, not this plugin's own install location, so a
     cwd- or skill-relative path cannot resolve. Confirm the exact lookup
     command each SKILL.md uses actually finds the coordinator against a
@@ -1482,7 +1477,7 @@ class SharedCoordinatorReferenceTests(unittest.TestCase):
             self.assertIn(COORDINATOR_LOOKUP, text, f"{name}/SKILL.md must locate the coordinator under $CODEX_HOME")
 
     def test_every_rereview_handoff_preserves_standalone_pr_contracts(self):
-        for name in ("pr-rereview", "pr-revise", "repair"):
+        for name in ("pr-rereview", "pr-revise"):
             text = (SKILLS_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
             command_blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
             expected_actions = ("--rereview", "--publish-verdict") if name == "pr-rereview" else ("--rereview",)
@@ -1970,13 +1965,13 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.assertEqual(len(self.failures()), 1)
 
     def test_a_staged_addition_counts_as_content(self):
-        added = self.root / SKILLS_PREFIX / "repair" / "SKILL.md"
+        added = self.root / SKILLS_PREFIX / "extra" / "SKILL.md"
         added.parent.mkdir(parents=True)
-        added.write_text("---\nname: repair\n---\n", encoding="utf-8")
+        added.write_text("---\nname: extra\n---\n", encoding="utf-8")
         self.git("add", str(added))
         failures = self.failures()
         self.assertEqual(len(failures), 1)
-        self.assertIn(f"{SKILLS_PREFIX}/repair/SKILL.md", failures[0])
+        self.assertIn(f"{SKILLS_PREFIX}/extra/SKILL.md", failures[0])
 
     def test_a_tracked_deletion_counts_as_content(self):
         self.git("rm", "-q", str(self.skill))
@@ -2021,13 +2016,13 @@ class ManifestListingParityTests(unittest.TestCase):
     """Every manifest field that enumerates workflows -- the description, the
     keyword list, and the three enumerating interface fields -- must name
     exactly the skills this bundle ships. All five had stopped at the seven
-    workflows that existed before $repair and the four document workflows
+    workflows that existed before the four document workflows
     were packaged. The shipped set is derived from the tracked skill
     directories rather than restated as a constant, so vendoring a skill
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-two as one that reads only the
+    short description must see the same set as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
@@ -2193,8 +2188,8 @@ class SelfReviewPreconditionDocumentTests(unittest.TestCase):
                     f"{name}: a --self-review invocation must declare this session's brand",
                 )
 
-    def test_both_documents_route_a_refusal_back_to_the_nested_spawn(self):
-        for name in ("pr-review", "pr-rereview"):
+    def test_pr_review_routes_a_refusal_back_to_the_nested_spawn(self):
+        for name in ("pr-review",):
             text = self._doc(name)
             self.assertIn("self_review_refused", text, f"{name} must handle the refusal status")
             self.assertIn(
@@ -2202,6 +2197,15 @@ class SelfReviewPreconditionDocumentTests(unittest.TestCase):
                 text,
                 f"{name} must say a refusal means this session is the PR's own brand",
             )
+
+    def test_pr_rereview_follows_pr_review_for_the_refusal(self):
+        # Issue #839: the recovery is stated once, at its owner. The follower
+        # keeps its own brand declaration (asserted above) and must point at
+        # the owner rather than restate or drop the recovery.
+        text = self._doc("pr-rereview")
+        self.assertIn("read and follow the complete `$pr-review` workflow", text)
+        self.assertIn("none of it is restated here", text)
+        self.assertNotIn("self_review_refused", text)
 
     def test_neither_document_asserts_the_opposite_brand_premise_unconditionally(self):
         stale = "Kanban already spawned this session as the canonical opposite-brand reviewer"

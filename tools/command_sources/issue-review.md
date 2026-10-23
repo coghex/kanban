@@ -1,9 +1,9 @@
 ---
 name: issue-review
 <!-- brand:claude -->
-description: Run the canonical opposite-agent frontier review and readiness gate for one GitHub issue
+description: Run the canonical opposite-agent frontier review and readiness gate for one existing GitHub issue — not drafting (use {{cmd:issue}}). Use only when the user invokes {{cmd:issue-review}} or explicitly asks to review, approve, fact-check, or readiness-gate an issue before solving it.
 <!-- brand:codex -->
-description: Run or inspect the canonical frontier-model, opposite-agent review for one numbered GitHub issue, posting its versioned spec comment and readiness label through the canonical issue-review backend. Use when the user invokes {{cmd:issue-review}} or asks to review, approve, fact-check, or readiness-gate an issue before solving it.
+description: Run or inspect the canonical frontier-model, opposite-agent review for one numbered GitHub issue, posting its versioned spec comment and readiness label through the canonical issue-review backend. It does not draft or create issues (use {{cmd:issue}}). Use when the user invokes {{cmd:issue-review}} or asks to review, approve, fact-check, or readiness-gate an issue before solving it.
 <!-- /brand -->
 argument-hint: "[issue number]"
 ---

@@ -1,5 +1,5 @@
 ---
-description: Run the canonical opposite-agent frontier review and readiness gate for one GitHub issue
+description: Run the canonical opposite-agent frontier review and readiness gate for one existing GitHub issue — not drafting (use /issue). Use only when the user invokes /issue-review or explicitly asks to review, approve, fact-check, or readiness-gate an issue before solving it.
 argument-hint: "[issue number]"
 ---
 

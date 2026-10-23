@@ -4,8 +4,8 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` pin that both
 plugins *discover* a `fix` workflow and that it sits outside the Haskell
-name-parity set, since Kanban's own CLI spawns `repair` for a Done-column card
-and never this. Discovery and name parity are not the contract, though: `fix`
+name-parity set: it is a user-invoked workflow, started by neither the board
+nor the issue-to-pull-request set. Discovery and name parity are not the contract, though: `fix`
 is user-invoked, so nothing upstream establishes the approval, the origin
 brand, or the obstacle it acts on — the packaged text is the only place those
 decisions are made, and it is the part that must not drift.
@@ -26,9 +26,9 @@ which of them mutate anything, and the push/rereview authority boundary -- speci
 invalidates the approval and therefore always invokes exactly one rereview,
 while every non-mutating branch invokes none.
 
-`RepairDelegationTests` is the negative control this module owes under
+`RevisionDelegationTests` is the negative control this module owes under
 CLAUDE.md's "Quality gates": the fix-specific rules are asserted absent from the
-repair pair, so a phrase table that had degenerated into fragments present in
+pr-revise pair, so a phrase table that had degenerated into fragments present in
 every packaged workflow would fail here rather than pass everywhere.
 """
 
@@ -46,10 +46,10 @@ CLAUDE_FIX = REPO_ROOT / "claude-plugin/plugins/kanban/commands/fix.md"
 
 FIX_ASSETS = (CODEX_FIX, CLAUDE_FIX)
 
-CODEX_REPAIR = REPO_ROOT / "codex-plugin/plugins/kanban/skills/repair/SKILL.md"
-CLAUDE_REPAIR = REPO_ROOT / "claude-plugin/plugins/kanban/commands/repair.md"
+CODEX_REVISE = REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md"
+CLAUDE_REVISE = REPO_ROOT / "claude-plugin/plugins/kanban/commands/pr-revise.md"
 
-REPAIR_ASSETS = (CODEX_REPAIR, CLAUDE_REPAIR)
+REVISE_ASSETS = (CODEX_REVISE, CLAUDE_REVISE)
 
 WORKFLOW_HS = REPO_ROOT / "src/Kanban/Workflow.hs"
 DRAINER = REPO_ROOT / "tools/drain_prs.py"
@@ -120,13 +120,14 @@ REQUIRED_PHRASES = {
 
     # --- The origin gate: this brand may only fix its own brand's work. ---
     "the-origin-marker-is-validated-before-any-mutation": (
-        "Kanban's own CLI resolves a pull request's origin and spawns the "
-        "matching\nbrand's executable"
+        "This workflow is user-invoked: the user chose which brand's session "
+        "runs it,\nand nothing upstream has checked that the choice matches the "
+        "pull request, so it\nchecks here, before any mutation."
     ),
-    "the-origin-rules-are-the-haskell-ones": (
-        "apply exactly the\nrules `originFromBody` applies in "
-        "`src/Kanban/PullRequestFlow.hs`: the body must\ncarry exactly ONE "
-        "marker, of exactly one kind, as its final non-whitespace\ncontent."
+    "the-origin-rules-are-the-coordinators": (
+        "apply exactly the\nrules `origin_from_body` applies in the bundled "
+        "coordinator's `review_pr.py`:\nthe body must carry exactly ONE "
+        "marker, of exactly one kind, as its final\nnon-whitespace content."
     ),
     "every-malformed-origin-is-a-refusal-not-a-default": (
         "Both markers present, the same marker twice, a marker with trailing\n"
@@ -533,7 +534,7 @@ REQUIRED_PHRASES = {
     "ambiguity-goes-to-the-user": (
         "ask the user through the session's question mechanism\nrather than choosing"
     ),
-    # --- Head safety, inherited from the repair contract by construction. ---
+    # --- Head safety. ---
     "a-local-ahead-reused-worktree-stops-the-run": (
         "**But a reused worktree whose HEAD is not the recorded head stops the "
         "run.** Uncommitted work is safe to keep — it reaches the remote only "
@@ -603,9 +604,12 @@ DIAGNOSIS_ORDER = (
     "**Nothing to fix**",
 )
 
-# Requirements that belong to fix alone. The repair pair must carry none of
+# Requirements that belong to fix alone. The pr-revise pair must carry none of
 # them, which is what proves the table above is measuring this workflow rather
-# than matching text every packaged workflow happens to contain.
+# than matching text every packaged workflow happens to contain. The origin
+# rules `pr-revise` shares with fix (`ORIGIN_GUARD_RULES`) are deliberately NOT
+# in it: `ReviseOriginGuardTests` asserts them present in both and absent from
+# the workflows that delegate the origin decision.
 FIX_ONLY_REQUIREMENTS = (
     "an-untrustworthy-rollup-is-its-own-branch",
     "the-branches-read-the-deduplicated-set",
@@ -637,9 +641,6 @@ FIX_ONLY_REQUIREMENTS = (
     "nothing-to-fix-requires-a-ready-merge-state",
     "an-unknown-merge-state-is-not-a-clearance",
     "the-origin-marker-is-validated-before-any-mutation",
-    "the-origin-rules-are-the-haskell-ones",
-    "every-malformed-origin-is-a-refusal-not-a-default",
-    "a-wrong-brand-origin-stops-with-nothing-changed",
     "why-the-origin-gate-exists",
     "the-worktree-step-serves-only-head-moving-branches",
     "a-diagnosis-is-not-authorisation",
@@ -1272,10 +1273,6 @@ class NoRerunTests(unittest.TestCase):
         self.assertIn("MAX_CI_RERUN_ATTEMPTS = ", drainer)
         self.assertIn("def rerun_failed_ci(", drainer)
 
-    def test_repair_still_holds_the_same_prohibition(self):
-        for path in REPAIR_ASSETS:
-            self.assertIn("no retry loops", read(path))
-
 
 class MergeStateCoverageTests(unittest.TestCase):
     """Every non-ready merge state has a defined branch, and only one of them
@@ -1313,8 +1310,7 @@ class ContractDocumentationTests(unittest.TestCase):
     Manifest rows declare what it *reaches*; they are not a statement of its
     invocation, authority, or durable state. A workflow that may push a
     reviewed head and spawn a nested canonical review owes
-    docs/agent-workflow-contract.md its own section, the way §2.7 gives repair
-    one.
+    docs/agent-workflow-contract.md its own section.
     """
 
     CONTRACT = REPO_ROOT / "docs/agent-workflow-contract.md"
@@ -1345,7 +1341,7 @@ class ContractDocumentationTests(unittest.TestCase):
             "**Mandatory/optional:**",
         ):
             self.assertIn(heading, section, f"§2.9 omits {heading}")
-        # The two properties that make this action different from repair.
+        # The two properties that make this action different from a revision.
         self.assertIn("approvedPullRequest", section)
         self.assertIn("MergeBehind", section)
         # The precedence the contract states must be the one the assets use:
@@ -1430,8 +1426,8 @@ class HeadBoundApprovalTests(unittest.TestCase):
     """
 
     # Every rule the head binding added. Each is asserted present in both
-    # rendered assets by the table above and ABSENT from the repair pair by
-    # RepairDelegationTests, so this tuple is the join between the two.
+    # rendered assets by the table above and ABSENT from the pr-revise pair by
+    # RevisionDelegationTests, so this tuple is the join between the two.
     HEAD_BINDING_RULES = (
         "approval-modes-are-read-never-accepted-on-their-own",
         "an-unbound-signal-is-never-sufficient",
@@ -1468,7 +1464,7 @@ class HeadBoundApprovalTests(unittest.TestCase):
             self.assertIn(
                 requirement,
                 FIX_ONLY_REQUIREMENTS,
-                f"{requirement} is not in the repair negative control",
+                f"{requirement} is not in the pr-revise negative control",
             )
 
     def test_the_binding_is_stated_before_every_step_that_can_mutate(self):
@@ -1561,11 +1557,11 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
     """Bind each review-history condition to its actual shipped command.
 
     The descriptive phrases alone survive a wrong command choice. Exercise
-    the same assertions against wrong-route mutations and the repair assets,
+    the same assertions against wrong-route mutations and the pr-revise assets,
     which do not own fix's approval-refusal remedy.
     """
 
-    ASSETS = ((CODEX_FIX, CODEX_REPAIR, "$"), (CLAUDE_FIX, CLAUDE_REPAIR, "/"))
+    ASSETS = ((CODEX_FIX, CODEX_REVISE, "$"), (CLAUDE_FIX, CLAUDE_REVISE, "/"))
     ROUTES = (
         (
             "pr-rereview",
@@ -1608,7 +1604,7 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         self.assert_remedy_routes(mutated, sigil)
 
-    def test_repair_assets_do_not_carry_the_fix_remedy_rules(self):
+    def test_revise_assets_do_not_carry_the_fix_remedy_rules(self):
         for _, path, sigil in self.ASSETS:
             for command, phrase in self.ROUTES:
                 with self.subTest(asset=path, command=command):
@@ -1618,7 +1614,7 @@ class ReviewRemedyRoutingTests(unittest.TestCase):
 class VacuousRuleControlTests(unittest.TestCase):
     """The negative control the new rules owe, exercised rather than asserted.
 
-    `RepairDelegationTests` proves today's table is fix-specific, but it does
+    `RevisionDelegationTests` proves today's table is fix-specific, but it does
     that by passing -- on a table that had decayed into fragments common to
     every packaged workflow it would fail, and nothing demonstrates that it
     still CAN. These two tests run the same predicates over a deliberately
@@ -1630,28 +1626,28 @@ class VacuousRuleControlTests(unittest.TestCase):
 
     def test_a_phrase_present_in_every_asset_fails_the_fix_only_control(self):
         # The phrase matches every fix asset, so the positive test would pass
-        # on it. The repair control is what has to refuse it.
+        # on it. The pr-revise control is what has to refuse it.
         for path in FIX_ASSETS:
             self.assertIn(self.VACUOUS_PHRASE, flat(read(path)))
         leaked = [
             path.relative_to(REPO_ROOT)
-            for path in REPAIR_ASSETS
+            for path in REVISE_ASSETS
             if self.VACUOUS_PHRASE in flat(read(path))
         ]
         self.assertNotEqual(
             leaked,
             [],
             "a phrase common to every packaged workflow slipped past the "
-            "repair negative control, which therefore proves nothing about "
+            "pr-revise negative control, which therefore proves nothing about "
             "the head-binding rules either",
         )
 
-    def test_a_head_binding_rule_is_absent_from_the_repair_pair(self):
+    def test_a_head_binding_rule_is_absent_from_the_revise_pair(self):
         # The other half of the same control: a real rule must NOT match, or
         # the test above would be refusing everything indiscriminately.
         for requirement in HeadBoundApprovalTests.HEAD_BINDING_RULES:
             phrase = flat(REQUIRED_PHRASES[requirement])
-            for path in REPAIR_ASSETS:
+            for path in REVISE_ASSETS:
                 self.assertNotIn(
                     phrase,
                     flat(read(path)),
@@ -1659,18 +1655,18 @@ class VacuousRuleControlTests(unittest.TestCase):
                 )
 
 
-class RepairDelegationTests(unittest.TestCase):
+class RevisionDelegationTests(unittest.TestCase):
     """The negative control CLAUDE.md's quality gates require.
 
-    Every rule that belongs to fix alone is asserted ABSENT from the repair
+    Every rule that belongs to fix alone is asserted ABSENT from the pr-revise
     pair. Without this, a phrase table that had decayed into fragments common
     to every packaged workflow would pass the positive test above while
     asserting nothing about this workflow in particular.
     """
 
-    def test_repair_carries_none_of_the_fix_only_rules(self):
+    def test_pr_revise_carries_none_of_the_fix_only_rules(self):
         leaked = []
-        for path in REPAIR_ASSETS:
+        for path in REVISE_ASSETS:
             text = read(path)
             flattened = flat(text)
             for requirement in FIX_ONLY_REQUIREMENTS:
@@ -1679,7 +1675,7 @@ class RepairDelegationTests(unittest.TestCase):
         self.assertEqual(
             leaked,
             [],
-            "repair must not carry fix's approval or origin gates:\n"
+            "pr-revise must not carry fix's approval or origin gates:\n"
             + "\n".join(leaked),
         )
 
@@ -1687,18 +1683,201 @@ class RepairDelegationTests(unittest.TestCase):
         self.assertTrue(set(FIX_ONLY_REQUIREMENTS) < set(REQUIRED_PHRASES))
         self.assertGreaterEqual(len(FIX_ONLY_REQUIREMENTS), 10)
 
-    def test_both_workflows_now_agree_about_retrying(self):
-        # These two once disagreed: fix was going to retry an infrastructure
-        # failure that repair refuses. Dropping that capability makes the rule
-        # one rule, held in both places, with the drainer as the only
-        # rerunner -- so the agreement is asserted rather than left to drift
-        # back apart.
-        for path in REPAIR_ASSETS:
-            self.assertIn("no retry loops", read(path))
-        for path in FIX_ASSETS:
+
+# The origin rules fix step 2b states and pr-revise step 1 repeats: both author
+# a change on a pull request and hand it to a reviewer the coordinator routes
+# from the same marker. Each entry is a key of REQUIRED_PHRASES, so fix's own
+# wording is the single source and "fix's is unchanged" is the same assertion.
+ORIGIN_GUARD_RULES = (
+    "the-origin-rules-are-the-coordinators",
+    "every-malformed-origin-is-a-refusal-not-a-default",
+    "a-wrong-brand-origin-stops-with-nothing-changed",
+)
+
+# The negative control, in WriteLocationTests' pattern: assets that never
+# author a change on someone else's pull request. pr-review and pr-rereview
+# hand the origin decision to the coordinator's route, and finalize only reads
+# the marker to exclude a self-review, so none owes the guard, and a rule that
+# matched every PR workflow would have to pass here too.
+ORIGIN_GUARD_DELEGATING_ASSETS = tuple(
+    REPO_ROOT / path
+    for path in (
+        "claude-plugin/plugins/kanban/commands/pr-review.md",
+        "claude-plugin/plugins/kanban/commands/pr-rereview.md",
+        "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
+        "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
+    )
+)
+
+# What pr-revise must no longer say: a routing table the coordinator owns, a
+# claim about who starts this session, and any instruction to wait on checks.
+REVISE_RETIRED_TEXT = (
+    "uses both independently",
+    "only ever resumes the original solver",
+    "route is fixed by brand",
+    "Kanban resumes this session",
+    # The coordinator collapses routing to the one loaded provider in
+    # single-agent mode (docs/agent-workflow-contract.md section 2.2), so a
+    # Claude-only roster reviews a Claude-origin pull request with Claude.
+    # Any promise of an independent or opposite-brand reviewer is false there.
+    "never reaches the brand that authored the revision",
+    "opposite brand's canonical reviewer",
+    "never to this session's own model",
+)
+
+WAITS_FOR_CHECKS_RE = re.compile(
+    r"(?i)\b(?:wait(?:s|ing)? for|poll(?:s|ing)?)\b[^.\n]{0,40}\b(?:ci|checks?)\b"
+    r"|diagnose and fix only when the failure"
+)
+
+
+def waits_for_checks(text: str) -> bool:
+    """True when `text` tells its reader to wait on a pull request's checks.
+
+    The acceptance grep `wait for (the )?(required )?(CI|checks)` misses
+    "Wait for the PR's required checks", which is the sentence that actually
+    held the instruction, so the rule here allows words between the verb and
+    the noun and is proved against that sentence below. A "Do not wait for ..."
+    sentence is the one permitted spelling, because it forbids the wait.
+    """
+    permitted = re.sub(r"Do not wait for[^.\n]*\.", "", text)
+    return bool(WAITS_FOR_CHECKS_RE.search(permitted))
+
+
+class ReviseOriginGuardTests(unittest.TestCase):
+    """pr-revise refuses a pull request of another brand, as fix step 2b does.
+
+    Issue #839. Both workflows push a commit and then invoke a rereview the
+    coordinator routes from the pull request's `pr-origin` marker, so run on a
+    pull request of the other brand either would author a change and hand it
+    to its own brand. fix asserts the rule through REQUIRED_PHRASES; this class
+    asserts that the same rule, in the same words, guards pr-revise in both
+    bundles, that it comes before anything that mutates, and that it is absent
+    from the assets that delegate the decision.
+    """
+
+    GUARDED = FIX_ASSETS + REVISE_ASSETS
+
+    def test_the_rules_are_fix_step_2b_s_own_phrases(self):
+        for rule in ORIGIN_GUARD_RULES:
+            self.assertIn(rule, REQUIRED_PHRASES)
+            self.assertNotIn(rule, FIX_ONLY_REQUIREMENTS)
+
+    def test_every_guarded_asset_carries_every_rule(self):
+        for path in self.GUARDED:
+            flattened = flat(read(path))
+            for rule in ORIGIN_GUARD_RULES:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), rule=rule):
+                    self.assertIn(flat(REQUIRED_PHRASES[rule]), flattened)
+
+    def test_each_brand_demands_its_own_marker_and_only_that_one(self):
+        for path, brand, other in (
+            (CLAUDE_FIX, "claude", "codex"),
+            (CLAUDE_REVISE, "claude", "codex"),
+            (CODEX_FIX, "codex", "claude"),
+            (CODEX_REVISE, "codex", "claude"),
+        ):
+            flattened = flat(read(path))
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertIn(
+                    f"the marker must be `<!-- pr-origin:{brand} -->`", flattened
+                )
+                self.assertNotIn(
+                    f"the marker must be `<!-- pr-origin:{other} -->`", flattened
+                )
+
+    def test_external_and_unknown_origins_stop_pr_revise_too(self):
+        for path in REVISE_ASSETS:
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertIn(
+                    "An unknown-origin or external-origin pull request",
+                    flat(read(path)),
+                )
+
+    def test_the_guard_precedes_every_step_that_can_mutate(self):
+        for path in REVISE_ASSETS:
+            text = read(path)
+            guard = text.index("## 1. Require the pull request's origin to be this brand")
+            for later in (
+                "## 2. Establish the review contract",
+                "## 3. Use an isolated, current worktree",
+                "## 5. Rerun canonical review",
+            ):
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), step=later):
+                    self.assertLess(guard, text.index(later))
+
+    def test_the_delegating_assets_carry_none_of_the_guard(self):
+        for path in ORIGIN_GUARD_DELEGATING_ASSETS:
+            flattened = flat(read(path))
+            for rule in ORIGIN_GUARD_RULES:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), rule=rule):
+                    self.assertNotIn(flat(REQUIRED_PHRASES[rule]), flattened)
+
+    def test_pr_revise_states_no_routing_rule_and_names_no_spawner(self):
+        for path in REVISE_ASSETS:
+            flattened = flat(read(path))
+            for retired in REVISE_RETIRED_TEXT:
+                with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix(), text=retired):
+                    self.assertNotIn(retired, flattened)
             self.assertIn(
-                "This workflow does not retry a red check, ever.", read(path)
+                "The bundled coordinator decides which reviewer the rereview goes to",
+                flattened,
             )
+
+    def test_the_rereview_follows_the_push_without_waiting_for_checks(self):
+        for path in REVISE_ASSETS:
+            text = read(path)
+            flattened = flat(text)
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertFalse(waits_for_checks(text))
+                self.assertNotIn("Wait for CI", text)
+                self.assertIn("## 5. Rerun canonical review", text)
+                self.assertIn(
+                    "Do not wait for, poll, or diagnose the pull request's checks: "
+                    "the rereview follows the push immediately.",
+                    flattened,
+                )
+                self.assertIn(
+                    "a statement that the pull request's checks were not awaited",
+                    flattened,
+                )
+                # Local validation is kept: dropping the wait must not drop it.
+                self.assertIn("Run the narrowest relevant tests", flattened)
+                self.assertLess(
+                    text.index("## 4. Implement and validate"),
+                    text.index("## 5. Rerun canonical review"),
+                )
+
+    def test_the_wait_rule_catches_the_sentence_that_held_the_instruction(self):
+        for planted in (
+            "Wait for the PR's required checks for the pushed head to complete.",
+            "If CI fails, diagnose and fix only when the failure is attributable.",
+            "## 4. Wait for CI and rerun canonical review",
+            "Poll the pull request's checks until they pass.",
+        ):
+            with self.subTest(planted=planted):
+                self.assertTrue(waits_for_checks(planted))
+        self.assertFalse(
+            waits_for_checks("Do not wait for, poll, or diagnose the pull request's checks.")
+        )
+
+    def test_no_pr_workflow_cites_a_retired_haskell_parser(self):
+        scanned = [
+            REPO_ROOT / "tools/command_sources" / name
+            for name in ("fix.md", "finalize.md", "pr-revise.md", "pr-review.md", "pr-rereview.md", "autosolve.md", "drain-prs.md")
+        ]
+        scanned += list(FIX_ASSETS) + list(REVISE_ASSETS) + list(ORIGIN_GUARD_DELEGATING_ASSETS)
+        scanned += [
+            REPO_ROOT / "claude-plugin/plugins/kanban/commands/finalize.md",
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
+            REPO_ROOT / "claude-plugin/README.md",
+            REPO_ROOT / "codex-plugin/README.md",
+        ]
+        for path in scanned:
+            with self.subTest(asset=path.relative_to(REPO_ROOT).as_posix()):
+                text = read(path)
+                self.assertNotIn("originFromBody", text)
+                self.assertNotIn("PullRequestFlow", text)
 
 
 # The spelled-out counts each bundle README states about its own inventory, and
@@ -1742,11 +1921,11 @@ BUNDLE_READMES = {
     ),
 }
 
-# The workflows Kanban's own Haskell spawns, which every README states as the
+# The issue-to-pull-request workflows (the HASKELL_PARITY set), which every README states as the
 # complement of its user-invoked count. Restated here rather than imported,
 # because the plugin modules that own it are not importable under this
 # module's own load path.
-HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
+HASKELL_SPAWNED = {"solve", "pr-review", "pr-rereview", "pr-revise"}
 
 
 def workflow_names_from_paths(prefix: str, paths) -> set[str]:

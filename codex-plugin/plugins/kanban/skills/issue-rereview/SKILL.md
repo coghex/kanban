@@ -1,6 +1,6 @@
 ---
 name: issue-rereview
-description: Interactively repair a numbered GitHub issue after the canonical cross-agent gate returns CHANGES_REQUESTED, revise its specification with explicit user signoff, and rerun the canonical issue-review backend until it applies reviewed:approve. Use when the user invokes $issue-rereview, asks to address issue-review feedback, or wants to revise and readiness-gate an issue labeled reviewed:changes.
+description: Interactively repair a numbered GitHub issue after the canonical cross-agent gate returns CHANGES_REQUESTED, revise its specification with explicit user signoff, and rerun the canonical issue-review backend until it applies reviewed:approve. It does not draft or create issues (use $issue). Use when the user invokes $issue-rereview, asks to address issue-review feedback, or wants to revise and readiness-gate an issue labeled reviewed:changes.
 ---
 
 # Rereview Issue

@@ -1,6 +1,6 @@
 ---
 name: issue-review
-description: Run or inspect the canonical frontier-model, opposite-agent review for one numbered GitHub issue, posting its versioned spec comment and readiness label through the canonical issue-review backend. Use when the user invokes $issue-review or asks to review, approve, fact-check, or readiness-gate an issue before solving it.
+description: Run or inspect the canonical frontier-model, opposite-agent review for one numbered GitHub issue, posting its versioned spec comment and readiness label through the canonical issue-review backend. It does not draft or create issues (use $issue). Use when the user invokes $issue-review or asks to review, approve, fact-check, or readiness-gate an issue before solving it.
 ---
 
 # Review Issue
