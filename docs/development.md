@@ -259,6 +259,32 @@ Claude-on-Copilot bundles and neither of those two, whose own `solve` and
 
 - `app/` — executable entry point.
 - `src/Kanban/` — board, GitHub, usage, terminal interface, and configuration code.
+  Search the group that matches the change:
+  - `Domain`, `Workflow`, `Card`, `Tracker`, `Filter` — board state, column
+    classification, tracker hierarchy, and the composable card filter criteria.
+  - `Repository` with `Repository.*`, `GitHub` with `GitHub.*`, `Cache`, `Config`,
+    `Paths`, `CLI` — repository resolution and the board lease, GitHub data and its
+    refresh coordinator, the last-good snapshot and the durable `gh` record,
+    configuration (it accepts and ignores the keys the scripts own), the private
+    directories under the XDG cache root, and the command line.
+  - `Usage` with `Usage.Render`, `UsageCommand`, `Codex`, `Claude`, `Provider` —
+    provider quota windows, the wording the sidebar and `--usage` share, the
+    configured external usage commands, and the two built-in readers: `Codex` and
+    `Claude` read account status only and submit no model prompt.
+  - `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest`, `Browser` — terminal
+    presentation, responsive layout, external-text sanitization, and the one place a
+    URL is handed to the platform's page opener. `UI` itself is only the composition
+    root; the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
+    `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
+    `UI.Keys` (the one declaration site for a board key binding, held against
+    [design.md](design.md) section 7 by a test), `UI.Search`, `UI.Filter`,
+    `UI.Selection` (column search, filter panel, and selection), `UI.Notice` (the
+    notice line and its expiry), `UI.Refresh` and `UI.Reconcile` (refresh), and
+    `UI.Util`.
+  - `Process`, `CommandCapture` — the bounded child-process helpers the GitHub fetch
+    and the usage readers run through.
+  - `Fixture` — the invented board the golden frames and the tracked screenshot are
+    drawn from.
 - `test/` — Haskell tests.
 - `tools/` — PR drainer, issue approval service, both of their controllers,
   installers, workflow setup, and Python tests.
