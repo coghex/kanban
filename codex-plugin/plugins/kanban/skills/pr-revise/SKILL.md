@@ -9,7 +9,7 @@ Repair one positive PR number. Treat the canonical review as the contract; do no
 
 Run this in a **Class A** session (see the `model-classes` skill).
 
-The bundled coordinator decides which reviewer the rereview goes to, from the pull request's origin marker and the roster; this workflow states no routing rule and pins neither a model nor a reasoning effort. Step 1 below stops this session before it changes anything unless the pull request belongs to this session's own brand, so the rereview never reaches the brand that authored the revision.
+The bundled coordinator decides which reviewer the rereview goes to, from the pull request's origin marker and the roster; this workflow states no routing rule, pins neither a model nor a reasoning effort, and promises no particular reviewer. Step 1 below stops this session before it changes anything unless the pull request belongs to this session's own brand.
 
 ## 1. Require the pull request's origin to be this brand
 

@@ -1716,6 +1716,13 @@ REVISE_RETIRED_TEXT = (
     "only ever resumes the original solver",
     "route is fixed by brand",
     "Kanban resumes this session",
+    # The coordinator collapses routing to the one loaded provider in
+    # single-agent mode (docs/agent-workflow-contract.md section 2.2), so a
+    # Claude-only roster reviews a Claude-origin pull request with Claude.
+    # Any promise of an independent or opposite-brand reviewer is false there.
+    "never reaches the brand that authored the revision",
+    "opposite brand's canonical reviewer",
+    "never to this session's own model",
 )
 
 WAITS_FOR_CHECKS_RE = re.compile(
