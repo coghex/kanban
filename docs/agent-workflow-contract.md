@@ -1256,10 +1256,17 @@ reimplement the removal, and `--check` remains read-only.
   on the default branch, labelled approved without `reviewed:changes` or
   `merge:hold`, still at the head the decision was made for, neither behind the
   default branch nor conflicting, still failed on the required check (the run
-  id is taken from that read), and holds a live approval — the newest review
-  marker the drainer accepts names exactly this head with verdict `APPROVE` and
-  no `CHANGES_REQUESTED` marker vetoes it; the label or the recorded approved
-  head alone never suffices, and a read that fails authorizes nothing. The
+  id is taken from that read), and holds a live approval — either the newest
+  review marker the drainer accepts names exactly this head with verdict
+  `APPROVE`, or the approval is a carried one: that newest accepted marker is
+  an `APPROVE` naming an earlier head and the stale-approval policy check
+  (`dismiss-stale-approval`, chosen as the merge path chooses it, skipped
+  copies set aside) completed `success` at exactly this head with
+  `reviewed:approve` still attached, all read from the one fresh payload with
+  the head compared explicitly (issue #857) — and no `CHANGES_REQUESTED` marker
+  vetoes the head. The label, the policy check, the earlier-head marker or the
+  recorded approved head alone never suffices, and a read that fails
+  authorizes nothing. The merge path's own carry rule is unchanged. The
   one rerun is recorded durably, per pull request and head, in the drain state
   (`ci_gate_reruns`), apart from the queue entry, so approval withdrawal and
   reapplication, forgetting the entry and a green observation never hand the
@@ -1274,8 +1281,11 @@ reimplement the removal, and `--check` remains read-only.
   refusal at this decision ends the pass with `checks_failed` and a message
   naming the condition (real failure, admission in flight, admitted attempt
   present, head moved, behind or conflicting, no live approval at this head,
-  rerun already spent); a refusal for a condition that can clear spends
-  nothing. A dry run requests and records nothing. Documentation is
+  rerun already spent); the no-live-approval wording says whether no accepted
+  marker approved the head at all or an earlier-head approval was a carried
+  candidate the policy check did not confirm (a policy check still pending is
+  reported as not yet settled); a refusal for a condition that can clear
+  spends nothing. A dry run requests and records nothing. Documentation is
   `docs/pr-drainer.md` "Automatic CI reruns".
 - **Merge hold:** a pull request carrying the `merge:hold` repository label is
   never merged, readied from draft or updated by the drainer, and never has a

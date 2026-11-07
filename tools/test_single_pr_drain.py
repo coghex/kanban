@@ -3304,7 +3304,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
             )
         ]
 
-    def script_run(self, rollup, *, reads, fresh):
+    def script_run(self, rollup, *, reads, fresh, feed=None):
         """Script one `--pr` run: its views and its comment-feed reads.
 
         A run reads the pull request when it prepares, when it processes, and
@@ -3314,7 +3314,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
         for _ in range(2 + (1 if fresh else 0)):
             self.script_pr_view({"statusCheckRollup": rollup})
         for _ in range(reads):
-            self.script_review_comments(self.approval())
+            self.script_review_comments(self.approval() if feed is None else feed)
 
     def state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -3364,6 +3364,100 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
                 self.assertEqual(result["reason"], "checks_failed")
                 self.assertIn(words, result["message"])
                 self.assertEqual(self.gh_calls("run", "rerun"), [])
+
+    # -- Issue #857: an approval carried across a clean branch update -----
+    #
+    # `--pr` does not recover a carried approval itself: it starts from a head
+    # the approval bookkeeping already established (the stored approved head is
+    # the current head, as `prepare_single_pr` requires), and these cases
+    # exercise the rerun decision from there.
+
+    OLD = "f" * 40
+
+    def carried_rollup(self, policy=(("COMPLETED", "SUCCESS"),), **kwargs):
+        rollup = self.rollup(**kwargs)
+        for status, conclusion in policy:
+            item = {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": status,
+                "conclusion": conclusion,
+            }
+            if status == "COMPLETED":
+                item["completedAt"] = "2026-07-18T00:01:00Z"
+            rollup.append(item)
+        return rollup
+
+    def test_a_carried_approval_is_rerun_once_across_restarts(self):
+        carried = self.carried_rollup()
+        self.script_run(carried, reads=2, fresh=True, feed=self.approval(self.OLD))
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        self.assertEqual(self.state()["ci_gate_reruns"]["42"][self.head_sha]["attempts"], 1)
+
+        # A new process: the same failure is the barrier, not a second request.
+        self.script_run(carried, reads=1, fresh=False, feed=self.approval(self.OLD))
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("still in flight", result["message"])
+
+        # The rerun's own result: gated out again. The carried head is left alone.
+        self.script_run(
+            self.carried_rollup(job="770002"),
+            reads=1,
+            fresh=False,
+            feed=self.approval(self.OLD),
+        )
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_failed")
+        self.assertIn("already spent", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
+    def test_a_carry_the_policy_has_not_confirmed_gets_no_request(self):
+        for name, policy, words in (
+            ("pending", (("IN_PROGRESS", None),), "has not settled on this head yet"),
+            ("failed", (("COMPLETED", "FAILURE"),), "is failure"),
+            ("missing", (), "missing or only skipped"),
+        ):
+            with self.subTest(policy=name):
+                self.setUp()
+                self.script_run(
+                    self.carried_rollup(policy=policy),
+                    reads=2,
+                    fresh=True,
+                    feed=self.approval(self.OLD),
+                )
+
+                result, proc = self.run_single()
+
+                self.assertEqual(result["reason"], "checks_failed")
+                self.assertIn("no live approval", result["message"])
+                self.assertIn("earlier head", result["message"])
+                self.assertIn(words, result["message"])
+                self.assertIn("rerun is not spent", result["message"])
+                self.assertEqual(self.gh_calls("run", "rerun"), [])
+                self.assertFalse(
+                    self.state_path.exists() and "ci_gate_reruns" in self.state()
+                )
+
+    def test_a_carried_dry_run_says_what_it_would_do_and_records_nothing(self):
+        self.script_run(
+            self.carried_rollup(), reads=2, fresh=True, feed=self.approval(self.OLD)
+        )
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(result["dry_run"], True)
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", result["message"])
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+        self.assertFalse(
+            self.state_path.exists() and "ci_gate_reruns" in self.state()
+        )
 
     def test_a_dry_run_requests_nothing_and_records_nothing(self):
         rollup = self.rollup()

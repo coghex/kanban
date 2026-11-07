@@ -2197,6 +2197,73 @@ def drop_ci_gate_record(state: dict[str, Any], number: int) -> None:
             state.pop("ci_gate_reruns", None)
 
 
+def gated_rerun_approval_refusal(
+    fresh: dict[str, Any], markers: list[ReviewMarker], head: str
+) -> str | None:
+    """Why `head` holds no live approval for a gated rerun, or None if it does.
+
+    Two approvals are live. The first is the one the drainer has always
+    accepted: the newest review marker it accepts is an `APPROVE` naming
+    exactly this head, and nothing else is consulted.
+
+    The second is an approval carried across a clean branch update (issue
+    #857). The newest accepted marker is an `APPROVE` that names an EARLIER
+    head -- the provenance the recorded approved head lacks -- and the
+    repository's stale-approval policy confirmed the carry on this head: the
+    same `branch_update_carried_approval` conjunction the merge path applies
+    (policy check `success` at exactly this head, chosen with
+    `latest_non_skipped_check`, and `reviewed:approve` still attached, all read
+    from this one payload and the head compared explicitly). The marker alone,
+    the label alone, the recorded approved head alone and the policy check
+    alone each grant nothing. Which pushes the policy keeps approval across is
+    its own business; this asks only whether it cleared this head.
+
+    The newest marker is chosen before its provider is checked, as everywhere
+    else: an unaccepted newest marker does not expose an older accepted one.
+    A `CHANGES_REQUESTED` marker at the current head has already vetoed by the
+    time this runs. Every refusal here leaves the head's one rerun unspent, and
+    the wording says whether no approving marker existed at all or a carried
+    candidate went unconfirmed, so an operator can tell the two apart.
+    """
+    newest = markers[0] if markers else None
+    accepted_approval = (
+        newest is not None
+        and newest.verdict == "APPROVE"
+        and marker_provider_accepted(newest.reviewers)
+    )
+    if newest is not None and accepted_approval and newest.head == head.lower():
+        return None
+    if newest is None or not accepted_approval:
+        return (
+            f"there is no live approval at this head {head[:12]}: no accepted "
+            "review marker approves it, exactly or by carry (the label alone "
+            "grants nothing); the rerun is not spent"
+        )
+    if branch_update_carried_approval(fresh, head):
+        return None
+    policy = classify_check(latest_non_skipped_check(fresh, STALE_APPROVAL_CHECK))
+    if policy == "pending":
+        settle = (
+            f"{STALE_APPROVAL_CHECK} has not settled on this head yet; a later "
+            "pass may make the rerun once it succeeds"
+        )
+    elif policy == "success":
+        settle = (
+            f"{STALE_APPROVAL_CHECK} succeeded on this head but the pull "
+            "request does not read as cleared by it"
+        )
+    elif policy == "missing":
+        settle = f"{STALE_APPROVAL_CHECK} is missing or only skipped on this head"
+    else:
+        settle = f"{STALE_APPROVAL_CHECK} is {policy} on this head"
+    return (
+        f"there is no live approval at this head {head[:12]}: the newest "
+        f"review marker approves an earlier head {newest.head[:12]} and "
+        f"{STALE_APPROVAL_CHECK} has not confirmed the carry ({settle}); the "
+        "label alone grants nothing; the rerun is not spent"
+    )
+
+
 def gated_rerun_refusal(
     ctx: RepoContext,
     number: int,
@@ -2272,20 +2339,9 @@ def gated_rerun_refusal(
             None,
             None,
         )
-    newest = markers[0] if markers else None
-    if (
-        newest is None
-        or newest.head != head.lower()
-        or newest.verdict != "APPROVE"
-        or not marker_provider_accepted(newest.reviewers)
-    ):
-        return (
-            f"there is no live approval at this head {head[:12]}: the newest "
-            "review marker does not approve exactly this head (the label alone "
-            "grants nothing); the rerun is not spent",
-            None,
-            None,
-        )
+    approval_refusal = gated_rerun_approval_refusal(fresh, markers, head)
+    if approval_refusal is not None:
+        return approval_refusal, None, None
     refusal = admission_refusal(
         classify_admission(fresh, gate.admission_check),
         gate.admission_check,
