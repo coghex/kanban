@@ -1139,7 +1139,11 @@ read that fails authorizes nothing.
    `reviewed:changes` or `merge:hold`, and its head is the commit the decision was made for. The
    required check must still read as failed on it.
 2. The head is neither behind the default branch nor conflicting; the branch-update and conflict
-   paths keep owning those.
+   paths keep owning those. That includes a head that is behind only by a
+   [coordination-only advance](#merging-past-a-coordination-only-base-advance): passing CI still
+   merges past it, but a gated-out failure cannot be rerun while the head is behind, so such a head
+   is updated first and the new head is judged on its own (unless its rerun is already spent or in
+   flight, in which case it keeps its barrier or refusal).
 3. The head has a live approval: the newest review marker the drainer accepts names exactly this
    head with verdict `APPROVE`, and no `CHANGES_REQUESTED` marker vetoes the head. The
    `reviewed:approve` label, or the drainer's recorded approved head, never suffices alone.
@@ -1150,7 +1154,10 @@ read that fails authorizes nothing.
 sent, under `ci_gate_reruns` in the drain state keyed by pull request and head. That record is kept
 apart from the queue entry, so withdrawing and re-applying the approval, forgetting the entry, a
 successful check observation and a restart in polling or `--pr` mode never give the head its rerun
-back. A new head starts a fresh allowance, and a merged or closed pull request's record is dropped.
+back. A new head starts a fresh allowance, and each head keeps its own record, so a branch that
+returns to an earlier head finds that head's rerun as it was left. A merged pull request's records are
+dropped; a closed one's are kept, because closing is reversible and a reopened pull request at the same
+head must not get its rerun back (nor lose an uncertain request still to be settled).
 A request that fails in any way stays recorded as unconfirmed, whether or not the polling drainer's
 outage flag is set (`--pr` never sets it), and is settled the way
 [an outage-interrupted rerun already is](#automatic-ci-reruns): if the run's jobs show it was
