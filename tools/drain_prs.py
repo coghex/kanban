@@ -1295,8 +1295,12 @@ def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
     if gate_records is not None and (
         not isinstance(gate_records, dict)
         or not all(
-            isinstance(record, dict) and isinstance(record.get("head"), str)
-            for record in gate_records.values()
+            isinstance(per_head, dict)
+            and all(
+                isinstance(head, str) and isinstance(record, dict)
+                for head, record in per_head.items()
+            )
+            for per_head in gate_records.values()
         )
     ):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
@@ -2118,11 +2122,17 @@ def admission_refusal(admission: str, name: str, check_name: str) -> str | None:
     return None
 
 
-def ci_gate_record(state: dict[str, Any], number: int) -> dict[str, Any] | None:
+def ci_gate_record(
+    state: dict[str, Any], number: int, head: str
+) -> dict[str, Any] | None:
+    """The durable gated-rerun record for one pull request at one head."""
     records = state.get("ci_gate_reruns")
     if not isinstance(records, dict):
         return None
-    record = records.get(str(number))
+    per_head = records.get(str(number))
+    if not isinstance(per_head, dict):
+        return None
+    record = per_head.get(head)
     return record if isinstance(record, dict) else None
 
 
@@ -2134,10 +2144,10 @@ def restore_ci_gate_rerun(
     The record outlives the entry. Approval bookkeeping rewrites or forgets the
     entry (`remember_approved_head`, `forget_pr`, `clear_ci_rerun`), and a
     successful check observation clears it, none of which may hand a head its
-    one rerun back. The record is authoritative for the head it names.
+    one rerun back. The record is authoritative for the head it is keyed by.
     """
-    record = ci_gate_record(state, number)
-    if record is None or record.get("head") != head:
+    record = ci_gate_record(state, number, head)
+    if record is None:
         return
     entry["ci_rerun_head"] = head
     entry["ci_rerun_attempts"] = int(record.get("attempts") or 0)
@@ -2151,32 +2161,35 @@ def record_ci_gate_rerun(
 ) -> None:
     """Write the entry's accounting for `head` into its durable record.
 
-    Nothing is written for a head that has spent or left uncertain nothing, and
-    a record whose allowance was restored (a request proven never accepted) is
-    dropped rather than kept as an empty claim. A different head replaces it:
-    a new head starts a fresh allowance.
+    Records are keyed by pull request and then head, and a write touches only
+    its own head's: a branch that returns to an earlier head finds that head's
+    spent or uncertain rerun exactly as it was left. Nothing is written for a
+    head that has spent or left uncertain nothing, and a record whose
+    allowance was restored (a request proven never accepted) is dropped rather
+    than kept as an empty claim. A different head has its own, fresh one.
     """
     attempts = int(entry.get("ci_rerun_attempts") or 0)
     active = bool(entry.get("ci_rerun_active"))
     unconfirmed = entry.get("ci_rerun_unconfirmed")
     records = state.setdefault("ci_gate_reruns", {})
-    if entry.get("ci_rerun_head") != head or not (attempts or active or unconfirmed):
-        existing = records.get(str(number))
-        if isinstance(existing, dict) and existing.get("head") == head:
-            del records[str(number)]
-        if not records:
-            state.pop("ci_gate_reruns", None)
-        return
-    records[str(number)] = {
-        "head": head,
-        "attempts": attempts,
-        "active": active,
-        "attempt_identity": entry.get("ci_rerun_attempt_identity"),
-        "unconfirmed": unconfirmed,
-    }
+    per_head = records.setdefault(str(number), {})
+    if entry.get("ci_rerun_head") == head and (attempts or active or unconfirmed):
+        per_head[head] = {
+            "attempts": attempts,
+            "active": active,
+            "attempt_identity": entry.get("ci_rerun_attempt_identity"),
+            "unconfirmed": unconfirmed,
+        }
+    else:
+        per_head.pop(head, None)
+    if not per_head:
+        del records[str(number)]
+    if not records:
+        state.pop("ci_gate_reruns", None)
 
 
 def drop_ci_gate_record(state: dict[str, Any], number: int) -> None:
+    """Forget every head's record for a pull request that has left the queue."""
     records = state.get("ci_gate_reruns")
     if isinstance(records, dict):
         records.pop(str(number), None)

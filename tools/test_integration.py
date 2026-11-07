@@ -6143,8 +6143,8 @@ class QueueOrderTests(ProcessPrFixture):
         state = self._read_state()
         self.assertEqual(state["active_pr"], 7)
         self.assertTrue(state["prs"]["7"]["ci_rerun_active"])
-        record = state["ci_gate_reruns"]["7"]
-        self.assertEqual((record["head"], record["attempts"]), (head, 1))
+        record = state["ci_gate_reruns"]["7"][head]
+        self.assertEqual(record["attempts"], 1)
         self.assertIsNone(record["unconfirmed"])
 
     def test_a_gated_candidates_real_failure_is_never_rerun_and_the_pass_moves_on(self):
@@ -6209,7 +6209,7 @@ class QueueOrderTests(ProcessPrFixture):
 
         self.assertEqual(len(self._reruns()), 1)
         self.assertEqual(slept, [drain_prs.CI_RERUN_INTERVAL_SECONDS] * 2)
-        self.assertEqual(self._read_state()["ci_gate_reruns"]["7"]["attempts"], 1)
+        self.assertEqual(self._read_state()["ci_gate_reruns"]["7"][head]["attempts"], 1)
 
     def test_a_second_gated_out_attempt_survives_a_restart_and_approval_reapplied(self):
         self.admission_check = "ci-admission"
@@ -6238,7 +6238,7 @@ class QueueOrderTests(ProcessPrFixture):
         # Still exactly one request: the second gated-out attempt is the
         # rerun's own result, and the head's one rerun is spent.
         self.assertEqual(len(self._reruns()), 1)
-        self.assertEqual(self._read_state()["ci_gate_reruns"]["7"]["attempts"], 1)
+        self.assertEqual(self._read_state()["ci_gate_reruns"]["7"][head]["attempts"], 1)
         self.assertEqual(self._read_state()["prs"]["7"]["ci_rerun_exhausted_head"], head)
         self.assertEqual(self._merged_numbers(), ["42"])
 
@@ -6496,12 +6496,39 @@ class OfflineDrainLoopTests(ProcessPrFixture):
                     interval=self.INTERVAL,
                     once=False,
                     dry_run=False,
-                    gates=drain_prs.GateConfig(
-                        required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
-                        required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
-                    ),
+                    gates=self._gates(),
                 )
         return raised.exception
+
+    # The repository's declared admission check, for the gated outage cases
+    # (issue #855); None is the ungated repository every other case here is.
+    admission_check = None
+
+    def _gates(self):
+        extra = (
+            {} if self.admission_check is None
+            else {"ci_admission_check": self.admission_check}
+        )
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+            **extra,
+        )
+
+    def _run_single(self):
+        """`--pr 42` in-process over whatever state the polling loop left."""
+        self._ensure_marker_reads()
+        report = drain_prs.new_single_pr_report(42)
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+        ):
+            return drain_prs.drain_one_pr(
+                self.ctx, 42, dry_run=False, gates=self._gates(), report=report
+            )
 
     def _queue(self, *responses):
         for response in responses:
@@ -6860,6 +6887,137 @@ class OfflineDrainLoopTests(ProcessPrFixture):
         self.assertTrue(entry["ci_rerun_active"])
         self.assertEqual(entry["ci_rerun_attempts"], 1)
         self.assertEqual(entry["consecutive_failures"], 0)
+
+    # -- Issue #855: the same outage cases, for a gated repository -----
+
+    def _gated_rollup(self):
+        return self._failed_ci_rollup() + [
+            {
+                "name": "ci-admission",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "completedAt": "2026-07-18T00:00:00Z",
+            }
+        ]
+
+    def _script_gated(self):
+        """A gated repository whose only candidate is gated out and approved."""
+        self.admission_check = "ci-admission"
+        self._script_pr_view({"statusCheckRollup": self._gated_rollup()})
+        self._script_comment_pages(
+            [
+                [
+                    self._review_marker_comment(
+                        f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                        f"head={self.head_sha} verdict=APPROVE -->",
+                        comment_id=101,
+                        created_at="2026-07-18T00:00:00Z",
+                    )
+                ]
+            ]
+        )
+
+    def _script_gated_rerun_lost(self, run_view, *, queued=2):
+        self._script_gated()
+        self._queue(*[self._approved()] * queued)
+        self.fake.script("gh", self.RERUN, stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", self.RERUN, stdout="")
+        self.fake.script("gh", self.RUN_VIEW, stdout=json.dumps(run_view))
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+    def _gated_record(self, state):
+        return state["ci_gate_reruns"]["42"][self.head_sha]
+
+    def _assert_gated_settled_as_one_request(self):
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(len(self._run_views()), 1)
+        # Durable before the outage was even noticed: what the polling loop
+        # held while it waited for the network is on disk.
+        offline = self._gated_record(self.observed_while_offline[0]["state"])
+        self.assertEqual(offline["unconfirmed"], "9911")
+        self.assertTrue(offline["active"])
+        record = self._gated_record(self._state())
+        self.assertIsNone(record["unconfirmed"])
+        self.assertEqual(record["attempts"], 1)
+        self.assertEqual(self._state()["prs"]["42"]["consecutive_failures"], 0)
+
+    def test_a_gated_rerun_accepted_with_its_response_lost_is_not_repeated(self):
+        self._script_gated_rerun_lost(
+            {"status": "in_progress", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_gated_settled_as_one_request()
+
+    def test_a_gated_rerun_accepted_and_finished_during_the_outage_is_not_repeated(self):
+        self._script_gated_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_gated_settled_as_one_request()
+
+    def test_a_gated_rerun_that_never_reached_github_is_requested_once_more(self):
+        self._script_gated_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770001}]}
+        )
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 2)
+        record = self._gated_record(self._state())
+        # The lost request was taken back, so the head's one rerun is counted once.
+        self.assertEqual(record["attempts"], 1)
+        self.assertTrue(record["active"])
+        self.assertIsNone(record["unconfirmed"])
+
+    def test_gated_indeterminate_evidence_neither_retracts_nor_repeats(self):
+        for run_view in ({"status": "completed"}, {"jobs": [{"databaseId": "x"}]}):
+            with self.subTest(run_view=run_view):
+                self.setUp()
+                self._script_gated_rerun_lost(run_view)
+
+                self._run_loop()
+
+                self.assertEqual(len(self._reruns()), 1)
+                record = self._gated_record(self._state())
+                self.assertEqual(record["unconfirmed"], "9911")
+                self.assertEqual(record["attempts"], 1)
+                self.assertEqual(self._state()["prs"]["42"]["consecutive_failures"], 1)
+
+    def test_a_gated_record_made_by_polling_is_honoured_by_a_pr_run(self):
+        self._script_gated_rerun_lost(
+            {"status": "in_progress", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self.assertEqual(len(self._reruns()), 1)
+
+        # The same failure, read by a `--pr` run: the barrier, not a request.
+        result = self._run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(self._gated_record(self._state())["attempts"], 1)
+
+    def test_a_gated_record_made_by_a_pr_run_is_honoured_by_polling(self):
+        self._script_gated()
+        # `--pr` never waits for the network: the failed request is on record
+        # as unconfirmed even though no outage flag was ever set.
+        self.fake.script("gh", self.RERUN, stderr=GH_OUTAGE, exit_code=1)
+        result = self._run_single()
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(self._gated_record(self._state())["unconfirmed"], "9911")
+
+        # Polling then settles it from the run's own jobs rather than asking again.
+        self._queue(self._approved())
+        self.fake.script(
+            "gh", self.RUN_VIEW, stdout=json.dumps({"jobs": [{"databaseId": 770002}]})
+        )
+        self.check_outcomes = []
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 1)
+        record = self._gated_record(self._state())
+        self.assertIsNone(record["unconfirmed"])
+        self.assertEqual(record["attempts"], 1)
 
     def test_a_rerun_accepted_with_its_response_lost_is_not_requested_again(self):
         self._script_rerun_lost(

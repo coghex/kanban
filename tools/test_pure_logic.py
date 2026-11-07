@@ -2480,8 +2480,7 @@ class GatedCiRerunTests(unittest.TestCase):
         )
         # Both reads happened, and the decision rests on them.
         self.assertEqual(sorted(self.reads), ["markers", "pr"])
-        record = self.state["ci_gate_reruns"]["42"]
-        self.assertEqual(record["head"], self.HEAD)
+        record = self.state["ci_gate_reruns"]["42"][self.HEAD]
         self.assertEqual(record["attempts"], 1)
         self.assertTrue(record["active"])
         self.assertIsNone(record["unconfirmed"])
@@ -2512,7 +2511,7 @@ class GatedCiRerunTests(unittest.TestCase):
         self._assert_refused(result, "already spent", requests=1)
         entry = self.state["prs"]["42"]
         self.assertEqual(entry["ci_rerun_exhausted_head"], self.HEAD)
-        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"][self.HEAD]["attempts"], 1)
         # And it stays refused however many more passes see it.
         for _ in range(3):
             self.assertEqual(self._decide(self._pr(job="1002")), drain_prs.CI_RERUN_REFUSED)
@@ -2539,7 +2538,33 @@ class GatedCiRerunTests(unittest.TestCase):
 
         self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
         self.assertEqual(len(self._requests()), 2)
-        self.assertEqual(self.state["ci_gate_reruns"]["42"]["head"], new_head)
+        self.assertEqual(
+            sorted(self.state["ci_gate_reruns"]["42"]), sorted([self.HEAD, new_head])
+        )
+
+    def test_returning_to_an_earlier_head_finds_its_rerun_still_spent(self):
+        # head A -> B -> A: B's request must not overwrite A's record.
+        self._decide()
+        other = "c" * 40
+        self.state["prs"]["42"]["approved_head"] = other
+        self.fresh = self._pr(head=other, job="2001")
+        self.markers = [self._marker(head=other)]
+        self.assertEqual(
+            self._decide(self._pr(head=other, job="2001")), drain_prs.CI_RERUN_REQUESTED
+        )
+        self.assertEqual(len(self._requests()), 2)
+        # The branch returns to A with a fresh approval and another gated-out
+        # result: A's allowance is still spent, across a state reload too.
+        self.state = json.loads(json.dumps(self.state))
+        self.state["prs"]["42"] = {**self._entry(), "approved_head": self.HEAD}
+        self.markers = [self._marker()]
+        again = self._pr(job="1002")
+        self.fresh = again
+
+        self._assert_refused(self._decide(again), "already spent", requests=2)
+        self.assertEqual(
+            sorted(self.state["ci_gate_reruns"]["42"]), sorted([self.HEAD, other])
+        )
 
     def test_the_cap_never_applies_a_second_request_to_one_head(self):
         # Whatever MAX_CI_RERUN_ATTEMPTS would allow an ungated repository.
@@ -2780,10 +2805,10 @@ class GatedCiRerunTests(unittest.TestCase):
 
     def test_a_forgotten_entry_does_not_replenish_it(self):
         self._decide()
-        record = dict(self.state["ci_gate_reruns"]["42"])
+        record = dict(self.state["ci_gate_reruns"]["42"][self.HEAD])
         drain_prs.forget_pr(self.state, 42)
         drain_prs.remember_approved_head(self.state, 42, self.HEAD)
-        self.assertEqual(self.state["ci_gate_reruns"]["42"], record)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"][self.HEAD], record)
         # The rerun finished gated-out again.
         snapshot = self._pr(job="1002")
         self.fresh = snapshot
@@ -2845,7 +2870,7 @@ class GatedCiRerunTests(unittest.TestCase):
         with self.assertRaises(drain_prs.TransportError):
             self._decide()
 
-        record = self.state["ci_gate_reruns"]["42"]
+        record = self.state["ci_gate_reruns"]["42"][self.HEAD]
         self.assertEqual(record["unconfirmed"], "777")
         self.assertEqual(record["attempts"], 1)
         self.assertTrue(record["active"])
@@ -2861,7 +2886,7 @@ class GatedCiRerunTests(unittest.TestCase):
             self._decide()
 
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0]["42"]["unconfirmed"], "777")
+        self.assertEqual(seen[0]["42"][self.HEAD]["unconfirmed"], "777")
 
     def test_a_request_accepted_with_its_response_lost_is_not_repeated(self):
         self._lose_the_response()
@@ -2877,8 +2902,8 @@ class GatedCiRerunTests(unittest.TestCase):
 
         self.assertEqual(result, drain_prs.CI_RERUN_IN_FLIGHT)
         self.assertEqual(len(self._requests()), 1)
-        self.assertIsNone(self.state["ci_gate_reruns"]["42"]["unconfirmed"])
-        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+        self.assertIsNone(self.state["ci_gate_reruns"]["42"][self.HEAD]["unconfirmed"])
+        self.assertEqual(self.state["ci_gate_reruns"]["42"][self.HEAD]["attempts"], 1)
 
     def test_a_request_accepted_and_finished_during_the_outage_is_not_repeated(self):
         self._lose_the_response()
@@ -2908,7 +2933,7 @@ class GatedCiRerunTests(unittest.TestCase):
         self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
         # Counted as one request, reconsidered from a fresh read.
         self.assertEqual(sorted(self.reads), ["markers", "pr"])
-        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"][self.HEAD]["attempts"], 1)
         self.assertEqual(len(self._requests()), 2)
 
     def test_a_request_proven_never_accepted_is_refused_if_the_gates_no_longer_hold(self):
@@ -2936,7 +2961,7 @@ class GatedCiRerunTests(unittest.TestCase):
                 self._decide()
 
         self.assertEqual(len(self._requests()), 1)
-        record = self.state["ci_gate_reruns"]["42"]
+        record = self.state["ci_gate_reruns"]["42"][self.HEAD]
         self.assertEqual(record["unconfirmed"], "777")
         self.assertEqual(record["attempts"], 1)
 
@@ -2948,7 +2973,7 @@ class GatedCiRerunTests(unittest.TestCase):
         with self.assertRaises(drain_prs.DrainError):
             self._decide()
 
-        self.assertEqual(self.state["ci_gate_reruns"]["42"]["unconfirmed"], "777")
+        self.assertEqual(self.state["ci_gate_reruns"]["42"][self.HEAD]["unconfirmed"], "777")
 
 
 class UngatedCiRerunUnchangedTests(unittest.TestCase):
@@ -3018,7 +3043,7 @@ class MigrateGatedRerunRecordTests(unittest.TestCase):
         }
 
     def test_a_valid_record_loads_untouched(self):
-        record = {"42": {"head": "a" * 40, "attempts": 1, "active": True}}
+        record = {"42": {"a" * 40: {"attempts": 1, "active": True}}}
         migrated = drain_prs.migrate_drain_state(self._state(record), source="test")
         self.assertEqual(migrated["ci_gate_reruns"], record)
 
@@ -3032,7 +3057,7 @@ class MigrateGatedRerunRecordTests(unittest.TestCase):
     def test_a_malformed_record_is_refused_rather_than_read_as_empty(self):
         # An unreadable claim must not read as no claim: that would hand every
         # head its rerun back.
-        for records in ([], "x", {"42": "a"}, {"42": {"attempts": 1}}, {"42": {"head": 3}}):
+        for records in ([], "x", {"42": "a"}, {"42": {"a" * 40: "x"}}, {"42": {"a" * 40: []}}):
             with self.subTest(records=records):
                 with self.assertRaises(drain_prs.DrainError):
                     drain_prs.migrate_drain_state(self._state(records), source="test")

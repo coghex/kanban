@@ -3329,8 +3329,8 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
         self.assertEqual(result["reason"], "checks_pending")
         self.assertIn("automatic rerun requested", result["message"])
         self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
-        record = self.state()["ci_gate_reruns"]["42"]
-        self.assertEqual((record["head"], record["attempts"]), (self.head_sha, 1))
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
+        self.assertEqual(record["attempts"], 1)
 
         # A new process: the same failure is the barrier, not a second request.
         self.script_run(first, reads=1, fresh=False)
@@ -3387,7 +3387,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
         result, proc = self.run_single()
         self.assertEqual(result["reason"], "operational_error")
         # `--pr` never waits for the network, yet the request is on record.
-        record = self.state()["ci_gate_reruns"]["42"]
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
         self.assertEqual(record["unconfirmed"], "9911")
         self.assertEqual(record["attempts"], 1)
         return rollup
@@ -3403,7 +3403,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
 
         self.assertEqual(result["reason"], "checks_pending")
         self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
-        self.assertIsNone(self.state()["ci_gate_reruns"]["42"]["unconfirmed"])
+        self.assertIsNone(self.state()["ci_gate_reruns"]["42"][self.head_sha]["unconfirmed"])
 
     def test_a_request_that_never_reached_github_is_made_once_more(self):
         rollup = self.lose_the_response()
@@ -3417,7 +3417,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
 
         self.assertEqual(result["reason"], "checks_pending")
         self.assertEqual(len(self.gh_calls("run", "rerun")), 2)
-        record = self.state()["ci_gate_reruns"]["42"]
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
         self.assertEqual(record["attempts"], 1)
         self.assertIsNone(record["unconfirmed"])
 
@@ -3430,7 +3430,7 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
 
         self.assertEqual(result["reason"], "operational_error")
         self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
-        self.assertEqual(self.state()["ci_gate_reruns"]["42"]["unconfirmed"], "9911")
+        self.assertEqual(self.state()["ci_gate_reruns"]["42"][self.head_sha]["unconfirmed"], "9911")
 
 
 if __name__ == "__main__":
