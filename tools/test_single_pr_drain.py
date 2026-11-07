@@ -3270,5 +3270,168 @@ class MergeHoldQueuePassTests(MergeHoldFixture):
         self.assertIn("41", self.pass_state()["prs"])
 
 
+GATED_OUTAGE = (
+    'Post "https://api.github.com/graphql": read tcp 10.0.0.2:5123->'
+    "140.82.112.6:443: read: connection reset by peer"
+)
+
+
+class SinglePrGatedRerunTests(SinglePrCliFixture):
+    """Issue #855: `--pr` makes the same gated rerun decisions as the queue,
+    from the state file a restarted process reads back."""
+
+    def setUp(self):
+        super().setUp()
+        (self.main / drain_prs.CONFIG_FILENAME).write_text(
+            json.dumps({"ci_admission_check": "ci-admission"}), encoding="utf-8"
+        )
+
+    def rollup(self, *, job="770001", admission=(("COMPLETED", "FAILURE"),)):
+        rollup = self.failed_ci_rollup(job=job)
+        rollup += [
+            {"name": "ci-admission", "status": status, "conclusion": conclusion}
+            for status, conclusion in admission
+        ]
+        return rollup
+
+    def approval(self, head=None):
+        return [
+            self.review_marker_comment(
+                f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                f"head={head or self.head_sha} verdict=APPROVE -->",
+                comment_id=101,
+                created_at="2026-07-18T00:00:00Z",
+            )
+        ]
+
+    def script_run(self, rollup, *, reads, fresh):
+        """Script one `--pr` run: its views and its comment-feed reads.
+
+        A run reads the pull request when it prepares, when it processes, and
+        once more for the gated request's fresh read; the feed is read for the
+        veto check and for the gated approval.
+        """
+        for _ in range(2 + (1 if fresh else 0)):
+            self.script_pr_view({"statusCheckRollup": rollup})
+        for _ in range(reads):
+            self.script_review_comments(self.approval())
+
+    def state(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def test_a_gated_out_attempt_is_rerun_once_across_restarts(self):
+        first = self.rollup()
+        self.script_run(first, reads=2, fresh=True)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
+        self.assertEqual(record["attempts"], 1)
+
+        # A new process: the same failure is the barrier, not a second request.
+        self.script_run(first, reads=1, fresh=False)
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("still in flight", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
+        # The rerun's own result: gated out again. The head is left alone.
+        self.script_run(self.rollup(job="770002"), reads=1, fresh=False)
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_failed")
+        self.assertIn("already spent", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
+    def test_the_label_alone_or_a_real_failure_gets_no_request(self):
+        for name, rollup, feed, words in (
+            ("real failure", self.rollup(admission=(("COMPLETED", "SUCCESS"),)), 1, "real failure after admission"),
+            ("no marker", self.rollup(), 0, "no live approval"),
+        ):
+            with self.subTest(case=name):
+                self.setUp()
+                self.script_run(rollup, reads=feed, fresh=feed == 0)
+                if feed == 0:
+                    # An empty feed is what the label alone looks like.
+                    self.script_review_comments([])
+                    self.script_review_comments([])
+
+                result, proc = self.run_single()
+
+                self.assertEqual(result["reason"], "checks_failed")
+                self.assertIn(words, result["message"])
+                self.assertEqual(self.gh_calls("run", "rerun"), [])
+
+    def test_a_dry_run_requests_nothing_and_records_nothing(self):
+        rollup = self.rollup()
+        self.script_run(rollup, reads=2, fresh=True)
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(result["dry_run"], True)
+        # It reached the gated decision and said what it would have done.
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", result["message"])
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+        self.assertFalse(
+            self.state_path.exists() and "ci_gate_reruns" in self.state()
+        )
+
+    def lose_the_response(self):
+        rollup = self.rollup()
+        self.script_run(rollup, reads=2, fresh=True)
+        self.fake.script("gh", ["run", "rerun", "9911"], stderr=GATED_OUTAGE, exit_code=1)
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "operational_error")
+        # `--pr` never waits for the network, yet the request is on record.
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
+        self.assertEqual(record["unconfirmed"], "9911")
+        self.assertEqual(record["attempts"], 1)
+        return rollup
+
+    def test_a_request_accepted_with_its_response_lost_is_not_repeated(self):
+        rollup = self.lose_the_response()
+        self.script_run(rollup, reads=1, fresh=False)
+        self.fake.script(
+            "gh", ["run", "view", "9911"], stdout=json.dumps({"jobs": [{"databaseId": 770002}]})
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        self.assertIsNone(self.state()["ci_gate_reruns"]["42"][self.head_sha]["unconfirmed"])
+
+    def test_a_request_that_never_reached_github_is_made_once_more(self):
+        rollup = self.lose_the_response()
+        self.script_run(rollup, reads=2, fresh=True)
+        self.fake.script(
+            "gh", ["run", "view", "9911"], stdout=json.dumps({"jobs": [{"databaseId": 770001}]})
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 2)
+        record = self.state()["ci_gate_reruns"]["42"][self.head_sha]
+        self.assertEqual(record["attempts"], 1)
+        self.assertIsNone(record["unconfirmed"])
+
+    def test_indeterminate_evidence_neither_retracts_nor_repeats(self):
+        rollup = self.lose_the_response()
+        self.script_run(rollup, reads=1, fresh=False)
+        self.fake.script("gh", ["run", "view", "9911"], stdout=json.dumps({"status": "completed"}))
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        self.assertEqual(self.state()["ci_gate_reruns"]["42"][self.head_sha]["unconfirmed"], "9911")
+
+
 if __name__ == "__main__":
     unittest.main()

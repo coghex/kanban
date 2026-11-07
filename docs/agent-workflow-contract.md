@@ -1235,6 +1235,48 @@ reimplement the removal, and `--check` remains read-only.
   reviewer. This is the drainer's merge policy, and §2.10's manual finalization
   fallback keeps its own separate gate; `docs/pr-drainer.md` documents the
   operator-visible consequences.
+- **Automatic CI reruns:** `tools/drain_prs.py` is the only component that
+  reruns a failed required check, with `gh run rerun <run id> --failed`.
+  Ungated, it is keyed to the approved head, with a duplicate-request barrier
+  and a quarantine once `MAX_CI_RERUN_ATTEMPTS` requests have each come back as
+  a distinguishable failure. A repository whose CI is gated behind an admission
+  step declares that step's check name as `ci_admission_check` in
+  `.drain-prs.json`, next to `required_ci_check` and `required_review_check`
+  (a non-empty string or `null`; absent is `null`; there is no default name, so
+  a repository without the key is ungated and decided exactly as above — issue
+  #855). Under a declared gate the drainer classifies a failed required check
+  from the head's status rollup and that one name alone, never from a workflow
+  file, a job log or an admission reason: no instance of the admission check
+  that is completed with conclusion `FAILURE` is a real failure and is never
+  rerun, whatever allowance is left; an instance still queued or in progress is
+  a wait; a `FAILURE` beside a `SUCCESS` is an admitted attempt and is not
+  rerun; a `FAILURE` with neither is a gated-out attempt. A gated-out attempt
+  is rerun at most once per head, and only when a fresh read made immediately
+  before the request shows that the pull request is still open, not a draft,
+  on the default branch, labelled approved without `reviewed:changes` or
+  `merge:hold`, still at the head the decision was made for, neither behind the
+  default branch nor conflicting, still failed on the required check (the run
+  id is taken from that read), and holds a live approval — the newest review
+  marker the drainer accepts names exactly this head with verdict `APPROVE` and
+  no `CHANGES_REQUESTED` marker vetoes it; the label or the recorded approved
+  head alone never suffices, and a read that fails authorizes nothing. The
+  one rerun is recorded durably, per pull request and head, in the drain state
+  (`ci_gate_reruns`), apart from the queue entry, so approval withdrawal and
+  reapplication, forgetting the entry and a green observation never hand the
+  head its rerun back; each head keeps its own record, a new head starts a
+  fresh allowance, a closed pull request's records are kept (reopening it at
+  the same head finds the rerun as it was left) and a merge drops them. A head
+  that is behind only by a coordination-only base advance is updated before a
+  gated-out failure is considered, since the rerun is refused while it is
+  behind. The existing
+  in-flight barrier applies unchanged after the request, and a second
+  gated-out attempt or a real failure after it leaves the head alone. A
+  refusal at this decision ends the pass with `checks_failed` and a message
+  naming the condition (real failure, admission in flight, admitted attempt
+  present, head moved, behind or conflicting, no live approval at this head,
+  rerun already spent); a refusal for a condition that can clear spends
+  nothing. A dry run requests and records nothing. Documentation is
+  `docs/pr-drainer.md` "Automatic CI reruns".
 - **Merge hold:** a pull request carrying the `merge:hold` repository label is
   never merged, readied from draft or updated by the drainer, and never has a
   failed check rerun for it, in a polling pass or in `--pr` mode, whatever its
@@ -1357,7 +1399,14 @@ reimplement the removal, and `--check` remains read-only.
   CI rerun the outage left uncertain is settled from GitHub rather than
   retried blind — a merge is claimed only at the head it tried to land, and a
   swap only when the default branch holds its merge commit, with its cleanup
-  waiting on GitHub's record of the merge. Authentication, permission,
+  waiting on GitHub's record of the merge. A gated repository's one CI rerun
+  is recorded as requested, and made durable, before the request leaves, in
+  `--pr` runs as well as polling ones and whatever the outage flag says: a
+  request that fails in any way stays unconfirmed in the drain state and is
+  settled from the run's own jobs on the next look — accepted, or finished
+  during the outage, is never repeated; proven never accepted gives the
+  allowance back to be reconsidered from a fresh read; indeterminate evidence
+  neither retracts nor repeats. Authentication, permission,
   certificate, malformed-response, local-timeout, and unexpected failures are
   never read as an outage, and a check that meets one ends the wait so the
   ordinary failure handling applies. The controller reports the state as
@@ -1991,9 +2040,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   check is fixed or reported, and `tools/drain_prs.py` remains the only
   component that reruns one — keyed to the approved head, with a
   duplicate-request barrier and a quarantine once its `MAX_CI_RERUN_ATTEMPTS`
-  allowance is spent. A second rerunner with its own ceiling would mean two
-  components disagreeing about the same pull request, so `fix` never reruns a
-  check itself.
+  allowance is spent, or, for a repository that declares `ci_admission_check`,
+  once its one gate-driven rerun per head is spent. A second rerunner with its
+  own ceiling would mean two components disagreeing about the same pull
+  request, so `fix` never reruns a check itself.
 - **Failure semantics:** it addresses the highest-priority obstacle in
   `pullRequestStatus` order — merge conflict, then a
   rollup that cannot be read completely, then any failed check, then a pending
