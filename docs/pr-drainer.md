@@ -869,6 +869,22 @@ A repository can change or disable those check names with `.drain-prs.json`:
 
 A value of `null` disables that status-check requirement. It does not remove the approval-label requirement.
 
+A third optional key, `ci_admission_check`, declares that the repository gates its
+pull-request CI behind an admission step and names that step's check:
+
+```json
+{
+  "ci_admission_check": "ci-admission"
+}
+```
+
+It is a non-empty string or `null`, and absent means `null`: there is no default name,
+and a repository without the key is ungated and reruns failed CI exactly as
+[Automatic CI reruns](#automatic-ci-reruns) describes. An empty or whitespace-only string, or a
+value that is not a string, is refused when the drainer starts; every key other than these
+three is still refused as unsupported. What the key changes is
+[described below](#gated-repositories-ci_admission_check).
+
 ### Which instance of a check counts
 
 One head can carry several instances of a required check: each label event
@@ -1011,7 +1027,9 @@ A candidate's turn ends in one of three ways.
   `reviewed:changes` or carries a review marker requesting changes on its
   current head (as above), conflicts with the default branch (recorded as an
   incident, as below), has a required check that failed with every automatic
-  rerun of that head already spent, has a required check that has reported
+  rerun of that head already spent (in a
+  [gated repository](#gated-repositories-ci_admission_check), one that failed as a real
+  failure or whose one rerun is spent or refused), has a required check that has reported
   nothing for its current head for longer than the ten-minute grace period
   after its check runs completed (recorded as an incident, as [below](#required-checks-that-never-report)),
   has moved to a head no review has cleared, or is still cooling down after a
@@ -1040,7 +1058,10 @@ the first advance or barrier, and exits.
 A required CI check that failed gets a bounded number of automatic reruns,
 keyed to the approved head: a head that keeps failing is retried up to
 `MAX_CI_RERUN_ATTEMPTS` times (`tools/drain_prs.py`) and then left alone until a
-new reviewed head arrives.
+new reviewed head arrives. That is the rule for a repository that declares no
+`ci_admission_check`; one that does is decided by the
+[gated rules](#gated-repositories-ci_admission_check) below, where a real failure is
+never rerun and a gated-out attempt is rerun once per head.
 
 **A requested rerun is a barrier until its own result is distinguishable from
 the failure that triggered it.** GitHub does not replace the failed rollup at
@@ -1083,6 +1104,76 @@ tell them apart — and it keeps what it saw as the baseline for the passes afte
 it. From there the entry behaves like any other: the same failure holds the
 barrier, a different finished attempt releases it, and everything the old file
 recorded, including the attempts already spent, carries forward untouched.
+
+#### Gated repositories (`ci_admission_check`)
+
+A repository can gate its pull-request CI behind an admission step. The automatic first attempt
+of a `pull_request` run executes only an admission job that fails on purpose, so the required
+checks go red and nothing expensive runs; a later attempt is admitted only when the head is the
+pull request's current head, contains the base branch's tip and carries a head-bound approval
+marker. Rerunning blindly there spends real CI on real failures, can target a previous head's
+run (which cancels the current head's CI through their shared concurrency group), and is refused
+at admission again when the head is not approved. A repository that declares
+`ci_admission_check` in `.drain-prs.json` gets these rules instead of the ungated ones above; the
+drainer hard-codes no repository's job names, and the declared name is its only gate vocabulary.
+
+**Classification uses the status rollup and the configured name, nothing else.** Workflow files,
+job logs and admission reasons are never read. When the required CI check has failed, the
+instances of the admission check on that head decide what kind of failure it is. A *completed
+failed instance* is status `COMPLETED` with conclusion `FAILURE`; a skipped or conclusionless
+instance is not one.
+
+| The admission check on the head | The failure is | Rerun |
+| --- | --- | --- |
+| missing, or every instance completed without `FAILURE` (succeeded, skipped, anything else) | a **real failure** after admission | never, however many attempts are left |
+| any instance queued or in progress | an admitted attempt in flight | none yet; a wait that clears |
+| a `FAILURE` instance beside a `SUCCESS` one | an admitted attempt exists | none |
+| a `FAILURE` instance and nothing else | a **gated-out** attempt | at most once per head, under the conditions below |
+
+**A gated-out attempt is rerun at most once per head, and only when every condition holds.** Each
+is evaluated from a fresh read of the pull request, and of its review markers, made immediately
+before the request; the run id comes from that read, never from the pass's earlier one, and a
+read that fails authorizes nothing.
+
+1. The pull request is open, not a draft, on the default branch, still labelled approved without
+   `reviewed:changes` or `merge:hold`, and its head is the commit the decision was made for. The
+   required check must still read as failed on it.
+2. The head is neither behind the default branch nor conflicting; the branch-update and conflict
+   paths keep owning those.
+3. The head has a live approval: the newest review marker the drainer accepts names exactly this
+   head with verdict `APPROVE`, and no `CHANGES_REQUESTED` marker vetoes the head. The
+   `reviewed:approve` label, or the drainer's recorded approved head, never suffices alone.
+4. No admitted attempt exists or is in flight for the head.
+5. The head has not already had its one gate-driven rerun requested.
+
+**The allowance is durable.** The request is recorded, and written to the state file, before it is
+sent, under `ci_gate_reruns` in the drain state keyed by pull request and head. That record is kept
+apart from the queue entry, so withdrawing and re-applying the approval, forgetting the entry, a
+successful check observation and a restart in polling or `--pr` mode never give the head its rerun
+back. A new head starts a fresh allowance, and a merged or closed pull request's record is dropped.
+A request that fails in any way stays recorded as unconfirmed, whether or not the polling drainer's
+outage flag is set (`--pr` never sets it), and is settled the way
+[an outage-interrupted rerun already is](#automatic-ci-reruns): if the run's jobs show it was
+accepted, or finished during the outage, it is never repeated; if they show it was never accepted,
+the allowance is given back and the decision is made again from a fresh read; evidence that settles
+nothing neither retracts nor repeats.
+
+**After the request, the in-flight barrier applies unchanged.** Nothing more is requested until the
+rerun's own result is a distinguishable finished attempt. If that result is another gated-out
+attempt or a real failure, the head is left alone, with the `checks_failed` refusal and the durable
+skip of a spent head, until a new head arrives; a gated repository never makes a second
+gate-driven request for a head, whatever `MAX_CI_RERUN_ATTEMPTS` would allow an ungated one.
+
+**A refusal ends the pass with `checks_failed` and says which condition failed**, in distinct
+wording: a real failure after admission; the admission check still queued or in progress; an
+admitted attempt present; the head moved or the pull request no longer eligible; the head behind
+or conflicting; no live approval at this head; the head's one rerun already spent. It is logged
+the way any refused rerun is. A refusal for a condition that can clear (the approval marker for
+the head is not published yet, the head is about to be updated, the admission check is still
+running) does not spend the head's rerun, so a later pass can still make it once the condition
+holds. A real failure is final for as long as it lasts but does not quarantine the head, so a
+rerun by hand that passes still merges. In `--dry-run` no `gh run rerun` is issued and nothing
+is recorded; the log says what would have been requested or why it was refused.
 
 ### Merging past a coordination-only base advance
 
