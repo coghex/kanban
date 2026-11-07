@@ -2826,6 +2826,243 @@ class GatedCiRerunTests(unittest.TestCase):
                 self._decide()
         self.assertEqual(self._requests(), [])
 
+    # -- Issue #857: an approval carried across a clean branch update -----
+
+    OTHER = "c" * 40
+    SETTLED = "2026-08-02T00:00:00Z"
+
+    def _carried(self, policy=(("COMPLETED", "SUCCESS", None),), **overrides):
+        """A gated-out head whose policy check instances are `policy`."""
+        pr = self._pr(**overrides)
+        for status, conclusion, when in policy:
+            item = {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": status,
+                "conclusion": conclusion,
+            }
+            if status == "COMPLETED":
+                item["completedAt"] = when or self.SETTLED
+            pr["statusCheckRollup"].append(item)
+        return pr
+
+    def _carry(self, **overrides):
+        """Make the head a carried one: an earlier-head APPROVE, policy cleared."""
+        self.markers = [self._marker(head=self.OLD)]
+        self.fresh = self._carried(**overrides)
+        return self.fresh
+
+    def test_a_carried_approval_is_rerun_exactly_once(self):
+        self._carry()
+
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+        self.assertEqual(len(self._requests()), 1)
+        record = self.state["ci_gate_reruns"]["42"][self.HEAD]
+        self.assertEqual(record["attempts"], 1)
+        self.assertTrue(record["active"])
+        # The same failure next pass is the barrier, not a second request.
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_IN_FLIGHT)
+        self.assertEqual(len(self._requests()), 1)
+
+    def test_a_skipped_policy_copy_does_not_mask_a_successful_one(self):
+        # A label event starts a later copy of the job that is skipped on
+        # purpose; the merge path reads past it, and so does the rerun.
+        self._carry(
+            policy=(
+                ("COMPLETED", "SUCCESS", "2026-08-02T00:00:00Z"),
+                ("COMPLETED", "SKIPPED", "2026-08-02T00:05:00Z"),
+            )
+        )
+
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_policy_copy_still_running_outranks_an_older_success(self):
+        self._carry(
+            policy=(
+                ("COMPLETED", "SUCCESS", None),
+                ("IN_PROGRESS", None, None),
+            )
+        )
+
+        self._assert_refused(self._decide(self.fresh), "not settled")
+        self.assertNotIn("ci_gate_reruns", self.state)
+        self.fresh = self._carried()
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_carry_the_policy_did_not_confirm_gives_no_request(self):
+        cases = (
+            ("failed", dict(policy=(("COMPLETED", "FAILURE", None),)), "is failure"),
+            ("pending", dict(policy=(("IN_PROGRESS", None, None),)), "not settled"),
+            ("queued", dict(policy=(("QUEUED", None, None),)), "not settled"),
+            ("missing", dict(policy=()), "missing or only skipped"),
+            (
+                "skipped only",
+                dict(policy=(("COMPLETED", "SKIPPED", None),)),
+                "missing or only skipped",
+            ),
+        )
+        for label, overrides, words in cases:
+            with self.subTest(policy=label):
+                self.setUp()
+                self._carry(**overrides)
+
+                self._assert_refused(
+                    self._decide(self.fresh), "no live approval", "earlier head", words
+                )
+                self.assertIn("rerun is not spent", self.gate.reason)
+                self.assertNotIn("ci_gate_reruns", self.state)
+                # A later pass, once the policy has cleared the carry, has it.
+                self.fresh = self._carried()
+                self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_policy_success_recorded_at_a_different_head_gives_no_request(self):
+        self._carry()
+        # The head moved again: the payload names the newer head and still
+        # carries the earlier head's successful policy run in its rollup.
+        self.fresh = self._carried(head=self.OTHER)
+
+        self._assert_refused(self._decide(), "moved")
+        self.assertNotIn("ci_gate_reruns", self.state)
+        # The decision itself compares the head, not the check: a payload for
+        # another head confirms nothing even when everything else matches.
+        self.assertIsNotNone(
+            drain_prs.gated_rerun_approval_refusal(self.fresh, self.markers, self.HEAD)
+        )
+        self.fresh = self._carried()
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_carry_whose_label_was_removed_gives_no_request(self):
+        self._carry(labels=[])
+
+        self._assert_refused(self._decide(self.fresh), "no longer labelled")
+        self.assertNotIn("ci_gate_reruns", self.state)
+        # The label is also part of the carry evidence itself, not only of the
+        # rerun's earlier checks.
+        self.assertIsNotNone(
+            drain_prs.gated_rerun_approval_refusal(self.fresh, self.markers, self.HEAD)
+        )
+        self.fresh = self._carried()
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_carry_needs_an_accepted_earlier_head_approval(self):
+        cases = {
+            "no marker at all": [],
+            "newest marker requests changes": [
+                self._marker(head=self.OLD, verdict="CHANGES_REQUESTED"),
+                self._marker(head=self.OTHER),
+            ],
+            "newest marker is another head's rejection over an approval": [
+                self._marker(head=self.OTHER, verdict="CHANGES_REQUESTED"),
+                self._marker(head=self.OLD),
+            ],
+        }
+        for label, markers in cases.items():
+            with self.subTest(markers=label):
+                self.setUp()
+                self._carry()
+                self.markers = markers
+
+                self._assert_refused(
+                    self._decide(self.fresh), "no live approval", "no accepted"
+                )
+                self.assertNotIn("earlier head", self.gate.reason)
+                self.assertNotIn("ci_gate_reruns", self.state)
+                self.markers = [self._marker(head=self.OLD)]
+                self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_a_carry_from_an_unaccepted_provider_gives_no_request(self):
+        self._carry()
+        with mock.patch.object(drain_prs, "marker_provider_accepted", return_value=False):
+            self._assert_refused(self._decide(self.fresh), "no live approval", "no accepted")
+        self.assertNotIn("ci_gate_reruns", self.state)
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_the_newest_marker_is_chosen_before_its_provider_is_checked(self):
+        self._carry()
+        self.markers = [
+            drain_prs.ReviewMarker("pr-review:v2", "grok", self.OTHER, "APPROVE"),
+            self._marker(head=self.OLD),
+        ]
+        with mock.patch.object(
+            drain_prs,
+            "marker_provider_accepted",
+            side_effect=lambda reviewers: reviewers == "codex",
+        ):
+            # An older accepted approval is not found underneath an unaccepted
+            # newest one.
+            self._assert_refused(self._decide(self.fresh), "no live approval", "no accepted")
+
+    def test_a_current_head_rejection_vetoes_a_confirmed_carry(self):
+        self._carry()
+        self.markers = [
+            self._marker(head=self.OLD, comment_id="1"),
+            self._marker(head=self.HEAD, verdict="CHANGES_REQUESTED", comment_id="2"),
+        ]
+
+        self._assert_refused(self._decide(self.fresh), "requested changes")
+        self.assertNotIn("ci_gate_reruns", self.state)
+        self.markers = [self._marker(head=self.OLD)]
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_the_policy_check_alone_or_the_recorded_head_alone_never_suffices(self):
+        # No marker, a recorded approved head equal to the head, a successful
+        # policy check and the label: the four things the rerun must not
+        # accept without the earlier-head approval marker.
+        self.markers = []
+        self.fresh = self._carried()
+        self.assertEqual(self.state["prs"]["42"]["approved_head"], self.HEAD)
+
+        self._assert_refused(self._decide(self.fresh), "no live approval")
+
+    def test_an_exact_head_approval_needs_no_policy_check(self):
+        # Accepted exactly as before, whatever the policy check says.
+        self.fresh = self._carried(policy=(("COMPLETED", "FAILURE", None),))
+
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_the_carried_head_gets_a_fresh_allowance_of_its_own(self):
+        # The head the approval was carried from spent its rerun.
+        self.state["ci_gate_reruns"] = {
+            "42": {
+                self.OLD: {
+                    "attempts": 1,
+                    "active": False,
+                    "attempt_identity": "earlier",
+                    "unconfirmed": None,
+                }
+            }
+        }
+        spent = json.loads(json.dumps(self.state["ci_gate_reruns"]["42"][self.OLD]))
+        self._carry()
+
+        self.assertEqual(self._decide(self.fresh), drain_prs.CI_RERUN_REQUESTED)
+
+        self.assertEqual(len(self._requests()), 1)
+        records = self.state["ci_gate_reruns"]["42"]
+        self.assertEqual(records[self.HEAD]["attempts"], 1)
+        self.assertEqual(records[self.OLD], spent)
+        # A second gated-out result after its rerun leaves it alone.
+        again = self._carried(job="1002")
+        self.fresh = again
+        self._assert_refused(self._decide(again), "already spent", requests=1)
+
+    def test_a_dry_run_says_what_it_would_do_with_a_carry(self):
+        self._carry()
+        result = self._decide(self.fresh, dry_run=True)
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(self._requests(), [])
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+        self.fresh = self._carried(policy=(("IN_PROGRESS", None, None),))
+        self.state["prs"]["42"].update(self._entry())
+        self.assertEqual(
+            self._decide(self.fresh, dry_run=True), drain_prs.CI_RERUN_REFUSED
+        )
+        self.assertIn("not settled", self.gate.reason)
+        self.assertIn("rerun is not spent", self.gate.reason)
+        self.assertEqual(self._requests(), [])
+
     # -- Requirement 4e: the allowance is durable -------------------------
 
     def test_approval_bookkeeping_and_a_green_observation_do_not_replenish_it(self):

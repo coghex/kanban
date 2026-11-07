@@ -6246,6 +6246,118 @@ class QueueOrderTests(ProcessPrFixture):
         self.assertEqual(self._read_state()["prs"]["7"]["ci_rerun_exhausted_head"], head)
         self.assertEqual(self._merged_numbers(), ["42"])
 
+    # -- Issue #857: an approval carried across a clean branch update -----
+
+    def _carried_ci(self, *, policy=(("COMPLETED", "SUCCESS"),), job="770001"):
+        """A gated-out head the stale-approval policy cleared (or did not)."""
+        rollup = self._gated_out_ci(job=job)
+        for status, conclusion in policy:
+            item = {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": status,
+                "conclusion": conclusion,
+            }
+            if status == "COMPLETED":
+                item["completedAt"] = "2026-07-18T00:01:00Z"
+            rollup.append(item)
+        return rollup
+
+    def test_a_carried_approval_is_rerun_exactly_once_and_holds_the_lane(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        approved_at = "c" * 40
+        carried = self._other_pr_json(7, head, statusCheckRollup=self._carried_ci())
+        self._script_pr(7, carried, carried)
+        self._script_approval_feed(7, approved_at)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, head), self._queued(42, self.head_sha)])
+
+        self._run_loop()
+
+        self.assertEqual([args[:3] for args in self._reruns()], [["run", "rerun", "9911"]])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["ci_gate_reruns"]["7"][head]["attempts"], 1)
+
+    def test_a_carry_the_policy_has_not_confirmed_is_skipped_and_spends_nothing(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        approved_at = "c" * 40
+        cases = {
+            "pending": ((("IN_PROGRESS", None),), "not settled"),
+            "failed": ((("COMPLETED", "FAILURE"),), "is failure"),
+            "missing": ((), "missing or only skipped"),
+        }
+        for label, (policy, words) in cases.items():
+            with self.subTest(policy=label):
+                self.setUp()
+                self.admission_check = "ci-admission"
+                carried = self._other_pr_json(
+                    7, head, statusCheckRollup=self._carried_ci(policy=policy)
+                )
+                self._script_pr(7, carried, carried)
+                self._script_approval_feed(7, approved_at, copies=1)
+                self._script_merge_of_42()
+                self._script_pr_list(
+                    [self._queued(7, head), self._queued(42, self.head_sha)]
+                )
+
+                self._run_loop()
+
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(self._merged_numbers(), ["42"])
+                state = self._read_state()
+                self.assertNotIn("ci_gate_reruns", state)
+                entry = state["prs"]["7"]
+                self.assertIn("no live approval", entry["last_error"])
+                self.assertIn("earlier head", entry["last_error"])
+                self.assertIn(words, entry["last_error"])
+
+    def test_the_carried_head_has_its_own_allowance_after_the_origin_head_spent_its_own(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        approved_at = "c" * 40
+        spent = {
+            "attempts": 1,
+            "active": False,
+            "attempt_identity": "earlier",
+            "unconfirmed": None,
+        }
+        carried = self._other_pr_json(7, head, statusCheckRollup=self._carried_ci())
+        self._script_pr(7, carried, carried)
+        self._script_approval_feed(7, approved_at)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, head), self._queued(42, self.head_sha)])
+        state = {"7": self._entry(head)}
+        self._write_state(state)
+        written = self._read_state()
+        written["ci_gate_reruns"] = {"7": {approved_at: spent}}
+        self.state_path.write_text(json.dumps(written), encoding="utf-8")
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 1)
+        records = self._read_state()["ci_gate_reruns"]["7"]
+        self.assertEqual(records[head]["attempts"], 1)
+        self.assertEqual(records[approved_at], spent)
+
+    def test_a_carried_gated_dry_run_requests_nothing_and_records_nothing(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        carried = self._other_pr_json(7, head, statusCheckRollup=self._carried_ci())
+        self._script_pr(7, carried, carried)
+        self._script_approval_feed(7, "c" * 40)
+        self._script_pr_list([self._queued(7, head)])
+        self._write_state({"7": self._entry(head)})
+        before = self.state_path.read_bytes()
+
+        self._run_loop(dry_run=True)
+
+        self.assertEqual(self._reruns(), [])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_a_gated_dry_run_requests_nothing_and_records_nothing(self):
         self.admission_check = "ci-admission"
         head = "b" * 40
@@ -6387,6 +6499,118 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
                 self.assertIsNotNone(error)
                 self.assertIn(words, error)
                 self.assertEqual(error, report["message"])
+
+    # -- Issue #857: an approval carried across a clean branch update -----
+
+    OLD = "f" * 40
+
+    def _carried_rollup(self, policy=(("COMPLETED", "SUCCESS"),), **kwargs):
+        rollup = self._rollup(**kwargs)
+        for status, conclusion in policy:
+            item = {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": status,
+                "conclusion": conclusion,
+            }
+            if status == "COMPLETED":
+                item["completedAt"] = "2026-07-18T00:01:00Z"
+            rollup.append(item)
+        return rollup
+
+    def test_a_carried_approval_is_rerun_once(self):
+        rollup = self._carried_rollup()
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        report, error = self._drive(
+            {"statusCheckRollup": rollup},
+            {"statusCheckRollup": rollup},
+            feed=self._approval(head=self.OLD),
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(report["reason"], "checks_pending")
+        self.assertIn("automatic rerun requested", report["message"])
+        self.assertEqual(len(self._reruns()), 1)
+
+    def test_an_exact_head_approval_consults_no_policy_check(self):
+        rollup = self._carried_rollup(policy=(("COMPLETED", "FAILURE"),))
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+
+        report, error = self._drive(
+            {"statusCheckRollup": rollup}, {"statusCheckRollup": rollup}
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(self._reruns()), 1)
+
+    def test_a_carry_that_is_not_confirmed_ends_checks_failed_naming_why(self):
+        carried = self._carried_rollup()
+        earlier = self._approval(head=self.OLD)
+        cases = {
+            "policy failed": (
+                {"statusCheckRollup": self._carried_rollup(policy=(("COMPLETED", "FAILURE"),))},
+                earlier,
+                "dismiss-stale-approval is failure",
+            ),
+            "policy pending": (
+                {"statusCheckRollup": self._carried_rollup(policy=(("IN_PROGRESS", None),))},
+                earlier,
+                "has not settled on this head yet",
+            ),
+            "policy missing": (
+                {"statusCheckRollup": self._carried_rollup(policy=())},
+                earlier,
+                "missing or only skipped",
+            ),
+            "policy skipped only": (
+                {"statusCheckRollup": self._carried_rollup(policy=(("COMPLETED", "SKIPPED"),))},
+                earlier,
+                "missing or only skipped",
+            ),
+            "success at another head": (
+                {"statusCheckRollup": carried, "headRefOid": "e" * 40},
+                earlier,
+                "head moved",
+            ),
+            "label removed": ({"statusCheckRollup": carried, "labels": []}, earlier, "no longer labelled"),
+            "no earlier approval": ({"statusCheckRollup": carried}, [], "no accepted review marker"),
+            "newest marker requests changes": (
+                {"statusCheckRollup": carried},
+                self._approval(head=self.OLD, verdict="CHANGES_REQUESTED"),
+                "no accepted review marker",
+            ),
+        }
+        for name, (fresh, feed, words) in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                report, error = self._drive(
+                    {"statusCheckRollup": carried}, fresh, feed=feed
+                )
+
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(report["reason"], "checks_failed")
+                self.assertIn(words, error)
+                self.assertEqual(error, report["message"])
+                if "earlier head" in error:
+                    self.assertIn("rerun is not spent", error)
+
+    def test_a_current_head_rejection_still_vetoes_a_confirmed_carry(self):
+        carried = self._carried_rollup()
+        vetoed = self._approval(head=self.OLD) + [
+            self._review_marker_comment(
+                f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                f"head={self.head_sha} verdict=CHANGES_REQUESTED -->",
+                comment_id=102,
+                created_at="2026-07-18T01:00:00Z",
+            )
+        ]
+
+        report, error = self._drive(
+            {"statusCheckRollup": carried}, {"statusCheckRollup": carried}, feed=vetoed
+        )
+
+        self.assertEqual(self._reruns(), [])
+        self.assertEqual(report["reason"], "changes_requested")
 
     def test_the_label_alone_without_a_marker_gives_no_request(self):
         rollup = self._rollup()
