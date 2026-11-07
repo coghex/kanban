@@ -432,6 +432,10 @@ class RepoContext:
 class GateConfig:
     required_ci_check: str | None
     required_review_check: str | None
+    # The repository's admission check, when its CI is gated behind one (issue
+    # #855). None is an ungated repository, which is every repository that does
+    # not declare it: there is no default name.
+    ci_admission_check: str | None = None
 
 
 def active_log_path() -> Path | None:
@@ -1144,14 +1148,14 @@ def load_gate_config(ctx: RepoContext) -> GateConfig:
     if not isinstance(value, dict):
         raise DrainError(f"Drainer config in {path} must be a JSON object.")
 
-    allowed = {"required_ci_check", "required_review_check"}
+    allowed = {"required_ci_check", "required_review_check", "ci_admission_check"}
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise DrainError(
             f"Unsupported drainer config key(s) in {path}: {', '.join(unknown)}"
         )
 
-    def check_name(key: str, default: str) -> str | None:
+    def check_name(key: str, default: str | None) -> str | None:
         configured = value.get(key, default)
         if configured is None:
             return None
@@ -1168,6 +1172,7 @@ def load_gate_config(ctx: RepoContext) -> GateConfig:
         required_review_check=check_name(
             "required_review_check", DEFAULT_REQUIRED_REVIEW_CHECK
         ),
+        ci_admission_check=check_name("ci_admission_check", None),
     )
 
 
@@ -1281,6 +1286,18 @@ def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
     state.setdefault("attempt_counter", 0)
     if not isinstance(state["attempt_counter"], int) or isinstance(
         state["attempt_counter"], bool
+    ):
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    # The gated-rerun record (issue #855) is optional and created lazily, so a
+    # file that never gated anything is not rewritten on load; one that has it
+    # must have the shape this module indexes without a check.
+    gate_records = state.get("ci_gate_reruns")
+    if gate_records is not None and (
+        not isinstance(gate_records, dict)
+        or not all(
+            isinstance(record, dict) and isinstance(record.get("head"), str)
+            for record in gate_records.values()
+        )
     ):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     state.setdefault("active_pr", None)
@@ -2028,6 +2045,247 @@ def ci_attempt_identity(check: dict[str, Any] | None) -> str | None:
     return f"{run_id}/{job_id}"
 
 
+# How one look at a gated repository's admission check reads (issue #855).
+ADMISSION_IN_FLIGHT = "in_flight"
+ADMISSION_REAL_FAILURE = "real_failure"
+ADMISSION_ADMITTED = "admitted"
+ADMISSION_GATED_OUT = "gated_out"
+
+# A repository's gate admits at most this many gate-driven reruns per head,
+# whatever MAX_CI_RERUN_ATTEMPTS would otherwise allow an ungated one.
+GATED_RERUN_LIMIT = 1
+
+
+@dataclass
+class CiGate:
+    """The gate a repository declared, and the reason a rerun was refused.
+
+    `reason` is written by rerun_failed_ci() when it refuses under a gate and
+    read back by process_pr(), so the refusal can name the condition that
+    failed -- the numeric result alone cannot.
+    """
+
+    admission_check: str
+    default_branch: str
+    reason: str | None = None
+
+
+def classify_admission(pr: dict[str, Any], name: str) -> str:
+    """What the admission check on this head says about a failed required check.
+
+    A completed failed instance is status COMPLETED with conclusion FAILURE,
+    nothing broader: `classify_check` reads every completed non-SUCCESS
+    conclusion as a failure, and a skipped or conclusionless admission job is
+    no refusal at all. An unfinished instance is a wait whatever else the
+    rollup holds; with none, no FAILURE instance is a real failure (a missing
+    check among them); FAILURE beside a SUCCESS instance means an attempt was
+    admitted; and FAILURE with neither is a gated-out attempt.
+    """
+    instances = [
+        item
+        for item in pr.get("statusCheckRollup", [])
+        if parse_check_name(item) == name
+    ]
+    statuses = [str(item.get("status") or "").upper() for item in instances]
+    if any(status != "COMPLETED" for status in statuses):
+        return ADMISSION_IN_FLIGHT
+    conclusions = [str(item.get("conclusion") or "").upper() for item in instances]
+    if "FAILURE" not in conclusions:
+        return ADMISSION_REAL_FAILURE
+    if "SUCCESS" in conclusions:
+        return ADMISSION_ADMITTED
+    return ADMISSION_GATED_OUT
+
+
+def admission_refusal(admission: str, name: str, check_name: str) -> str | None:
+    """The refusal an admission reading calls for, or None for a gated-out one."""
+    if admission == ADMISSION_REAL_FAILURE:
+        return (
+            f"{check_name} failed and {name} has no failed attempt on this "
+            "head: a real failure after admission, not a gated-out attempt; "
+            "it is not rerun"
+        )
+    if admission == ADMISSION_IN_FLIGHT:
+        return (
+            f"{name} is still queued or in progress on this head, so an "
+            "admitted attempt is in flight; no rerun requested yet"
+        )
+    if admission == ADMISSION_ADMITTED:
+        return (
+            f"an admitted attempt of {name} already exists on this head "
+            "(it succeeded); a rerun would not be a gated-out attempt's"
+        )
+    return None
+
+
+def ci_gate_record(state: dict[str, Any], number: int) -> dict[str, Any] | None:
+    records = state.get("ci_gate_reruns")
+    if not isinstance(records, dict):
+        return None
+    record = records.get(str(number))
+    return record if isinstance(record, dict) else None
+
+
+def restore_ci_gate_rerun(
+    state: dict[str, Any], entry: dict[str, Any], number: int, head: str
+) -> None:
+    """Put a head's gated-rerun accounting back on its queue entry.
+
+    The record outlives the entry. Approval bookkeeping rewrites or forgets the
+    entry (`remember_approved_head`, `forget_pr`, `clear_ci_rerun`), and a
+    successful check observation clears it, none of which may hand a head its
+    one rerun back. The record is authoritative for the head it names.
+    """
+    record = ci_gate_record(state, number)
+    if record is None or record.get("head") != head:
+        return
+    entry["ci_rerun_head"] = head
+    entry["ci_rerun_attempts"] = int(record.get("attempts") or 0)
+    entry["ci_rerun_active"] = bool(record.get("active"))
+    entry["ci_rerun_attempt_identity"] = record.get("attempt_identity")
+    entry["ci_rerun_unconfirmed"] = record.get("unconfirmed")
+
+
+def record_ci_gate_rerun(
+    state: dict[str, Any], entry: dict[str, Any], number: int, head: str
+) -> None:
+    """Write the entry's accounting for `head` into its durable record.
+
+    Nothing is written for a head that has spent or left uncertain nothing, and
+    a record whose allowance was restored (a request proven never accepted) is
+    dropped rather than kept as an empty claim. A different head replaces it:
+    a new head starts a fresh allowance.
+    """
+    attempts = int(entry.get("ci_rerun_attempts") or 0)
+    active = bool(entry.get("ci_rerun_active"))
+    unconfirmed = entry.get("ci_rerun_unconfirmed")
+    records = state.setdefault("ci_gate_reruns", {})
+    if entry.get("ci_rerun_head") != head or not (attempts or active or unconfirmed):
+        existing = records.get(str(number))
+        if isinstance(existing, dict) and existing.get("head") == head:
+            del records[str(number)]
+        if not records:
+            state.pop("ci_gate_reruns", None)
+        return
+    records[str(number)] = {
+        "head": head,
+        "attempts": attempts,
+        "active": active,
+        "attempt_identity": entry.get("ci_rerun_attempt_identity"),
+        "unconfirmed": unconfirmed,
+    }
+
+
+def drop_ci_gate_record(state: dict[str, Any], number: int) -> None:
+    records = state.get("ci_gate_reruns")
+    if isinstance(records, dict):
+        records.pop(str(number), None)
+        if not records:
+            state.pop("ci_gate_reruns", None)
+
+
+def gated_rerun_refusal(
+    ctx: RepoContext,
+    number: int,
+    head: str,
+    *,
+    check_name: str,
+    gate: CiGate,
+) -> tuple[str | None, str | None, str | None]:
+    """Decide a gated-out attempt's one rerun from a fresh read of the pull request.
+
+    Returns (refusal, run id, attempt identity): a refusal text and nothing
+    else, or the run to rerun and the failure that run is being rerun against.
+    Everything is read here, immediately before the request, and none of it is
+    taken from the pass's earlier snapshot: the approval marker feed first,
+    then the pull request, so the snapshot the run id comes from is the latest
+    thing read. A read that fails raises -- unreadable evidence authorizes
+    nothing.
+    """
+    markers = review_markers(ctx, number)
+    fresh = get_pr(ctx, number)
+
+    if fresh.get("state") != "OPEN":
+        return f"the pull request is no longer open (state {fresh.get('state')})", None, None
+    if fresh.get("isDraft"):
+        return "the pull request is a draft", None, None
+    fresh_head = fresh.get("headRefOid")
+    if fresh_head != head:
+        return (
+            f"the head moved from {head[:12]} to {str(fresh_head)[:12]} since "
+            "the decision; no rerun requested for the old run",
+            None,
+            None,
+        )
+    if fresh.get("baseRefName") != gate.default_branch:
+        return (
+            f"the pull request targets {fresh.get('baseRefName')}, not "
+            f"{gate.default_branch}",
+            None,
+            None,
+        )
+    if has_label(fresh, CHANGES_LABEL):
+        return f"the pull request is labelled {CHANGES_LABEL}", None, None
+    if not has_label(fresh, APPROVE_LABEL):
+        return f"the pull request is no longer labelled {APPROVE_LABEL}", None, None
+    if is_held(fresh):
+        return f"the pull request carries {HOLD_LABEL}", None, None
+    if fresh.get("mergeStateStatus") in {"BEHIND", "DIRTY"} or (
+        fresh.get("mergeable") == "CONFLICTING"
+    ):
+        return (
+            f"the head is behind {gate.default_branch} or conflicts with it "
+            f"(mergeStateStatus={fresh.get('mergeStateStatus')}, "
+            f"mergeable={fresh.get('mergeable')}); the branch-update and "
+            "conflict paths own it, and the rerun is not spent",
+            None,
+            None,
+        )
+    check = latest_check(fresh, check_name)
+    check_state = classify_check(check)
+    if check_state != "failure":
+        return (
+            f"the required check {check_name} is {check_state}, no longer "
+            "failed, on this head",
+            None,
+            None,
+        )
+    blocking = blocking_marker_in(markers, head)
+    if blocking is not None:
+        return (
+            f"a {blocking.version} review by {blocking.reviewers} requested "
+            f"changes on this head {head[:12]}; there is no live approval at "
+            "this head",
+            None,
+            None,
+        )
+    newest = markers[0] if markers else None
+    if (
+        newest is None
+        or newest.head != head.lower()
+        or newest.verdict != "APPROVE"
+        or not marker_provider_accepted(newest.reviewers)
+    ):
+        return (
+            f"there is no live approval at this head {head[:12]}: the newest "
+            "review marker does not approve exactly this head (the label alone "
+            "grants nothing); the rerun is not spent",
+            None,
+            None,
+        )
+    refusal = admission_refusal(
+        classify_admission(fresh, gate.admission_check),
+        gate.admission_check,
+        check_name,
+    )
+    if refusal is not None:
+        return refusal, None, None
+    run_id = action_run_id(check)
+    if run_id is None:
+        return "the failed check names no Actions run to rerun", None, None
+    return None, run_id, ci_attempt_identity(check)
+
+
 def rerun_failed_ci(
     ctx: RepoContext,
     pr: dict[str, Any],
@@ -2035,8 +2293,43 @@ def rerun_failed_ci(
     state: dict[str, Any],
     check_name: str,
     dry_run: bool,
+    gate: CiGate | None = None,
 ) -> str:
     """Decide what one look at a failed required CI check may do.
+
+    Without a `gate` this is the ungated decision below, untouched. With one
+    (the repository declared `ci_admission_check`, issue #855) the same
+    decision runs under the gated rules and its accounting is also kept in a
+    durable per-head record that approval and check bookkeeping cannot reset:
+    see `_decide_ci_rerun`.
+    """
+    if gate is None:
+        return _decide_ci_rerun(
+            ctx, pr, state=state, check_name=check_name, dry_run=dry_run, gate=None
+        )
+    number = pr["number"]
+    head = pr["headRefOid"]
+    entry = state["prs"][str(number)]
+    restore_ci_gate_rerun(state, entry, number, head)
+    try:
+        return _decide_ci_rerun(
+            ctx, pr, state=state, check_name=check_name, dry_run=dry_run, gate=gate
+        )
+    finally:
+        if not dry_run:
+            record_ci_gate_rerun(state, entry, number, head)
+
+
+def _decide_ci_rerun(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    check_name: str,
+    dry_run: bool,
+    gate: CiGate | None,
+) -> str:
+    """The decision behind rerun_failed_ci().
 
     The retry is keyed to the approved head. A persistent source failure is
     therefore retried at most MAX_CI_RERUN_ATTEMPTS times and then quarantined
@@ -2060,6 +2353,8 @@ def rerun_failed_ci(
     number = pr["number"]
     head = pr["headRefOid"]
     entry = state["prs"][str(number)]
+    # What one head may be rerun: MAX_CI_RERUN_ATTEMPTS ungated, once gated.
+    cap = MAX_CI_RERUN_ATTEMPTS if gate is None else GATED_RERUN_LIMIT
     if entry.get("ci_rerun_head") != head:
         entry["ci_rerun_head"] = head
         entry["ci_rerun_attempts"] = 0
@@ -2121,36 +2416,95 @@ def rerun_failed_ci(
             log(
                 f"PR #{number}: the automatic rerun of {check_name} requested "
                 f"for this head ({int(entry.get('ci_rerun_attempts', 0))}/"
-                f"{MAX_CI_RERUN_ATTEMPTS}) has produced no distinguishable "
+                f"{cap}) has produced no distinguishable "
                 "result yet; waiting rather than requesting another"
             )
             return CI_RERUN_IN_FLIGHT
 
     attempts = int(entry.get("ci_rerun_attempts", 0))
-    if attempts >= MAX_CI_RERUN_ATTEMPTS:
+    if attempts >= cap:
         entry["ci_rerun_active"] = False
         entry["ci_rerun_attempt_identity"] = None
         entry["ci_rerun_exhausted_head"] = head
-        log(
-            f"PR #{number}: {check_name} remained failed after "
-            f"{attempts} automatic rerun(s); leaving it for human action"
-        )
+        if gate is None:
+            log(
+                f"PR #{number}: {check_name} remained failed after "
+                f"{attempts} automatic rerun(s); leaving it for human action"
+            )
+        else:
+            gate.reason = (
+                f"the one gate-driven rerun of this head is already spent and "
+                f"{check_name} remained failed; leaving it for a new head"
+            )
+            log(f"PR #{number}: {gate.reason}")
         return CI_RERUN_REFUSED
 
-    run_id = action_run_id(check)
-    if run_id is None:
-        return CI_RERUN_REFUSED
+    if gate is not None:
+        # Reading the rollup this pass was handed: the cheap refusals need no
+        # second read. Whatever is still a candidate is decided again below
+        # from a fresh read, and that one is what authorizes the request.
+        refusal = admission_refusal(
+            classify_admission(pr, gate.admission_check),
+            gate.admission_check,
+            check_name,
+        )
+        if refusal is None:
+            refusal, fresh_run_id, fresh_observed = gated_rerun_refusal(
+                ctx, number, head, check_name=check_name, gate=gate
+            )
+        if refusal is not None:
+            gate.reason = refusal
+            log(f"PR #{number}: not rerunning: {refusal}")
+            return CI_RERUN_REFUSED
+        run_id = fresh_run_id
+        observed = fresh_observed
+    else:
+        run_id = action_run_id(check)
+        if run_id is None:
+            return CI_RERUN_REFUSED
 
     attempts += 1
     if dry_run:
         log(
             f"PR #{number}: would rerun failed Actions run {run_id} "
-            f"({attempts}/{MAX_CI_RERUN_ATTEMPTS})"
+            f"({attempts}/{cap})"
         )
+    elif gate is not None:
+        log(
+            f"PR #{number}: rerunning gated-out Actions run {run_id} "
+            f"({attempts}/{cap})"
+        )
+        # Recorded, and made durable, before the request leaves: the request
+        # can be accepted with its response lost, or this process can stop
+        # between the two, and either way the next look must find a claim to
+        # settle rather than an allowance to spend again. Success clears the
+        # uncertainty; a failure of any kind leaves it, because a timeout and
+        # a refusal are not told apart here -- the run's own jobs are
+        # (`ci_rerun_accepted`), and they settle it on the next look.
+        entry["ci_rerun_head"] = head
+        entry["ci_rerun_attempts"] = attempts
+        entry["ci_rerun_active"] = True
+        entry["ci_rerun_attempt_identity"] = observed
+        entry["ci_rerun_unconfirmed"] = run_id
+        record_ci_gate_rerun(state, entry, number, head)
+        save_drain_state(ctx, state, dry_run=False)
+        run(
+            [
+                "gh",
+                "run",
+                "rerun",
+                run_id,
+                "--failed",
+                "--repo",
+                ctx.repo_slug,
+            ],
+            cwd=ctx.path,
+        )
+        entry["ci_rerun_unconfirmed"] = None
     else:
         log(
             f"PR #{number}: rerunning failed Actions run {run_id} "
-            f"({attempts}/{MAX_CI_RERUN_ATTEMPTS})"
+            f"({attempts}/{cap})"
         )
         try:
             run(
@@ -3612,6 +3966,9 @@ def recover_stale_approval(
         pr = get_pr(ctx, number)
 
         if pr["state"] != "OPEN":
+            # Nothing of a departed pull request's gated-rerun accounting is
+            # worth keeping: it is keyed to heads that can no longer be run.
+            drop_ci_gate_record(state, number)
             if pr["state"] != "MERGED":
                 # Closed without merging: nothing is owed, and forgetting it
                 # must never close an issue or delete a branch.
@@ -6154,12 +6511,24 @@ def process_pr(
     missing_checks = missing_required_checks(gates, build_state, review_state)
     missing_since = observe_missing_checks(state, pr, missing_checks)
     if build_state == "failure":
+        # A repository that declared an admission check reruns only under the
+        # gated rules (issue #855); every other repository is decided exactly
+        # as before.
+        gate = (
+            CiGate(
+                admission_check=gates.ci_admission_check,
+                default_branch=ctx.default_branch,
+            )
+            if gates.ci_admission_check is not None
+            else None
+        )
         rerun = rerun_failed_ci(
             ctx,
             pr,
             state=state,
             check_name=gates.required_ci_check or DEFAULT_REQUIRED_CI_CHECK,
             dry_run=dry_run,
+            gate=gate,
         )
         if rerun == CI_RERUN_REQUESTED:
             message = (
@@ -6184,6 +6553,11 @@ def process_pr(
             f"PR #{number}: required CI check {gates.required_ci_check} failed "
             f"({gate_detail})."
         )
+        if gate is not None and gate.reason:
+            message = (
+                f"PR #{number}: required CI check {gates.required_ci_check} "
+                f"failed ({gate_detail}); {gate.reason}."
+            )
         set_outcome(report, "checks_failed", message)
         raise DrainError(message)
     if review_state == "failure":
@@ -6416,6 +6790,7 @@ def process_pr(
         remember_approved_head(state, number, pr["headRefOid"])
         entry = state["prs"][str(number)]
     entry["cleanup"] = record
+    drop_ci_gate_record(state, number)
     save_drain_state(ctx, state, dry_run=dry_run)
 
     outstanding: list[dict[str, Any]] = []
@@ -7523,6 +7898,11 @@ def main() -> None:
                 f"{gates.required_ci_check or 'ci disabled'}, "
                 f"{gates.required_review_check or 'review disabled'}"
             )
+            if gates.ci_admission_check is not None:
+                log(
+                    f"CI admission check: {gates.ci_admission_check} (gated "
+                    "reruns: at most one per head, only for a gated-out attempt)"
+                )
             log(
                 "Coordination paths: "
                 + (", ".join(sorted(COORDINATION_PATHS)) or "none configured")

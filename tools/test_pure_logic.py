@@ -59,6 +59,46 @@ class GateConfigTests(unittest.TestCase):
                 drain_prs.load_gate_config(self._context(root))
 
 
+    def _load(self, payload):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / drain_prs.CONFIG_FILENAME).write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            return drain_prs.load_gate_config(self._context(root))
+
+    def test_a_repository_without_the_key_is_ungated(self):
+        # Issue #855 requirement 1: there is no default admission-check name.
+        self.assertIsNone(self._load({}).ci_admission_check)
+        self.assertIsNone(self._load({"ci_admission_check": None}).ci_admission_check)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = drain_prs.load_gate_config(self._context(Path(tmp)))
+        self.assertIsNone(config.ci_admission_check)
+
+    def test_a_declared_admission_check_is_accepted(self):
+        config = self._load({"ci_admission_check": "ci-admission"})
+        self.assertEqual(config.ci_admission_check, "ci-admission")
+        self.assertEqual(
+            config.required_ci_check, drain_prs.DEFAULT_REQUIRED_CI_CHECK
+        )
+
+    def test_an_invalid_admission_check_is_refused(self):
+        for value in ("", "   ", 3, True, ["ci-admission"], {"name": "x"}):
+            with self.subTest(value=value):
+                with self.assertRaises(drain_prs.DrainError) as caught:
+                    self._load({"ci_admission_check": value})
+                # Refused as an invalid value of a supported key, not as an
+                # unsupported key.
+                self.assertIn("ci_admission_check", str(caught.exception))
+                self.assertIn("non-empty string or null", str(caught.exception))
+                self.assertNotIn("Unsupported", str(caught.exception))
+
+    def test_every_other_key_is_still_unsupported(self):
+        with self.assertRaises(drain_prs.DrainError) as caught:
+            self._load({"ci_admission_check": "ci-admission", "ci_gate": "x"})
+        self.assertIn("ci_gate", str(caught.exception))
+
+
 class ClassifyCheckTests(unittest.TestCase):
     def test_missing_when_none(self):
         self.assertEqual(drain_prs.classify_check(None), "missing")
@@ -2209,6 +2249,793 @@ class RecordedOwnerDirectiveTests(unittest.TestCase):
 
     def test_no_record_is_an_empty_contract(self):
         self.assertEqual(drain_prs.recorded_owner_directives("APPROVE\n"), ())
+
+
+class ClassifyAdmissionTests(unittest.TestCase):
+    """Issue #855: what the admission check on a head says about a failure."""
+
+    def _rollup(self, *instances):
+        return {
+            "statusCheckRollup": [
+                {"name": "ci-admission", "status": status, "conclusion": conclusion}
+                for status, conclusion in instances
+            ]
+        }
+
+    def test_a_completed_failure_alone_is_a_gated_out_attempt(self):
+        self.assertEqual(
+            drain_prs.classify_admission(
+                self._rollup(("COMPLETED", "FAILURE")), "ci-admission"
+            ),
+            drain_prs.ADMISSION_GATED_OUT,
+        )
+
+    def test_no_failed_instance_is_a_real_failure(self):
+        for instances in (
+            (),
+            (("COMPLETED", "SUCCESS"),),
+            (("COMPLETED", "SKIPPED"),),
+            (("COMPLETED", "CANCELLED"),),
+            (("COMPLETED", None),),
+            (("COMPLETED", "SUCCESS"), ("COMPLETED", "SKIPPED")),
+        ):
+            with self.subTest(instances=instances):
+                self.assertEqual(
+                    drain_prs.classify_admission(
+                        self._rollup(*instances), "ci-admission"
+                    ),
+                    drain_prs.ADMISSION_REAL_FAILURE,
+                )
+
+    def test_a_skipped_or_conclusionless_instance_is_not_a_failure(self):
+        # classify_check reads every completed non-SUCCESS conclusion as a
+        # failure; the admission reading must not.
+        for conclusion in ("SKIPPED", None, "NEUTRAL"):
+            with self.subTest(conclusion=conclusion):
+                item = {"name": "ci-admission", "status": "COMPLETED", "conclusion": conclusion}
+                self.assertEqual(drain_prs.classify_check(item), "failure")
+                self.assertEqual(
+                    drain_prs.classify_admission(
+                        {"statusCheckRollup": [item]}, "ci-admission"
+                    ),
+                    drain_prs.ADMISSION_REAL_FAILURE,
+                )
+
+    def test_any_unfinished_instance_is_in_flight_in_either_order(self):
+        for status in ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING"):
+            for instances in (
+                (("COMPLETED", "FAILURE"), (status, None)),
+                ((status, None), ("COMPLETED", "FAILURE")),
+                ((status, None),),
+                (("COMPLETED", "SUCCESS"), (status, None)),
+            ):
+                with self.subTest(status=status, instances=instances):
+                    self.assertEqual(
+                        drain_prs.classify_admission(
+                            self._rollup(*instances), "ci-admission"
+                        ),
+                        drain_prs.ADMISSION_IN_FLIGHT,
+                    )
+
+    def test_a_failure_beside_a_success_means_an_attempt_was_admitted(self):
+        for instances in (
+            (("COMPLETED", "FAILURE"), ("COMPLETED", "SUCCESS")),
+            (("COMPLETED", "SUCCESS"), ("COMPLETED", "FAILURE")),
+        ):
+            with self.subTest(instances=instances):
+                self.assertEqual(
+                    drain_prs.classify_admission(
+                        self._rollup(*instances), "ci-admission"
+                    ),
+                    drain_prs.ADMISSION_ADMITTED,
+                )
+
+    def test_a_failure_beside_a_skipped_instance_is_still_gated_out(self):
+        self.assertEqual(
+            drain_prs.classify_admission(
+                self._rollup(("COMPLETED", "FAILURE"), ("COMPLETED", "SKIPPED")),
+                "ci-admission",
+            ),
+            drain_prs.ADMISSION_GATED_OUT,
+        )
+
+
+class GatedCiRerunTests(unittest.TestCase):
+    """Issue #855: a gated repository reruns a gated-out attempt once per head.
+
+    Every case drives `rerun_failed_ci` with a `CiGate`, the fresh read
+    (`get_pr` and `review_markers`) and the request (`run`) mocked, so what is
+    asserted is exactly which requests the decision let through.
+    """
+
+    HEAD = "a" * 40
+    OLD = "b" * 40
+
+    def setUp(self):
+        self.ctx = drain_prs.RepoContext(
+            Path("/fake-repo"), "acme/widgets", "widgets", "master"
+        )
+        self.state = {
+            "version": drain_prs.STATE_VERSION,
+            "prs": {"42": self._entry()},
+        }
+        self.gate = drain_prs.CiGate("ci-admission", "master")
+        self.fresh = self._pr()
+        self.markers = [self._marker()]
+        self.reads = []
+        self.run_mock = mock.MagicMock()
+        patches = [
+            mock.patch.object(drain_prs, "run", self.run_mock),
+            mock.patch.object(drain_prs, "get_pr", side_effect=self._get_pr),
+            mock.patch.object(
+                drain_prs, "review_markers", side_effect=self._review_markers
+            ),
+            mock.patch.object(drain_prs, "save_drain_state"),
+            mock.patch.object(drain_prs, "marker_provider_accepted", return_value=True),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _get_pr(self, ctx, number):
+        self.reads.append("pr")
+        return self.fresh
+
+    def _review_markers(self, ctx, number):
+        self.reads.append("markers")
+        if isinstance(self.markers, Exception):
+            raise self.markers
+        return self.markers
+
+    def _entry(self):
+        return {
+            "approved_head": self.HEAD,
+            "ci_rerun_head": None,
+            "ci_rerun_attempts": 0,
+            "ci_rerun_active": False,
+            "ci_rerun_attempt_identity": None,
+            "ci_rerun_exhausted_head": None,
+        }
+
+    def _marker(self, *, head=None, verdict="APPROVE", version="pr-review:v2", **kw):
+        return drain_prs.ReviewMarker(
+            version, "codex", head or self.HEAD, verdict, **kw
+        )
+
+    def _pr(
+        self,
+        *,
+        head=None,
+        job="1001",
+        required="FAILURE",
+        admission=(("COMPLETED", "FAILURE"),),
+        **overrides,
+    ):
+        rollup = [
+            {
+                "name": "build-test",
+                "status": "COMPLETED" if required else "IN_PROGRESS",
+                "conclusion": required,
+                "completedAt": "2026-08-01T00:00:00Z",
+                "detailsUrl": (
+                    f"https://github.com/acme/widgets/actions/runs/777/job/{job}"
+                ),
+            }
+        ]
+        rollup += [
+            {"name": "ci-admission", "status": status, "conclusion": conclusion}
+            for status, conclusion in admission
+        ]
+        pr = {
+            "number": 42,
+            "state": "OPEN",
+            "isDraft": False,
+            "labels": [{"name": drain_prs.APPROVE_LABEL}],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "headRefOid": head or self.HEAD,
+            "baseRefName": "master",
+            "statusCheckRollup": rollup,
+        }
+        pr.update(overrides)
+        return pr
+
+    def _decide(self, pr=None, *, dry_run=False):
+        pr = pr if pr is not None else self._pr()
+        self.gate.reason = None
+        return drain_prs.rerun_failed_ci(
+            self.ctx,
+            pr,
+            state=self.state,
+            check_name="build-test",
+            dry_run=dry_run,
+            gate=self.gate,
+        )
+
+    def _requests(self):
+        return [
+            call
+            for call in self.run_mock.mock_calls
+            if call.args and call.args[0][:3] == ["gh", "run", "rerun"]
+        ]
+
+    def _assert_refused(self, result, *words, requests=0):
+        self.assertEqual(result, drain_prs.CI_RERUN_REFUSED)
+        self.assertEqual(len(self._requests()), requests)
+        self.assertIsNotNone(self.gate.reason)
+        for word in words:
+            self.assertIn(word, self.gate.reason)
+
+    # -- Requirement 4: the one rerun ------------------------------------
+
+    def test_a_gated_out_attempt_at_an_approved_head_is_rerun_exactly_once(self):
+        result = self._decide()
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
+        requests = self._requests()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(
+            requests[0].args[0],
+            ["gh", "run", "rerun", "777", "--failed", "--repo", "acme/widgets"],
+        )
+        # Both reads happened, and the decision rests on them.
+        self.assertEqual(sorted(self.reads), ["markers", "pr"])
+        record = self.state["ci_gate_reruns"]["42"]
+        self.assertEqual(record["head"], self.HEAD)
+        self.assertEqual(record["attempts"], 1)
+        self.assertTrue(record["active"])
+        self.assertIsNone(record["unconfirmed"])
+
+    def test_the_run_id_comes_from_the_fresh_read_not_the_earlier_one(self):
+        earlier = self._pr()
+        self.fresh = self._pr()
+        for item in self.fresh["statusCheckRollup"][:1]:
+            item["detailsUrl"] = (
+                "https://github.com/acme/widgets/actions/runs/888/job/1002"
+            )
+
+        self.assertEqual(self._decide(earlier), drain_prs.CI_RERUN_REQUESTED)
+
+        self.assertEqual(self._requests()[0].args[0][3], "888")
+
+    def test_the_same_failure_next_pass_is_a_barrier_not_a_second_request(self):
+        self._decide()
+        self.assertEqual(self._decide(), drain_prs.CI_RERUN_IN_FLIGHT)
+        self.assertEqual(len(self._requests()), 1)
+
+    def test_a_second_gated_out_attempt_after_the_one_rerun_is_left_alone(self):
+        self._decide()
+        self.fresh = self._pr(job="1002")
+        # The rerun's own result: a different finished attempt, gated out again.
+        result = self._decide(self._pr(job="1002"))
+
+        self._assert_refused(result, "already spent", requests=1)
+        entry = self.state["prs"]["42"]
+        self.assertEqual(entry["ci_rerun_exhausted_head"], self.HEAD)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+        # And it stays refused however many more passes see it.
+        for _ in range(3):
+            self.assertEqual(self._decide(self._pr(job="1002")), drain_prs.CI_RERUN_REFUSED)
+        self.assertEqual(len(self._requests()), 1)
+
+    def test_a_real_failure_after_the_one_rerun_is_left_alone(self):
+        self._decide()
+        after = self._pr(job="1002", admission=(("COMPLETED", "SUCCESS"),))
+        self.fresh = after
+
+        result = self._decide(after)
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REFUSED)
+        self.assertEqual(len(self._requests()), 1)
+
+    def test_a_new_head_starts_a_fresh_allowance(self):
+        self._decide()
+        new_head = "c" * 40
+        self.state["prs"]["42"]["approved_head"] = new_head
+        self.fresh = self._pr(head=new_head, job="2001")
+        self.markers = [self._marker(head=new_head)]
+
+        result = self._decide(self._pr(head=new_head, job="2001"))
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(len(self._requests()), 2)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"]["head"], new_head)
+
+    def test_the_cap_never_applies_a_second_request_to_one_head(self):
+        # Whatever MAX_CI_RERUN_ATTEMPTS would allow an ungated repository.
+        self.assertGreater(drain_prs.MAX_CI_RERUN_ATTEMPTS, drain_prs.GATED_RERUN_LIMIT)
+        for index in range(drain_prs.MAX_CI_RERUN_ATTEMPTS + 2):
+            snapshot = self._pr(job=str(3000 + index))
+            self.fresh = snapshot
+            self._decide(snapshot)
+        self.assertEqual(len(self._requests()), 1)
+
+    # -- Requirement 3: a real failure is never rerun --------------------
+
+    def test_a_real_failure_is_never_rerun(self):
+        for admission in (
+            (),
+            (("COMPLETED", "SUCCESS"),),
+            (("COMPLETED", "SKIPPED"),),
+            (("COMPLETED", "NEUTRAL"),),
+            (("COMPLETED", None),),
+        ):
+            with self.subTest(admission=admission):
+                self.setUp()
+                snapshot = self._pr(admission=admission)
+                self.fresh = snapshot
+
+                result = self._decide(snapshot)
+
+                self._assert_refused(result, "real failure after admission")
+                # Decided from the pass's own read: nothing is fetched.
+                self.assertEqual(self.reads, [])
+                self.assertNotIn("ci_gate_reruns", self.state)
+
+    def test_a_real_failure_is_never_rerun_however_many_passes_see_it(self):
+        snapshot = self._pr(admission=(("COMPLETED", "SUCCESS"),))
+        for _ in range(drain_prs.MAX_CI_RERUN_ATTEMPTS + 2):
+            self.assertEqual(self._decide(snapshot), drain_prs.CI_RERUN_REFUSED)
+        self.assertEqual(self._requests(), [])
+        # Not quarantined either: a human rerun that passes must still merge.
+        self.assertIsNone(self.state["prs"]["42"]["ci_rerun_exhausted_head"])
+
+    # -- Requirement 4d and 5: an admitted attempt, queued or running ----
+
+    def test_an_admission_check_still_queued_or_running_is_a_clearable_refusal(self):
+        for status in ("QUEUED", "IN_PROGRESS"):
+            with self.subTest(status=status):
+                self.setUp()
+                snapshot = self._pr(admission=((status, None),))
+                self.fresh = snapshot
+
+                result = self._decide(snapshot)
+
+                self._assert_refused(result, "queued or in progress")
+                self.assertNotIn("real failure", self.gate.reason)
+                self.assertNotIn("ci_gate_reruns", self.state)
+                # Clearable: once it settles gated-out, the one rerun is still there.
+                gated_out = self._pr()
+                self.fresh = gated_out
+                self.assertEqual(self._decide(gated_out), drain_prs.CI_RERUN_REQUESTED)
+
+    def test_an_admitted_attempt_present_refuses_in_either_rollup_order(self):
+        for admission in (
+            (("COMPLETED", "FAILURE"), ("COMPLETED", "SUCCESS")),
+            (("COMPLETED", "SUCCESS"), ("COMPLETED", "FAILURE")),
+        ):
+            with self.subTest(admission=admission):
+                self.setUp()
+                snapshot = self._pr(admission=admission)
+                self.fresh = snapshot
+
+                result = self._decide(snapshot)
+
+                self._assert_refused(result, "admitted attempt")
+
+    def test_an_admission_attempt_that_starts_between_the_reads_refuses(self):
+        self.fresh = self._pr(admission=(("COMPLETED", "FAILURE"), ("IN_PROGRESS", None)))
+
+        result = self._decide(self._pr())
+
+        self._assert_refused(result, "queued or in progress")
+
+    # -- Requirement 4a: the fresh read of the pull request --------------
+
+    def test_a_head_that_moved_between_the_reads_gets_no_request(self):
+        self.fresh = self._pr(head="d" * 40)
+
+        result = self._decide()
+
+        self._assert_refused(result, "head moved")
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+    def test_a_pull_request_no_longer_open_or_now_a_draft_gets_no_request(self):
+        for override, word in (
+            ({"state": "CLOSED"}, "no longer open"),
+            ({"state": "MERGED"}, "no longer open"),
+            ({"isDraft": True}, "draft"),
+        ):
+            with self.subTest(override=override):
+                self.setUp()
+                self.fresh = self._pr(**override)
+
+                self._assert_refused(self._decide(), word)
+
+    def test_eligibility_withdrawn_between_the_reads_gets_no_request(self):
+        for override, word in (
+            ({"baseRefName": "release"}, "targets release"),
+            ({"labels": []}, "no longer labelled"),
+            (
+                {
+                    "labels": [
+                        {"name": drain_prs.APPROVE_LABEL},
+                        {"name": drain_prs.CHANGES_LABEL},
+                    ]
+                },
+                drain_prs.CHANGES_LABEL,
+            ),
+            (
+                {
+                    "labels": [
+                        {"name": drain_prs.APPROVE_LABEL},
+                        {"name": drain_prs.HOLD_LABEL},
+                    ]
+                },
+                drain_prs.HOLD_LABEL,
+            ),
+        ):
+            with self.subTest(override=override):
+                self.setUp()
+                self.fresh = self._pr(**override)
+
+                self._assert_refused(self._decide(), word)
+
+    def test_the_required_check_must_still_be_failed_in_the_fresh_read(self):
+        for required, word in (("SUCCESS", "success"), (None, "pending")):
+            with self.subTest(required=required):
+                self.setUp()
+                self.fresh = self._pr(required=required)
+
+                self._assert_refused(self._decide(), word)
+        self.setUp()
+        self.fresh = self._pr()
+        self.fresh["statusCheckRollup"] = [
+            item for item in self.fresh["statusCheckRollup"] if item["name"] != "build-test"
+        ]
+        self._assert_refused(self._decide(), "missing")
+
+    # -- Requirement 4b: behind or conflicting ----------------------------
+
+    def test_a_head_behind_or_conflicting_gets_no_request_and_spends_nothing(self):
+        for override in (
+            {"mergeStateStatus": "BEHIND"},
+            {"mergeStateStatus": "DIRTY"},
+            {"mergeable": "CONFLICTING"},
+        ):
+            with self.subTest(override=override):
+                self.setUp()
+                self.fresh = self._pr(**override)
+
+                self._assert_refused(self._decide(), "behind")
+                self.assertNotIn("ci_gate_reruns", self.state)
+                # A later pass, once the head is up to date, still has its rerun.
+                self.fresh = self._pr()
+                self.assertEqual(self._decide(), drain_prs.CI_RERUN_REQUESTED)
+
+    # -- Requirement 4c: a live approval ----------------------------------
+
+    def test_the_label_without_a_marker_gives_no_request(self):
+        self.markers = []
+
+        self._assert_refused(self._decide(), "no live approval")
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+    def test_a_marker_naming_an_older_head_gives_no_request(self):
+        self.markers = [self._marker(head=self.OLD)]
+
+        self._assert_refused(self._decide(), "no live approval")
+
+    def test_the_newest_marker_must_be_an_approval(self):
+        self.markers = [
+            self._marker(verdict="CHANGES_REQUESTED", head=self.OLD),
+            self._marker(),
+        ]
+        # The newest marker (first) is for an older head: not this head's.
+        self._assert_refused(self._decide(), "no live approval")
+
+    def test_a_current_head_rejection_vetoes_even_under_an_approval(self):
+        self.markers = [
+            self._marker(comment_id="2"),
+            self._marker(verdict="CHANGES_REQUESTED", comment_id="1"),
+        ]
+
+        self._assert_refused(self._decide(), "requested", "changes")
+
+    def test_a_newly_published_rejection_between_decision_and_request_is_seen(self):
+        self.markers = [
+            self._marker(verdict="CHANGES_REQUESTED", comment_id="9"),
+            self._marker(comment_id="1"),
+        ]
+
+        self._assert_refused(self._decide(), "requested changes")
+
+    def test_a_marker_from_a_brand_this_installation_does_not_review_with(self):
+        with mock.patch.object(drain_prs, "marker_provider_accepted", return_value=False):
+            self._assert_refused(self._decide(), "no live approval")
+
+    def test_an_unreadable_approval_feed_authorizes_nothing(self):
+        self.markers = drain_prs.DrainError("comments unreadable")
+
+        with self.assertRaises(drain_prs.DrainError):
+            self._decide()
+
+        self.assertEqual(self._requests(), [])
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+    def test_an_unreadable_fresh_pull_request_authorizes_nothing(self):
+        with mock.patch.object(
+            drain_prs, "get_pr", side_effect=drain_prs.DrainError("gh failed")
+        ):
+            with self.assertRaises(drain_prs.DrainError):
+                self._decide()
+        self.assertEqual(self._requests(), [])
+
+    # -- Requirement 4e: the allowance is durable -------------------------
+
+    def test_approval_bookkeeping_and_a_green_observation_do_not_replenish_it(self):
+        self._decide()
+        # Approval withdrawn and re-applied: the entry is rebuilt from nothing.
+        drain_prs.remember_approved_head(self.state, 42, self.HEAD)
+        self.assertEqual(self.state["prs"]["42"]["ci_rerun_attempts"], 0)
+        # And a successful observation clears whatever the entry still held.
+        drain_prs.clear_ci_rerun(self.state, 42)
+
+        # The in-flight rerun is still a barrier -- not a fresh allowance.
+        self.assertEqual(self._decide(), drain_prs.CI_RERUN_IN_FLIGHT)
+        # And once its own result is another gated-out attempt, it is spent.
+        snapshot = self._pr(job="1002")
+        self.fresh = snapshot
+        self._assert_refused(self._decide(snapshot), "already spent", requests=1)
+
+    def test_a_forgotten_entry_does_not_replenish_it(self):
+        self._decide()
+        record = dict(self.state["ci_gate_reruns"]["42"])
+        drain_prs.forget_pr(self.state, 42)
+        drain_prs.remember_approved_head(self.state, 42, self.HEAD)
+        self.assertEqual(self.state["ci_gate_reruns"]["42"], record)
+        # The rerun finished gated-out again.
+        snapshot = self._pr(job="1002")
+        self.fresh = snapshot
+
+        self._assert_refused(self._decide(snapshot), "already spent", requests=1)
+
+    def test_the_allowance_survives_a_state_file_reload(self):
+        self._decide()
+        reloaded = drain_prs.migrate_drain_state(
+            json.loads(json.dumps(self.state)), source="test"
+        )
+        reloaded["prs"]["42"].update({"approved_head": self.HEAD})
+        self.state = reloaded
+        snapshot = self._pr(job="1002")
+        self.fresh = snapshot
+
+        self._assert_refused(self._decide(snapshot), "already spent", requests=1)
+
+    def test_a_departed_pull_requests_record_is_dropped(self):
+        self._decide()
+        drain_prs.drop_ci_gate_record(self.state, 42)
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+    # -- Requirement 7: dry run -------------------------------------------
+
+    def test_a_dry_run_requests_nothing_and_records_nothing(self):
+        result = self._decide(dry_run=True)
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
+        self.assertEqual(self._requests(), [])
+        self.assertNotIn("ci_gate_reruns", self.state)
+        # A refused dry run says why, and still issues nothing.
+        self.markers = []
+        self.state["prs"]["42"].update(self._entry())
+        self.assertEqual(self._decide(dry_run=True), drain_prs.CI_RERUN_REFUSED)
+        self.assertIn("no live approval", self.gate.reason)
+        self.assertEqual(self._requests(), [])
+
+    # -- Requirement 4e: a request whose outcome an outage left uncertain --
+
+    def _lose_the_response(self, error=None):
+        error = error or drain_prs.TransportError(
+            "Command failed: gh run rerun", category="network", command="gh"
+        )
+
+        def fail(args, **kwargs):
+            if args[:3] == ["gh", "run", "rerun"]:
+                raise error
+            raise AssertionError(args)
+
+        self.run_mock.side_effect = fail
+
+    def test_a_request_that_fails_is_recorded_unconfirmed_even_with_no_offline_flag(self):
+        # `--pr` never sets NETWORK_OFFLINE, and a polling pass can fail the
+        # same way before it does: the record cannot depend on that flag.
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+        self._lose_the_response()
+
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+
+        record = self.state["ci_gate_reruns"]["42"]
+        self.assertEqual(record["unconfirmed"], "777")
+        self.assertEqual(record["attempts"], 1)
+        self.assertTrue(record["active"])
+
+    def test_an_uncertain_request_is_recorded_before_it_leaves(self):
+        seen = []
+        saved = drain_prs.save_drain_state
+
+        def snapshot_on_save(ctx, state, *, dry_run):
+            seen.append(json.loads(json.dumps(state.get("ci_gate_reruns"))))
+
+        with mock.patch.object(drain_prs, "save_drain_state", snapshot_on_save):
+            self._decide()
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["42"]["unconfirmed"], "777")
+
+    def test_a_request_accepted_with_its_response_lost_is_not_repeated(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        # Restart: a fresh process reads the state back, the rollup still shows
+        # the failure the request was made against.
+        self.state = json.loads(json.dumps(self.state))
+        self.run_mock.side_effect = None
+        view = mock.MagicMock(return_value={"jobs": [{"databaseId": 1002}]})
+        with mock.patch.object(drain_prs, "run_json", view):
+            result = self._decide()
+
+        self.assertEqual(result, drain_prs.CI_RERUN_IN_FLIGHT)
+        self.assertEqual(len(self._requests()), 1)
+        self.assertIsNone(self.state["ci_gate_reruns"]["42"]["unconfirmed"])
+        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+
+    def test_a_request_accepted_and_finished_during_the_outage_is_not_repeated(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        self.run_mock.side_effect = None
+        # The rerun already finished: the rollup shows a different attempt,
+        # gated out again. No view is even needed to know it was accepted.
+        snapshot = self._pr(job="1002")
+        self.fresh = snapshot
+        with mock.patch.object(drain_prs, "run_json", mock.MagicMock()):
+            result = self._decide(snapshot)
+
+        self._assert_refused(result, "already spent", requests=1)
+
+    def test_a_request_proven_never_accepted_is_made_once_more_with_fresh_gates(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        self.run_mock.side_effect = None
+        # The failed job is still among the run's latest jobs: never accepted.
+        view = mock.MagicMock(return_value={"jobs": [{"databaseId": 1001}]})
+        self.reads.clear()
+        with mock.patch.object(drain_prs, "run_json", view):
+            result = self._decide()
+
+        self.assertEqual(result, drain_prs.CI_RERUN_REQUESTED)
+        # Counted as one request, reconsidered from a fresh read.
+        self.assertEqual(sorted(self.reads), ["markers", "pr"])
+        self.assertEqual(self.state["ci_gate_reruns"]["42"]["attempts"], 1)
+        self.assertEqual(len(self._requests()), 2)
+
+    def test_a_request_proven_never_accepted_is_refused_if_the_gates_no_longer_hold(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        self.run_mock.side_effect = None
+        view = mock.MagicMock(return_value={"jobs": [{"databaseId": 1001}]})
+        self.markers = [self._marker(verdict="CHANGES_REQUESTED")]
+        with mock.patch.object(drain_prs, "run_json", view):
+            result = self._decide()
+
+        self._assert_refused(result, "requested changes", requests=1)
+        # The restored allowance is not a held claim.
+        self.assertNotIn("ci_gate_reruns", self.state)
+
+    def test_indeterminate_evidence_neither_retracts_nor_repeats(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        self.run_mock.side_effect = None
+        view = mock.MagicMock(return_value={"status": "completed"})
+        with mock.patch.object(drain_prs, "run_json", view):
+            with self.assertRaises(drain_prs.DrainError):
+                self._decide()
+
+        self.assertEqual(len(self._requests()), 1)
+        record = self.state["ci_gate_reruns"]["42"]
+        self.assertEqual(record["unconfirmed"], "777")
+        self.assertEqual(record["attempts"], 1)
+
+    def test_a_failed_request_of_any_kind_stays_unconfirmed(self):
+        # A timeout is not told apart from a refusal here; the run's own jobs
+        # settle it on the next look.
+        self._lose_the_response(drain_prs.DrainError("Command timed out"))
+
+        with self.assertRaises(drain_prs.DrainError):
+            self._decide()
+
+        self.assertEqual(self.state["ci_gate_reruns"]["42"]["unconfirmed"], "777")
+
+
+class UngatedCiRerunUnchangedTests(unittest.TestCase):
+    """Issue #855 requirement 2: without the key nothing about reruns moves."""
+
+    def test_an_ungated_repository_still_reruns_up_to_the_cap(self):
+        ctx = drain_prs.RepoContext(Path("/fake-repo"), "acme/widgets", "widgets", "master")
+        head = "a" * 40
+        state = {
+            "prs": {
+                "42": {
+                    "approved_head": head,
+                    "ci_rerun_head": None,
+                    "ci_rerun_attempts": 0,
+                    "ci_rerun_active": False,
+                    "ci_rerun_attempt_identity": None,
+                    "ci_rerun_exhausted_head": None,
+                }
+            }
+        }
+
+        def failed(job):
+            return {
+                "number": 42,
+                "headRefOid": head,
+                "statusCheckRollup": [
+                    {
+                        "name": "build-test",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "completedAt": f"2026-08-0{job}T00:00:00Z",
+                        "detailsUrl": (
+                            "https://github.com/acme/widgets/actions/runs/12345"
+                            f"/job/{job}"
+                        ),
+                    },
+                    {"name": "ci-admission", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                ],
+            }
+
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            decisions = [
+                drain_prs.rerun_failed_ci(
+                    ctx, failed(job), state=state, check_name="build-test", dry_run=False
+                )
+                for job in range(1, drain_prs.MAX_CI_RERUN_ATTEMPTS + 2)
+            ]
+
+        self.assertEqual(
+            decisions,
+            [drain_prs.CI_RERUN_REQUESTED] * drain_prs.MAX_CI_RERUN_ATTEMPTS
+            + [drain_prs.CI_RERUN_REFUSED],
+        )
+        self.assertEqual(len(run_mock.mock_calls), drain_prs.MAX_CI_RERUN_ATTEMPTS)
+        # Not a byte of gated bookkeeping appears for an ungated repository.
+        self.assertNotIn("ci_gate_reruns", state)
+
+
+class MigrateGatedRerunRecordTests(unittest.TestCase):
+    def _state(self, records):
+        return {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "active_pr": None,
+            "prs": {},
+            "ci_gate_reruns": records,
+        }
+
+    def test_a_valid_record_loads_untouched(self):
+        record = {"42": {"head": "a" * 40, "attempts": 1, "active": True}}
+        migrated = drain_prs.migrate_drain_state(self._state(record), source="test")
+        self.assertEqual(migrated["ci_gate_reruns"], record)
+
+    def test_a_state_without_the_record_is_not_given_one(self):
+        state = self._state({})
+        del state["ci_gate_reruns"]
+        self.assertNotIn(
+            "ci_gate_reruns", drain_prs.migrate_drain_state(state, source="test")
+        )
+
+    def test_a_malformed_record_is_refused_rather_than_read_as_empty(self):
+        # An unreadable claim must not read as no claim: that would hand every
+        # head its rerun back.
+        for records in ([], "x", {"42": "a"}, {"42": {"attempts": 1}}, {"42": {"head": 3}}):
+            with self.subTest(records=records):
+                with self.assertRaises(drain_prs.DrainError):
+                    drain_prs.migrate_drain_state(self._state(records), source="test")
 
 
 if __name__ == "__main__":
