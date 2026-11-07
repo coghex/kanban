@@ -3979,14 +3979,16 @@ def recover_stale_approval(
         pr = get_pr(ctx, number)
 
         if pr["state"] != "OPEN":
-            # Nothing of a departed pull request's gated-rerun accounting is
-            # worth keeping: it is keyed to heads that can no longer be run.
-            drop_ci_gate_record(state, number)
             if pr["state"] != "MERGED":
                 # Closed without merging: nothing is owed, and forgetting it
-                # must never close an issue or delete a branch.
+                # must never close an issue or delete a branch. Its gated-rerun
+                # record is deliberately kept: closing is reversible, and a
+                # reopened pull request at the same head must find that head's
+                # spent or uncertain rerun exactly as it was left.
                 forget_pr(state, number)
                 continue
+            # Merged is terminal: no head of this pull request can be rerun.
+            drop_ci_gate_record(state, number)
             # Merged with nothing recorded -- the drainer stopped between the
             # merge and its record, or the merge predates the record entirely.
             log(f"PR #{number}: merged with no cleanup recorded; planning it now")
@@ -6513,6 +6515,33 @@ def process_pr(
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
+
+    if (
+        base_advance is not None
+        and gates.ci_admission_check is not None
+        and build_state == "failure"
+        and classify_admission(pr, gates.ci_admission_check) == ADMISSION_GATED_OUT
+        and ci_gate_record(state, number, pr["headRefOid"]) is None
+    ):
+        # The coordination-only shortcut spares a behind head its branch
+        # update because passing CI can merge past the advance. A gated-out
+        # attempt cannot: its one rerun is refused while the head is behind,
+        # and nothing else would ever move it. So the update runs first, as it
+        # does for any other behind head, and the new head is judged -- and
+        # reruns once -- on its own. A head whose rerun is already spent or
+        # in flight keeps its barrier or its refusal instead.
+        return request_base_update(
+            ctx,
+            pr,
+            state=state,
+            dry_run=dry_run,
+            report=report,
+            detail=(
+                f"Its required CI check {gates.required_ci_check} was gated out "
+                "and cannot be rerun while the head is behind, so the branch "
+                "is updated first."
+            ),
+        )
 
     # Every configured check and its state travels with each message, so a
     # caller shown one blocking gate is never left guessing about the other.

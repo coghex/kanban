@@ -268,7 +268,9 @@ class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
         ]
 
-    def _run_process_pr(self, *, dry_run=False, gates=None, report=None):
+    def _run_process_pr(
+        self, *, dry_run=False, gates=None, report=None, gate_records=None
+    ):
         state = {
             "version": drain_prs.STATE_VERSION,
             "attempt_counter": 3,
@@ -284,6 +286,8 @@ class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
                 }
             },
         }
+        if gate_records is not None:
+            state["ci_gate_reruns"] = gate_records
         if gates is None:
             gates = drain_prs.GateConfig(
                 required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
@@ -6393,6 +6397,66 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
 
         self.assertEqual(self._reruns(), [])
         self.assertIn("the label alone grants nothing", error)
+
+    def _behind_by_a_coordination_only_advance(self):
+        advance = drain_prs.BaseAdvanceApproval(self.head_sha, "f" * 40, frozenset())
+        return (
+            mock.patch.object(
+                drain_prs, "coordination_only_base_advance", return_value=advance
+            ),
+            mock.patch.object(drain_prs, "request_base_update", return_value=True),
+        )
+
+    def _drive_behind(self, rollup, *, gates=None, gate_records=None):
+        self._script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BEHIND"})
+        for _ in range(2):
+            self._script_comment_pages([self._approval()])
+        advance, update = self._behind_by_a_coordination_only_advance()
+        report = drain_prs.new_single_pr_report(42)
+        with advance, update as update_mock:
+            try:
+                self._run_process_pr(
+                    gates=gates or self._gates(),
+                    report=report,
+                    gate_records=gate_records,
+                )
+            except drain_prs.DrainError:
+                pass
+        return report, update_mock
+
+    def test_a_gated_out_head_behind_by_a_coordination_only_advance_is_updated_first(self):
+        report, update = self._drive_behind(self._rollup())
+
+        # The shortcut would have skipped the update and the rerun would then
+        # have been refused as behind, forever: the update is what moves it.
+        self.assertEqual(update.call_count, 1)
+        self.assertEqual(self._reruns(), [])
+        self.assertIn("gated out", update.call_args.kwargs["detail"])
+
+    def test_the_shortcut_is_kept_where_the_update_would_not_help(self):
+        spent = {"42": {self.head_sha: {"attempts": 1, "active": False}}}
+        for name, rollup, gates, records in (
+            ("real failure", self._rollup(admission=(("COMPLETED", "SUCCESS"),)), None, None),
+            ("rerun already spent", self._rollup(), None, spent),
+            (
+                "ungated repository",
+                self._rollup(),
+                drain_prs.GateConfig(
+                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                ),
+                None,
+            ),
+        ):
+            with self.subTest(case=name):
+                self.setUp()
+                if name == "ungated repository":
+                    self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+                report, update = self._drive_behind(
+                    rollup, gates=gates, gate_records=records
+                )
+
+                self.assertEqual(update.call_count, 0)
 
     def test_a_gated_dry_run_requests_nothing_and_says_what_it_would_do(self):
         rollup = self._rollup()

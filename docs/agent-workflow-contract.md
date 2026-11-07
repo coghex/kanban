@@ -1263,7 +1263,12 @@ reimplement the removal, and `--check` remains read-only.
   one rerun is recorded durably, per pull request and head, in the drain state
   (`ci_gate_reruns`), apart from the queue entry, so approval withdrawal and
   reapplication, forgetting the entry and a green observation never hand the
-  head its rerun back; a new head starts a fresh allowance. The existing
+  head its rerun back; each head keeps its own record, a new head starts a
+  fresh allowance, a closed pull request's records are kept (reopening it at
+  the same head finds the rerun as it was left) and a merge drops them. A head
+  that is behind only by a coordination-only base advance is updated before a
+  gated-out failure is considered, since the rerun is refused while it is
+  behind. The existing
   in-flight barrier applies unchanged after the request, and a second
   gated-out attempt or a real failure after it leaves the head alone. A
   refusal at this decision ends the pass with `checks_failed` and a message

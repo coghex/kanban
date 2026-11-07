@@ -2566,6 +2566,46 @@ class GatedCiRerunTests(unittest.TestCase):
             sorted(self.state["ci_gate_reruns"]["42"]), sorted([self.HEAD, other])
         )
 
+    def test_a_closed_then_reopened_pull_request_finds_its_rerun_still_spent(self):
+        self._decide()
+        # Polling recovery meets the pull request closed, and forgets its entry.
+        closed = {"state": "CLOSED", "headRefOid": self.HEAD}
+        with mock.patch.object(drain_prs, "get_pr", return_value=closed):
+            drain_prs.recover_stale_approval(self.ctx, self.state, dry_run=False)
+        self.assertNotIn("42", self.state["prs"])
+        self.assertIn(self.HEAD, self.state["ci_gate_reruns"]["42"])
+        # A state reload, then the same pull request reopened at the same head.
+        self.state = json.loads(json.dumps(self.state))
+        drain_prs.remember_approved_head(self.state, 42, self.HEAD)
+        again = self._pr(job="1002")
+        self.fresh = again
+
+        self._assert_refused(self._decide(again), "already spent", requests=1)
+
+    def test_a_closed_pull_requests_uncertain_request_is_kept_for_settlement(self):
+        self._lose_the_response()
+        with self.assertRaises(drain_prs.TransportError):
+            self._decide()
+        closed = {"state": "CLOSED", "headRefOid": self.HEAD}
+        with mock.patch.object(drain_prs, "get_pr", return_value=closed):
+            drain_prs.recover_stale_approval(self.ctx, self.state, dry_run=False)
+
+        self.assertEqual(
+            self.state["ci_gate_reruns"]["42"][self.HEAD]["unconfirmed"], "777"
+        )
+
+    def test_only_a_merge_drops_a_pull_requests_records(self):
+        self._decide()
+        merged = {"state": "MERGED", "headRefOid": self.HEAD}
+        with (
+            mock.patch.object(drain_prs, "get_pr", return_value=merged),
+            mock.patch.object(drain_prs, "plan_cleanup", return_value={"pending": []}),
+            mock.patch.object(drain_prs, "complete_pending_cleanup", return_value=True),
+        ):
+            drain_prs.recover_stale_approval(self.ctx, self.state, dry_run=False)
+
+        self.assertNotIn("ci_gate_reruns", self.state)
+
     def test_the_cap_never_applies_a_second_request_to_one_head(self):
         # Whatever MAX_CI_RERUN_ATTEMPTS would allow an ungated repository.
         self.assertGreater(drain_prs.MAX_CI_RERUN_ATTEMPTS, drain_prs.GATED_RERUN_LIMIT)
