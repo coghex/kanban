@@ -1111,9 +1111,10 @@ A repository can gate its pull-request CI behind an admission step. The automati
 of a `pull_request` run executes only an admission job that fails on purpose, so the required
 checks go red and nothing expensive runs; a later attempt is admitted only when the head is the
 pull request's current head, contains the base branch's tip and carries a head-bound approval
-marker. Rerunning blindly there spends real CI on real failures, can target a previous head's
-run (which cancels the current head's CI through their shared concurrency group), and is refused
-at admission again when the head is not approved. A repository that declares
+marker, or an approval carried across a clean branch update that the repository's stale-approval
+policy confirmed. Rerunning blindly there spends real CI on real failures, can target a previous
+head's run (which cancels the current head's CI through their shared concurrency group), and is
+refused at admission again when the head is not approved. A repository that declares
 `ci_admission_check` in `.drain-prs.json` gets these rules instead of the ungated ones above; the
 drainer hard-codes no repository's job names, and the declared name is its only gate vocabulary.
 
@@ -1144,9 +1145,23 @@ read that fails authorizes nothing.
    merges past it, but a gated-out failure cannot be rerun while the head is behind, so such a head
    is updated first and the new head is judged on its own (unless its rerun is already spent or in
    flight, in which case it keeps its barrier or refusal).
-3. The head has a live approval: the newest review marker the drainer accepts names exactly this
-   head with verdict `APPROVE`, and no `CHANGES_REQUESTED` marker vetoes the head. The
-   `reviewed:approve` label, or the drainer's recorded approved head, never suffices alone.
+3. The head has a live approval, and no `CHANGES_REQUESTED` marker vetoes the head. An approval is
+   live in one of two ways. Either the newest review marker the drainer accepts names exactly this
+   head with verdict `APPROVE` (nothing else is consulted), or the approval is a **carried
+   approval**: that newest accepted marker is an `APPROVE` naming an *earlier* head (the head the
+   approval was carried from), and the stale-approval policy check (`dismiss-stale-approval`)
+   completed `success` at exactly this head with `reviewed:approve` still attached. The check
+   instance is chosen as the merge path chooses it (a newer skipped copy does not mask a
+   successful one, and a copy still queued or running outranks an older success), and the head, the
+   check and the label are all read from the one fresh payload, with the head compared explicitly.
+   That is the very conjunction the merge path applies to a carried approval
+   (`branch_update_carried_approval`), which is unchanged; it does not depend on who moved the head,
+   whether the drainer's own branch update, GitHub's "Update branch" or a person's push. The
+   earlier-head marker is what the recorded approved head lacks: provenance. The `reviewed:approve`
+   label, the policy check, the earlier-head marker and the drainer's recorded approved head never
+   suffice alone. The newest marker is chosen before its provider is checked, so an unaccepted
+   newest marker does not expose an older accepted one. A carried head is a new head with its own
+   allowance (below).
 4. No admitted attempt exists or is in flight for the head.
 5. The head has not already had its one gate-driven rerun requested.
 
@@ -1154,7 +1169,9 @@ read that fails authorizes nothing.
 sent, under `ci_gate_reruns` in the drain state keyed by pull request and head. That record is kept
 apart from the queue entry, so withdrawing and re-applying the approval, forgetting the entry, a
 successful check observation and a restart in polling or `--pr` mode never give the head its rerun
-back. A new head starts a fresh allowance, and each head keeps its own record, so a branch that
+back. A new head starts a fresh allowance (a head an approval was carried to is a new head: a rerun
+spent at the head it was carried from, or any state at any other head, does not touch it), and each
+head keeps its own record, so a branch that
 returns to an earlier head finds that head's rerun as it was left. A merged pull request's records are
 dropped; a closed one's are kept, because closing is reversible and a reopened pull request at the same
 head must not get its rerun back (nor lose an uncertain request still to be settled).
@@ -1174,10 +1191,14 @@ gate-driven request for a head, whatever `MAX_CI_RERUN_ATTEMPTS` would allow an 
 **A refusal ends the pass with `checks_failed` and says which condition failed**, in distinct
 wording: a real failure after admission; the admission check still queued or in progress; an
 admitted attempt present; the head moved or the pull request no longer eligible; the head behind
-or conflicting; no live approval at this head; the head's one rerun already spent. It is logged
+or conflicting; no live approval at this head; the head's one rerun already spent. The
+no-live-approval wording says which it is: that no accepted review marker approves the head at all,
+or that the newest marker approves an earlier head and `dismiss-stale-approval` has not confirmed
+the carry (naming whether it failed, is missing or only skipped, or has not settled yet, in which
+case a later pass may make the rerun once it succeeds). It is logged
 the way any refused rerun is. A refusal for a condition that can clear (the approval marker for
-the head is not published yet, the head is about to be updated, the admission check is still
-running) does not spend the head's rerun, so a later pass can still make it once the condition
+the head is not published yet, the policy check is still running, the head is about to be updated,
+the admission check is still running) does not spend the head's rerun, so a later pass can still make it once the condition
 holds. A real failure is final for as long as it lasts but does not quarantine the head, so a
 rerun by hand that passes still merges. In `--dry-run` no `gh run rerun` is issued and nothing
 is recorded; the log says what would have been requested or why it was refused.
