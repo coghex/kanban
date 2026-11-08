@@ -1207,11 +1207,12 @@ rule above applies to it unchanged; the spent head's record is kept as it was. T
 
 - A head whose rerun is still in flight is never updated underneath it, whether it is behind by
   an ordinary or a coordination-only advance: a request recorded as made whose result is not yet
-  a distinguishable finished attempt (still running, nothing recorded to compare against, or a
-  result that names no attempt) keeps its barrier and is polled again. A request left unconfirmed
+  a distinguishable finished attempt (still running, absent from the rollup, nothing recorded to
+  compare against, or a result that names no attempt) keeps its barrier and is polled again. A request left unconfirmed
   by a network failure is settled first, by the rule above: a distinguishable finished result
   settles it (and a spent one is then updated), proof it was never accepted gives the allowance
-  back (and the head is then updated like any fresh behind head), and evidence that settles
+  back (nothing is updated on that pass's earlier snapshot, since the settlement read may have seen
+  a hold or a withdrawn approval; the head is decided again next pass, like any fresh behind head), and evidence that settles
   nothing authorizes neither an update nor a repeated request.
 - A head behind only by a [coordination-only advance](#merging-past-a-coordination-only-base-advance)
   is updated for a gated-out failure whose rerun is spent exactly as one with no rerun yet is. A
