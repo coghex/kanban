@@ -1467,18 +1467,29 @@ def pass_candidate_order(
 def candidate_block_reason(
     pr: dict[str, Any],
     state: dict[str, Any],
+    *,
+    ignore_exhausted: bool = False,
 ) -> str | None:
     """Why this pass must skip a candidate without reading it from GitHub.
 
     Both blocks are durable and specific to one candidate, so the pass moves
     on to the next-lowest number rather than ending. Both are keyed to the head
     they were recorded against: a new reviewed head is a new candidate.
+
+    `ignore_exhausted` is for a gated repository's spent head that a fresh read
+    found behind its base or conflicting (issue #859): that head is not skipped
+    on its spent rerun, because the branch-update and conflict paths still owe
+    it a decision. The cooldown still applies.
     """
     entry = state["prs"].get(str(pr["number"]))
     if entry is None:
         return None
     exhausted_head = entry.get("ci_rerun_exhausted_head")
-    if exhausted_head and exhausted_head == pr.get("headRefOid"):
+    if (
+        not ignore_exhausted
+        and exhausted_head
+        and exhausted_head == pr.get("headRefOid")
+    ):
         return "ci_rerun_exhausted"
     if int(entry.get("retry_after_attempt") or 0) > int(state["attempt_counter"]):
         return "cooling_down"
@@ -6454,6 +6465,201 @@ def request_base_update(
     return True
 
 
+# Where a gated head's one rerun stands, read from its durable record and the
+# rollup alone (issue #859). `none` has nothing recorded; `in_flight` has a
+# request whose result is not a distinguishable finished attempt; `unsettled`
+# has a request left unconfirmed by a network failure; `spent` has used its
+# rerun and the result is a different finished attempt (or the spend was
+# already settled).
+GATED_STANDING_NONE = "none"
+GATED_STANDING_IN_FLIGHT = "in_flight"
+GATED_STANDING_UNSETTLED = "unsettled"
+GATED_STANDING_SPENT = "spent"
+
+
+def gated_rerun_standing(
+    state: dict[str, Any], pr: dict[str, Any], check_name: str
+) -> str:
+    """Where this head's one gated rerun stands, from state and the rollup.
+
+    Pure: nothing is fetched and nothing is written. It follows the same
+    barrier rules as `_decide_ci_rerun` -- a request is in flight until the
+    required check shows a finished attempt different from the failure the
+    request was made against -- without making or settling any request.
+    """
+    number = pr["number"]
+    record = ci_gate_record(state, number, pr["headRefOid"])
+    if record is None:
+        return GATED_STANDING_NONE
+    attempts = int(record.get("attempts") or 0)
+    if record.get("unconfirmed"):
+        return GATED_STANDING_UNSETTLED
+    if record.get("active"):
+        check = latest_check(pr, check_name)
+        check_state = classify_check(check)
+        if check_state in {"pending", "missing"}:
+            # A check the rollup does not show is no finished result either.
+            return GATED_STANDING_IN_FLIGHT
+        if check_state == "failure":
+            recorded = record.get("attempt_identity")
+            observed = ci_attempt_identity(check)
+            if (
+                not isinstance(recorded, str)
+                or not recorded
+                or observed is None
+                or observed == recorded
+            ):
+                return GATED_STANDING_IN_FLIGHT
+            return (
+                GATED_STANDING_SPENT
+                if attempts >= GATED_RERUN_LIMIT
+                else GATED_STANDING_NONE
+            )
+        return GATED_STANDING_NONE
+    if attempts >= GATED_RERUN_LIMIT:
+        return GATED_STANDING_SPENT
+    return GATED_STANDING_NONE
+
+
+def gated_behind_decision(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    gates: GateConfig,
+    base_advance: BaseAdvanceApproval | None,
+    dry_run: bool,
+    report: dict[str, Any] | None,
+) -> bool | None:
+    """What a BEHIND head's recorded gated rerun decides, or None to go on.
+
+    Only for a repository that declared `ci_admission_check`, and only after the
+    conflict and hold checks have run. Returns the pass's result when it
+    handled the head, and None when the ordinary flow below decides it exactly
+    as before.
+
+    * A rerun still in flight (or unresolved after a network failure) is not
+      updated underneath: the head keeps its barrier and is polled again.
+    * A spent rerun on a behind head is updated through the ordinary branch
+      update, and the new head is judged -- and reruns once -- on its own. The
+      spent head's record is left as it is. For a head behind only by a
+      coordination-only advance the update is owed only to a gated-out failure;
+      a real failure after admission keeps getting neither a rerun nor an
+      update, and passing CI still merges past the advance.
+    * A request left unconfirmed is settled first, with the existing rule, and
+      then judged as above.
+    """
+    check_name = gates.required_ci_check
+    if gates.ci_admission_check is None or check_name is None:
+        return None
+    number = pr["number"]
+    standing = gated_rerun_standing(state, pr, check_name)
+    build_state = configured_check_state(pr, check_name)
+
+    def wait(requested: bool) -> bool:
+        what = "requested" if requested else "requested earlier is still in flight"
+        set_outcome(
+            report,
+            "checks_pending",
+            f"PR #{number} is behind {ctx.default_branch}, but the automatic "
+            f"rerun of {check_name} {what} for this head; its branch is not "
+            f"updated underneath it, polling again in {CI_RERUN_INTERVAL_SECONDS}s.",
+        )
+        return True
+
+    if standing == GATED_STANDING_IN_FLIGHT:
+        if build_state == "failure":
+            # The existing barrier keeps its bookkeeping: a record that names
+            # no attempt to compare against takes the first observable one as
+            # its baseline here, so a later, different finished attempt can
+            # release it. It requests nothing while the rerun is in flight.
+            rerun_failed_ci(
+                ctx,
+                pr,
+                state=state,
+                check_name=check_name,
+                dry_run=dry_run,
+                gate=CiGate(
+                    admission_check=gates.ci_admission_check,
+                    default_branch=ctx.default_branch,
+                ),
+            )
+        log(
+            f"PR #{number}: behind {ctx.default_branch} with an automatic rerun "
+            "in flight; not updating the branch underneath it"
+        )
+        return wait(False)
+    if standing == GATED_STANDING_UNSETTLED:
+        if build_state == "success":
+            return None
+        if build_state != "failure":
+            log(
+                f"PR #{number}: behind {ctx.default_branch} with a rerun request "
+                "left unconfirmed; not updating until it is settled"
+            )
+            return wait(False)
+        outcome = rerun_failed_ci(
+            ctx,
+            pr,
+            state=state,
+            check_name=check_name,
+            dry_run=dry_run,
+            gate=CiGate(
+                admission_check=gates.ci_admission_check,
+                default_branch=ctx.default_branch,
+            ),
+        )
+        if outcome == CI_RERUN_REQUESTED:
+            return wait(True)
+        if outcome == CI_RERUN_IN_FLIGHT:
+            return wait(False)
+        entry = state["prs"][str(number)]
+        if not (
+            int(entry.get("ci_rerun_attempts") or 0) >= GATED_RERUN_LIMIT
+            and not entry.get("ci_rerun_active")
+        ):
+            # The request was proven never accepted and its allowance is back.
+            # The settlement read the pull request afresh and may have refused
+            # for a condition this pass's snapshot never saw (a hold, a
+            # withdrawn approval), so nothing is updated on the strength of
+            # the earlier snapshot: the head is decided again, from a fresh
+            # read, on the next pass, as any head without a record is.
+            log(
+                f"PR #{number}: the rerun request left unconfirmed was never "
+                "accepted; its allowance is restored and the head is decided "
+                "again next pass"
+            )
+            set_outcome(
+                report,
+                "checks_pending",
+                f"PR #{number} is behind {ctx.default_branch}; the rerun request "
+                f"left unconfirmed for {check_name} was never accepted, so its "
+                "allowance is restored and the head is decided again from a "
+                f"fresh read, polling again in {CI_RERUN_INTERVAL_SECONDS}s.",
+            )
+            return True
+        standing = GATED_STANDING_SPENT
+    if standing != GATED_STANDING_SPENT:
+        return None
+    if base_advance is not None and not (
+        build_state == "failure"
+        and classify_admission(pr, gates.ci_admission_check) == ADMISSION_GATED_OUT
+    ):
+        return None
+    reason = (
+        f"The one gated rerun of {check_name} for this head is spent and the "
+        f"head is behind {ctx.default_branch}, so its branch is updated and the "
+        "new head is judged on its own."
+    )
+    log(
+        f"PR #{number}: {'would update' if dry_run else 'updating'} the branch: "
+        f"{reason}"
+    )
+    return request_base_update(
+        ctx, pr, state=state, dry_run=dry_run, report=report, detail=reason
+    )
+
+
 def process_pr(
     ctx: RepoContext,
     number: int,
@@ -6564,6 +6770,20 @@ def process_pr(
     base_advance: BaseAdvanceApproval | None = None
     if merge_state == "BEHIND":
         base_advance = coordination_only_base_advance(ctx, pr)
+        # A gated repository's head whose one rerun is spent, in flight, or
+        # unconfirmed is decided here (issue #859); every other head, and
+        # every ungated repository, goes on exactly as before.
+        handled = gated_behind_decision(
+            ctx,
+            pr,
+            state=state,
+            gates=gates,
+            base_advance=base_advance,
+            dry_run=dry_run,
+            report=report,
+        )
+        if handled is not None:
+            return handled
         if base_advance is None:
             return request_base_update(
                 ctx, pr, state=state, dry_run=dry_run, report=report
@@ -6584,8 +6804,9 @@ def process_pr(
         # attempt cannot: its one rerun is refused while the head is behind,
         # and nothing else would ever move it. So the update runs first, as it
         # does for any other behind head, and the new head is judged -- and
-        # reruns once -- on its own. A head whose rerun is already spent or
-        # in flight keeps its barrier or its refusal instead.
+        # reruns once -- on its own. A head with a rerun record never reaches
+        # here: `gated_behind_decision` above updates it once the rerun is
+        # spent and holds its barrier while the rerun is in flight.
         return request_base_update(
             ctx,
             pr,
@@ -7377,6 +7598,26 @@ def attempt_candidate(
     return outcome
 
 
+def spent_head_owes_base_decision(ctx: RepoContext, number: int) -> bool:
+    """Whether a spent gated head is behind its base or conflicts with it.
+
+    Read fresh, because the queue listing carries no merge state. Only the pull
+    request's own `mergeStateStatus` and `mergeable` decide it, as everywhere
+    else. A read that fails leaves the head skipped as it was, unless the
+    network itself is down, which the polling loop waits out.
+    """
+    try:
+        fresh = get_pr(ctx, number)
+    except DrainError as exc:
+        if NETWORK_OFFLINE is not None:
+            raise
+        log(f"PR #{number}: could not read its merge state ({exc}); skipping it")
+        return False
+    return fresh.get("mergeStateStatus") in {"BEHIND", "DIRTY"} or (
+        fresh.get("mergeable") == "CONFLICTING"
+    )
+
+
 def run_drain_pass(
     ctx: RepoContext,
     eligible: list[dict[str, Any]],
@@ -7406,6 +7647,17 @@ def run_drain_pass(
 
     for number in pass_candidate_order(eligible, active):
         blocked = candidate_block_reason(by_number[number], state)
+        if (
+            blocked == "ci_rerun_exhausted"
+            and gates.ci_admission_check is not None
+            and spent_head_owes_base_decision(ctx, number)
+        ):
+            # A gated repository's spent head that is now behind its base or
+            # conflicting is not set aside: process_pr() decides the update or
+            # the conflict path for it, and refuses a rerun it never owes.
+            blocked = candidate_block_reason(
+                by_number[number], state, ignore_exhausted=True
+            )
         if blocked is not None:
             entry = state["prs"][str(number)]
             if blocked == "ci_rerun_exhausted":

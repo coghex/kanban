@@ -3346,6 +3346,106 @@ class SinglePrGatedRerunTests(SinglePrCliFixture):
         self.assertIn("already spent", result["message"])
         self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
 
+    # -- Issue #859: a spent head that has fallen behind its base ----------
+
+    def script_extra_run(self, rollup, **extra):
+        """One `--pr` run over a head carrying `extra` (a merge state, say)."""
+        for _ in range(2):
+            self.script_pr_view({"statusCheckRollup": rollup, **extra})
+        self.script_review_comments(self.approval())
+
+    def update_requests(self):
+        return [
+            call
+            for call in self.gh_calls("api")
+            if any(arg.endswith("/update-branch") for arg in call["args"])
+        ]
+
+    def spend_the_one_rerun(self):
+        """Runs 1-3 of the reported sequence: the rerun, its barrier, the spend."""
+        first = self.rollup()
+        self.script_run(first, reads=2, fresh=True)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_pending")
+        self.script_run(self.rollup(job="770002"), reads=1, fresh=False)
+        result, proc = self.run_single()
+        self.assertIn("already spent", result["message"])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
+    def script_refused_update(self):
+        # The request is what is under test; GitHub refusing it ends the run
+        # without a policy wait.
+        self.fake.script(
+            "gh",
+            ["api", "-X", "PUT", "repos/acme/widgets/pulls/42/update-branch"],
+            exit_code=1,
+            stderr="fixture refuses the update after recording it",
+        )
+
+    def test_a_spent_head_that_falls_behind_is_updated_once_and_never_rerun(self):
+        self.spend_the_one_rerun()
+        self.script_extra_run(self.rollup(job="770002"), mergeStateStatus="BEHIND")
+        self.script_refused_update()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(len(self.update_requests()), 1)
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        # The spent head's record is kept as it was.
+        self.assertEqual(self.state()["ci_gate_reruns"]["42"][self.head_sha]["attempts"], 1)
+
+    def test_a_spent_head_behind_in_a_dry_run_updates_nothing_and_says_so(self):
+        self.spend_the_one_rerun()
+        self.script_extra_run(self.rollup(job="770002"), mergeStateStatus="BEHIND")
+        before = self.state_path.read_bytes()
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(result["dry_run"], True)
+        self.assertEqual(result["reason"], "behind_base")
+        self.assertIn("would be requested", result["message"])
+        self.assertIn("spent", result["message"])
+        self.assertEqual(self.update_requests(), [])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_spent_head_that_is_not_behind_keeps_its_refusal(self):
+        self.spend_the_one_rerun()
+        self.script_run(self.rollup(job="770002"), reads=1, fresh=False)
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_failed")
+        self.assertIn("already spent", result["message"])
+        self.assertEqual(self.update_requests(), [])
+
+    def test_a_spent_head_that_conflicts_takes_the_conflict_path(self):
+        self.spend_the_one_rerun()
+        self.script_extra_run(
+            self.rollup(job="770002"), mergeable="CONFLICTING", mergeStateStatus="DIRTY"
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "merge_conflict")
+        self.assertEqual(self.update_requests(), [])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
+    def test_a_rerun_in_flight_on_a_behind_head_is_not_updated_underneath(self):
+        first = self.rollup()
+        self.script_run(first, reads=2, fresh=True)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self.run_single()
+        self.script_extra_run(first, mergeStateStatus="BEHIND")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertIn("not updated underneath", result["message"])
+        self.assertEqual(self.update_requests(), [])
+        self.assertEqual(len(self.gh_calls("run", "rerun")), 1)
+
     def test_the_label_alone_or_a_real_failure_gets_no_request(self):
         for name, rollup, feed, words in (
             ("real failure", self.rollup(admission=(("COMPLETED", "SUCCESS"),)), 1, "real failure after admission"),

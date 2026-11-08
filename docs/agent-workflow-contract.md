@@ -1275,9 +1275,37 @@ reimplement the removal, and `--check` remains read-only.
   the same head finds the rerun as it was left) and a merge drops them. A head
   that is behind only by a coordination-only base advance is updated before a
   gated-out failure is considered, since the rerun is refused while it is
-  behind. The existing
+  behind (issue #859 extends the same update to a head whose one rerun is
+  already spent, below). The existing
   in-flight barrier applies unchanged after the request, and a second
-  gated-out attempt or a real failure after it leaves the head alone. A
+  gated-out attempt or a real failure after it leaves the head alone, except
+  that a spent head which is `BEHIND` its base is updated. In a gated
+  repository a head whose one rerun is spent (its result is a distinguishable
+  finished attempt, again gated out) and whose `mergeStateStatus` is `BEHIND`
+  goes through the same branch-update path as every other behind head, with the
+  same hold, outage-retry and network-failure handling, in a polling pass and
+  in `--pr` mode alike; the pass's whole action is the update and no rerun is
+  requested for the old head. "Behind" is decided from `mergeStateStatus` and
+  what the existing behind path reads, never from admission's refusal text, a
+  job log or a workflow file. The spent head's record is kept as it is, and the
+  updated head is a new head with its own fresh allowance under every rule
+  above. A head whose rerun is in flight (a request recorded whose result is
+  not yet a distinguishable finished attempt, or one left unconfirmed by a
+  network failure) is not updated underneath that rerun, whether its advance is
+  ordinary or coordination-only: it keeps its barrier, and an unconfirmed
+  request is first settled as above (a distinguishable finished result settles
+  it; proof it was never accepted restores the allowance; unresolved evidence
+  authorizes neither an update nor a duplicate request). A head behind only by a
+  coordination-only advance whose failure is a real failure after admission
+  keeps getting neither a rerun nor an update, and a spent head that is not
+  behind keeps the `checks_failed` refusal; one that conflicts keeps the
+  conflict path. The polling queue's durable skip of a head whose rerun is
+  spent is lifted for such a head only while a fresh read of it shows it behind
+  or conflicting. No cap, counter or cooldown bounds these updates: each update
+  produces a new head that costs at most its one gated rerun, and a further
+  advance of the default branch makes it behind again, so the number of updates
+  follows the default branch's advances and is as unbounded as the existing
+  behind-head path already is for any other behind head. A
   refusal at this decision ends the pass with `checks_failed` and a message
   naming the condition (real failure, admission in flight, admitted attempt
   present, head moved, behind or conflicting, no live approval at this head,

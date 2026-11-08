@@ -6246,6 +6246,214 @@ class QueueOrderTests(ProcessPrFixture):
         self.assertEqual(self._read_state()["prs"]["7"]["ci_rerun_exhausted_head"], head)
         self.assertEqual(self._merged_numbers(), ["42"])
 
+    # -- Issue #859: a spent head that has since fallen behind its base ----
+
+    def _spend_the_one_rerun(self, head, *, job_after="770002"):
+        """Pass 1 requests the rerun; pass 2 sees its result gated out again.
+
+        The state that follows is produced by the mechanism itself: the spent
+        refusal, `ci_rerun_exhausted_head` and the durable record all come from
+        the same passes the issue reports, then a restart.
+        """
+        first = self._other_pr_json(7, head, statusCheckRollup=self._gated_out_ci())
+        second = self._other_pr_json(
+            7, head, statusCheckRollup=self._gated_out_ci(job=job_after)
+        )
+        self._script_pr(7, first, first, second, second)
+        self._script_approval_feed(7, head, copies=3)
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        queue = [self._queued(7, head), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue)
+        self._run_loop()
+        self._run_loop()
+        state = self._read_state()
+        self.assertEqual(state["prs"]["7"]["ci_rerun_exhausted_head"], head)
+        self.assertEqual(state["ci_gate_reruns"]["7"][head]["attempts"], 1)
+        self.assertEqual(len(self._reruns()), 1)
+        return second
+
+    def _behind_pass(self, head, second, *, coordination_only=False):
+        """A third pass over the spent head, which is now behind its base."""
+        view = {**second, "mergeStateStatus": "BEHIND"}
+        updated = self._other_pr_json(
+            7, "c" * 40, statusCheckRollup=self._stale_approval_ok()
+        )
+        # The pass's stale-approval look, the scheduler's own, the pass's read,
+        # then the update's two.
+        self._script_pr(7, view, view, view, updated, updated)
+        self.fake.script(
+            "gh",
+            ["api", "-X", "PUT", "repos/acme/widgets/pulls/7/update-branch"],
+            stdout="",
+        )
+        advance = (
+            drain_prs.BaseAdvanceApproval(head, "f" * 40, frozenset())
+            if coordination_only
+            else None
+        )
+        with mock.patch.object(
+            drain_prs, "coordination_only_base_advance", return_value=advance
+        ):
+            self._run_loop()
+
+    def test_a_spent_gated_head_that_falls_behind_is_updated_not_skipped(self):
+        head = "b" * 40
+        for coordination_only in (False, True):
+            with self.subTest(coordination_only=coordination_only):
+                self.setUp()
+                self.admission_check = "ci-admission"
+                second = self._spend_the_one_rerun(head)
+                self._behind_pass(head, second, coordination_only=coordination_only)
+
+                # Exactly one branch update, and no second rerun of the old head.
+                self.assertEqual(len(self._update_branch_calls()), 1)
+                self.assertEqual(len(self._reruns()), 1)
+                state = self._read_state()
+                self.assertEqual(state["active_pr"], 7)
+                self.assertEqual(state["prs"]["7"]["approved_head"], "c" * 40)
+                # The spent head's record is kept as it was.
+                self.assertEqual(state["ci_gate_reruns"]["7"][head]["attempts"], 1)
+                self.assertNotIn("c" * 40, state["ci_gate_reruns"]["7"])
+
+    def test_the_pr_mode_makes_the_same_decision_as_the_queue(self):
+        head = "b" * 40
+        for coordination_only in (False, True):
+            with self.subTest(coordination_only=coordination_only):
+                self.setUp()
+                self.admission_check = "ci-admission"
+                second = self._spend_the_one_rerun(head)
+                view = {**second, "mergeStateStatus": "BEHIND"}
+                updated = self._other_pr_json(
+                    7, "c" * 40, statusCheckRollup=self._stale_approval_ok()
+                )
+                # `--pr` reads the pull request to prepare, to process, and
+                # twice more inside the update's policy wait.
+                self._script_pr(7, view, view, updated, updated)
+                self.fake.script(
+                    "gh",
+                    ["api", "-X", "PUT", "repos/acme/widgets/pulls/7/update-branch"],
+                    stdout="",
+                )
+                advance = (
+                    drain_prs.BaseAdvanceApproval(head, "f" * 40, frozenset())
+                    if coordination_only
+                    else None
+                )
+                report = drain_prs.new_single_pr_report(7)
+
+                with mock.patch.object(
+                    drain_prs, "coordination_only_base_advance", return_value=advance
+                ), self._drainer():
+                    drain_prs.drain_one_pr(
+                        self.ctx,
+                        7,
+                        dry_run=False,
+                        gates=self._gates(),
+                        report=report,
+                    )
+
+                self.assertEqual(report["reason"], "behind_base")
+                self.assertIn("is spent", report["message"])
+                self.assertEqual(len(self._update_branch_calls()), 1)
+                self.assertEqual(len(self._reruns()), 1)
+
+    def test_the_updated_head_has_a_fresh_allowance_and_is_rerun_once(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        updated_head = "c" * 40
+        second = self._spend_the_one_rerun(head)
+        self._behind_pass(head, second)
+        carried = self._other_pr_json(
+            7, updated_head, statusCheckRollup=self._carried_ci()
+        )
+        self._script_pr(7, carried, carried)
+        self._script_pr_list(
+            [self._queued(7, updated_head), self._queued(42, self.head_sha)]
+        )
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 2)
+        records = self._read_state()["ci_gate_reruns"]["7"]
+        self.assertEqual(records[head]["attempts"], 1)
+        self.assertEqual(records[updated_head]["attempts"], 1)
+
+    def test_a_spent_gated_head_that_is_not_behind_is_still_skipped(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        second = self._spend_the_one_rerun(head)
+        self._script_pr(7, second)
+
+        self._run_loop()
+
+        self.assertEqual(self._update_branch_calls(), [])
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(set(self._merged_numbers()), {"42"})
+
+    def test_a_spent_gated_head_that_conflicts_takes_the_conflict_path(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        second = self._spend_the_one_rerun(head)
+        self._script_pr(
+            7, {**second, "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
+        )
+
+        self._run_loop()
+
+        self.assertEqual(self._update_branch_calls(), [])
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(set(self._merged_numbers()), {"42"})
+        incidents = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.incident_dir.glob("incident-*.json"))
+        ]
+        self.assertEqual([incident["pull_request"] for incident in incidents], [7])
+
+    def test_an_ungated_exhausted_head_that_is_behind_is_still_skipped(self):
+        head = "b" * 40
+        self._script_pr(
+            7,
+            self._other_pr_json(
+                7, head, statusCheckRollup=self._gated_out_ci(), mergeStateStatus="BEHIND"
+            ),
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, head), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry(
+                    head,
+                    ci_rerun_head=head,
+                    ci_rerun_attempts=drain_prs.MAX_CI_RERUN_ATTEMPTS,
+                    ci_rerun_exhausted_head=head,
+                ),
+                "42": self._entry(self.head_sha),
+            }
+        )
+
+        self._run_loop()
+
+        # Only the pass's own stale-approval look reads it, as before; the
+        # ungated exhausted head is skipped without the new merge-state read.
+        self.assertEqual(len(self._views_of(7)), 1)
+        self.assertEqual(self._update_branch_calls(), [])
+        self.assertEqual(set(self._merged_numbers()), {"42"})
+
+    def test_a_gated_dry_run_over_a_spent_behind_head_updates_and_records_nothing(self):
+        self.admission_check = "ci-admission"
+        head = "b" * 40
+        second = self._spend_the_one_rerun(head)
+        view = {**second, "mergeStateStatus": "BEHIND"}
+        self._script_pr(7, view, view)
+        before = self.state_path.read_bytes()
+
+        self._run_loop(dry_run=True)
+
+        self.assertEqual(self._update_branch_calls(), [])
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     # -- Issue #857: an approval carried across a clean branch update -----
 
     def _carried_ci(self, *, policy=(("COMPLETED", "SUCCESS"),), job="770001"):
@@ -6622,8 +6830,12 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
         self.assertEqual(self._reruns(), [])
         self.assertIn("the label alone grants nothing", error)
 
-    def _behind_by_a_coordination_only_advance(self):
-        advance = drain_prs.BaseAdvanceApproval(self.head_sha, "f" * 40, frozenset())
+    def _behind_by_a_coordination_only_advance(self, *, ordinary=False):
+        advance = (
+            None
+            if ordinary
+            else drain_prs.BaseAdvanceApproval(self.head_sha, "f" * 40, frozenset())
+        )
         return (
             mock.patch.object(
                 drain_prs, "coordination_only_base_advance", return_value=advance
@@ -6631,18 +6843,32 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
             mock.patch.object(drain_prs, "request_base_update", return_value=True),
         )
 
-    def _drive_behind(self, rollup, *, gates=None, gate_records=None):
-        self._script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BEHIND"})
+    def _drive_behind(
+        self,
+        rollup,
+        *,
+        gates=None,
+        gate_records=None,
+        ordinary=False,
+        fresh=(),
+        dry_run=False,
+    ):
+        """Run process_pr over a BEHIND head; `fresh` are later full reads."""
+        self._script_pr_view(
+            {"statusCheckRollup": rollup, "mergeStateStatus": "BEHIND"}, *fresh
+        )
         for _ in range(2):
             self._script_comment_pages([self._approval()])
-        advance, update = self._behind_by_a_coordination_only_advance()
+        advance, update = self._behind_by_a_coordination_only_advance(ordinary=ordinary)
         report = drain_prs.new_single_pr_report(42)
+        self.drive_state = None
         with advance, update as update_mock:
             try:
-                self._run_process_pr(
+                _, self.drive_state = self._run_process_pr(
                     gates=gates or self._gates(),
                     report=report,
                     gate_records=gate_records,
+                    dry_run=dry_run,
                 )
             except drain_prs.DrainError:
                 pass
@@ -6658,10 +6884,8 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
         self.assertIn("gated out", update.call_args.kwargs["detail"])
 
     def test_the_shortcut_is_kept_where_the_update_would_not_help(self):
-        spent = {"42": {self.head_sha: {"attempts": 1, "active": False}}}
-        for name, rollup, gates, records in (
-            ("real failure", self._rollup(admission=(("COMPLETED", "SUCCESS"),)), None, None),
-            ("rerun already spent", self._rollup(), None, spent),
+        for name, rollup, gates in (
+            ("real failure", self._rollup(admission=(("COMPLETED", "SUCCESS"),)), None),
             (
                 "ungated repository",
                 self._rollup(),
@@ -6669,18 +6893,312 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
                     required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
                     required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
                 ),
-                None,
             ),
         ):
             with self.subTest(case=name):
                 self.setUp()
                 if name == "ungated repository":
                     self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+                report, update = self._drive_behind(rollup, gates=gates)
+
+                self.assertEqual(update.call_count, 0)
+
+    # -- Issue #859: a spent gated rerun on a behind head -------------------
+
+    FIRST = "9911/770001"
+
+    def _records(self, **record):
+        return {"42": {self.head_sha: record}}
+
+    def _spent(self):
+        return self._records(attempts=1, active=False)
+
+    def _active(self, identity=FIRST, **extra):
+        return self._records(
+            attempts=1, active=True, attempt_identity=identity, **extra
+        )
+
+    def test_a_spent_head_behind_is_updated_and_never_rerun(self):
+        # The rerun's own result is a different finished, gated-out attempt.
+        second = self._rollup(job="770002")
+        for name, records, rollup in (
+            ("record marked finished", self._spent(), self._rollup()),
+            ("record still marked active", self._active(), second),
+        ):
+            for ordinary in (False, True):
+                with self.subTest(case=name, ordinary=ordinary):
+                    self.setUp()
+                    report, update = self._drive_behind(
+                        rollup, gate_records=records, ordinary=ordinary
+                    )
+
+                    self.assertEqual(update.call_count, 1)
+                    self.assertEqual(self._reruns(), [])
+                    detail = update.call_args.kwargs["detail"]
+                    self.assertIn("spent", detail)
+                    self.assertIn("behind master", detail)
+                    self.assertIn("judged on its own", detail)
+                    # The spent head's record is kept exactly as it was.
+                    self.assertEqual(
+                        self.drive_state["ci_gate_reruns"]["42"][self.head_sha][
+                            "attempts"
+                        ],
+                        1,
+                    )
+
+    def test_a_spent_head_behind_in_a_dry_run_updates_nothing_and_records_nothing(self):
+        report, update = self._drive_behind(
+            self._rollup(), gate_records=self._spent(), dry_run=True
+        )
+
+        self.assertEqual(update.call_args.kwargs["dry_run"], True)
+        self.assertEqual(self._reruns(), [])
+        self.assertEqual(self.drive_state["ci_gate_reruns"], self._spent())
+
+    def test_a_rerun_in_flight_is_not_updated_underneath_it(self):
+        pending = self._rollup()
+        pending[0] = {**pending[0], "status": "IN_PROGRESS", "conclusion": None}
+        for name, records, rollup in (
+            ("same failure seen again", self._active(), self._rollup()),
+            ("still running", self._active(), pending),
+            ("nothing to compare against", self._active(identity=None), self._rollup()),
+            (
+                "indistinguishable result",
+                self._active(),
+                [
+                    {**item, "detailsUrl": "https://example.test/not-actions"}
+                    if item["name"] == drain_prs.DEFAULT_REQUIRED_CI_CHECK
+                    else item
+                    for item in self._rollup()
+                ],
+            ),
+        ):
+            for ordinary in (False, True):
+                with self.subTest(case=name, ordinary=ordinary):
+                    self.setUp()
+                    report, update = self._drive_behind(
+                        rollup, gate_records=records, ordinary=ordinary
+                    )
+
+                    self.assertEqual(update.call_count, 0)
+                    self.assertEqual(self._reruns(), [])
+                    self.assertEqual(report["reason"], "checks_pending")
+                    self.assertIn("not updated underneath", report["message"])
+
+    def test_a_real_failure_behind_by_a_coordination_only_advance_gets_neither(self):
+        real = self._rollup(job="770002", admission=(("COMPLETED", "SUCCESS"),))
+        for name, records in (("spent", self._spent()), ("rerun result", self._active())):
+            with self.subTest(case=name):
+                self.setUp()
+                report, update = self._drive_behind(real, gate_records=records)
+
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+
+    def test_a_spent_head_that_is_not_behind_is_refused_as_before(self):
+        rollup = self._rollup(job="770002")
+
+        report, error = self._drive_spent_not_behind(rollup)
+
+        self.assertEqual(report["reason"], "checks_failed")
+        self.assertIn("already spent", error)
+        self.assertEqual(self._reruns(), [])
+
+    def _drive_spent_not_behind(self, rollup):
+        self._script_pr_view({"statusCheckRollup": rollup})
+        for _ in range(2):
+            self._script_comment_pages([self._approval()])
+        report = drain_prs.new_single_pr_report(42)
+        try:
+            self._run_process_pr(
+                gates=self._gates(), report=report, gate_records=self._active()
+            )
+        except drain_prs.DrainError as exc:
+            return report, str(exc)
+        return report, None
+
+    def test_a_spent_head_that_conflicts_takes_the_conflict_path(self):
+        rollup = self._rollup(job="770002")
+        self._script_pr_view(
+            {
+                "statusCheckRollup": rollup,
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+            }
+        )
+        for _ in range(2):
+            self._script_comment_pages([self._approval()])
+        report = drain_prs.new_single_pr_report(42)
+        with mock.patch.object(drain_prs, "record_merge_conflict") as conflict, \
+                mock.patch.object(drain_prs, "request_base_update") as update:
+            self._run_process_pr(
+                gates=self._gates(), report=report, gate_records=self._active()
+            )
+
+        self.assertEqual(conflict.call_count, 1)
+        self.assertEqual(update.call_count, 0)
+        self.assertEqual(self._reruns(), [])
+        self.assertEqual(report["reason"], "merge_conflict")
+
+    def test_an_ungated_repository_keeps_a_spent_coordination_only_head_unchanged(self):
+        ungated = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+        # Not even looked at: the ungated decision never reads gate records.
+        report, update = self._drive_behind(
+            self._rollup(), gates=ungated, gate_records=self._spent()
+        )
+
+        self.assertEqual(update.call_count, 0)
+
+    def _unconfirmed(self):
+        return self._active(unconfirmed="9911")
+
+    def test_an_unconfirmed_request_settled_by_a_finished_result_permits_the_update(self):
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
                 report, update = self._drive_behind(
-                    rollup, gates=gates, gate_records=records
+                    self._rollup(job="770002"),
+                    gate_records=self._unconfirmed(),
+                    ordinary=ordinary,
+                )
+
+                self.assertEqual(update.call_count, 1)
+                self.assertEqual(self._reruns(), [])
+                self.assertIsNone(
+                    self.drive_state["ci_gate_reruns"]["42"][self.head_sha][
+                        "unconfirmed"
+                    ]
+                )
+
+    def _drive_proven_never_accepted(self, ordinary, **fresh_overrides):
+        behind = {
+            "statusCheckRollup": self._rollup(),
+            "mergeStateStatus": "BEHIND",
+            **fresh_overrides,
+        }
+        self.fake.script(
+            "gh",
+            ["run", "view", "9911"],
+            stdout=json.dumps({"jobs": [{"databaseId": 770001}]}),
+        )
+        # The fresh read behind the refused rerun, and its feed.
+        self._script_comment_pages([self._approval()])
+        return self._drive_behind(
+            self._rollup(),
+            gate_records=self._unconfirmed(),
+            ordinary=ordinary,
+            fresh=(behind,),
+        )
+
+    def test_an_unconfirmed_request_proven_never_accepted_restores_the_allowance(self):
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                report, update = self._drive_proven_never_accepted(ordinary)
+
+                # Nothing is updated on the earlier snapshot: the allowance is
+                # back and the head is decided again from a fresh read.
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(report["reason"], "checks_pending")
+                self.assertIn("allowance is restored", report["message"])
+                self.assertNotIn("ci_gate_reruns", self.drive_state)
+
+                # The next pass has no record, so the ordinary flow updates it.
+                self.setUp()
+                report, update = self._drive_behind(
+                    self._rollup(), ordinary=ordinary
+                )
+                self.assertEqual(update.call_count, 1)
+
+    def test_a_hold_seen_while_settling_an_unconfirmed_request_blocks_the_update(self):
+        held = self._base_pr_json()["labels"] + [{"name": drain_prs.HOLD_LABEL}]
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                report, update = self._drive_proven_never_accepted(
+                    ordinary, labels=held
                 )
 
                 self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+
+    def test_a_missing_required_check_keeps_the_barrier_of_a_recorded_rerun(self):
+        only_admission = [
+            item
+            for item in self._rollup()
+            if item["name"] != drain_prs.DEFAULT_REQUIRED_CI_CHECK
+        ]
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                report, update = self._drive_behind(
+                    only_admission, gate_records=self._active(), ordinary=ordinary
+                )
+
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(report["reason"], "checks_pending")
+
+    def test_a_baseline_is_captured_so_a_later_finished_attempt_releases_the_barrier(self):
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                # A record that names no attempt to compare against: the first
+                # observable attempt becomes its baseline, and nothing updates.
+                report, update = self._drive_behind(
+                    self._rollup(),
+                    gate_records=self._active(identity=None),
+                    ordinary=ordinary,
+                )
+                self.assertEqual(update.call_count, 0)
+                records = self.drive_state["ci_gate_reruns"]
+                self.assertEqual(
+                    records["42"][self.head_sha]["attempt_identity"], self.FIRST
+                )
+
+                # The next poll, from the state the first one left: the same
+                # failure is still the barrier.
+                self.setUp()
+                report, update = self._drive_behind(
+                    self._rollup(), gate_records=records, ordinary=ordinary
+                )
+                self.assertEqual(update.call_count, 0)
+                records = self.drive_state["ci_gate_reruns"]
+
+                # A different finished attempt is the rerun's own result.
+                self.setUp()
+                report, update = self._drive_behind(
+                    self._rollup(job="770002"),
+                    gate_records=records,
+                    ordinary=ordinary,
+                )
+                self.assertEqual(update.call_count, 1)
+                self.assertEqual(self._reruns(), [])
+
+    def test_an_unconfirmed_request_with_unresolved_evidence_authorizes_nothing(self):
+        for name, rollup in (
+            ("evidence unreadable", self._rollup()),
+            ("check still running", None),
+        ):
+            with self.subTest(case=name):
+                self.setUp()
+                if rollup is None:
+                    rollup = self._rollup()
+                    rollup[0] = {**rollup[0], "status": "IN_PROGRESS", "conclusion": None}
+                else:
+                    self.fake.script(
+                        "gh", ["run", "view", "9911"], stdout=json.dumps({"jobs": []})
+                    )
+                report, update = self._drive_behind(
+                    rollup, gate_records=self._unconfirmed()
+                )
+
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
 
     def test_a_gated_dry_run_requests_nothing_and_says_what_it_would_do(self):
         rollup = self._rollup()
