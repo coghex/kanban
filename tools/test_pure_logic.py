@@ -3309,6 +3309,159 @@ class UngatedCiRerunUnchangedTests(unittest.TestCase):
         self.assertNotIn("ci_gate_reruns", state)
 
 
+class GatedRerunStandingTests(unittest.TestCase):
+    """Issue #859: where a head's one gated rerun stands, read without a request.
+
+    `gated_rerun_standing` is pure -- state and the rollup only -- so each case
+    states the record and the rollup and asserts the standing. The same names
+    drive `candidate_block_reason`'s `ignore_exhausted` and the merge-state read
+    that lifts the polling skip.
+    """
+
+    HEAD = "a" * 40
+
+    def _pr(self, *, status="COMPLETED", conclusion="FAILURE", job="770001"):
+        check = {
+            "name": "build-test",
+            "status": status,
+            "conclusion": conclusion,
+            "completedAt": "2026-08-01T00:00:00Z",
+        }
+        if job is not None:
+            check["detailsUrl"] = (
+                f"https://github.com/acme/widgets/actions/runs/9911/job/{job}"
+            )
+        return {"number": 42, "headRefOid": self.HEAD, "statusCheckRollup": [check]}
+
+    def _state(self, **record):
+        state = {"version": drain_prs.STATE_VERSION, "prs": {"42": {}}}
+        if record:
+            state["ci_gate_reruns"] = {"42": {self.HEAD: record}}
+        return state
+
+    def _standing(self, state, pr):
+        return drain_prs.gated_rerun_standing(state, pr, "build-test")
+
+    def test_a_head_with_no_record_has_nothing_spent(self):
+        self.assertEqual(
+            self._standing(self._state(), self._pr()), drain_prs.GATED_STANDING_NONE
+        )
+
+    def test_a_finished_spent_record_is_spent(self):
+        state = self._state(attempts=1, active=False)
+        self.assertEqual(
+            self._standing(state, self._pr()), drain_prs.GATED_STANDING_SPENT
+        )
+
+    def test_an_active_request_is_in_flight_until_a_different_finished_attempt(self):
+        active = {"attempts": 1, "active": True, "attempt_identity": "9911/770001"}
+        cases = (
+            ("same failure again", self._pr(), drain_prs.GATED_STANDING_IN_FLIGHT),
+            (
+                "still running",
+                self._pr(status="IN_PROGRESS", conclusion=None),
+                drain_prs.GATED_STANDING_IN_FLIGHT,
+            ),
+            (
+                "result names no attempt",
+                self._pr(job=None),
+                drain_prs.GATED_STANDING_IN_FLIGHT,
+            ),
+            (
+                "different finished attempt",
+                self._pr(job="770002"),
+                drain_prs.GATED_STANDING_SPENT,
+            ),
+            (
+                "the rerun passed",
+                self._pr(conclusion="SUCCESS"),
+                drain_prs.GATED_STANDING_NONE,
+            ),
+        )
+        for name, pr, expected in cases:
+            with self.subTest(case=name):
+                self.assertEqual(self._standing(self._state(**active), pr), expected)
+
+    def test_a_request_with_nothing_to_compare_against_stays_in_flight(self):
+        state = self._state(attempts=1, active=True, attempt_identity=None)
+        self.assertEqual(
+            self._standing(state, self._pr(job="770002")),
+            drain_prs.GATED_STANDING_IN_FLIGHT,
+        )
+
+    def test_an_unconfirmed_request_is_unsettled_whatever_the_rollup_shows(self):
+        state = self._state(
+            attempts=1, active=True, attempt_identity="9911/770001", unconfirmed="9911"
+        )
+        self.assertEqual(
+            self._standing(state, self._pr(job="770002")),
+            drain_prs.GATED_STANDING_UNSETTLED,
+        )
+
+    def test_the_standing_reads_nothing_and_writes_nothing(self):
+        state = self._state(attempts=1, active=True, attempt_identity="9911/770001")
+        before = json.dumps(state, sort_keys=True)
+
+        with mock.patch.object(drain_prs, "run") as run, mock.patch.object(
+            drain_prs, "get_pr"
+        ) as get_pr:
+            self._standing(state, self._pr(job="770002"))
+
+        self.assertEqual(json.dumps(state, sort_keys=True), before)
+        run.assert_not_called()
+        get_pr.assert_not_called()
+
+    def test_ignore_exhausted_lifts_only_the_exhausted_block(self):
+        state = {
+            "attempt_counter": 10,
+            "prs": {
+                "42": {
+                    "ci_rerun_exhausted_head": self.HEAD,
+                    "retry_after_attempt": 0,
+                }
+            },
+        }
+        pr = {"number": 42, "headRefOid": self.HEAD}
+        self.assertEqual(
+            drain_prs.candidate_block_reason(pr, state), "ci_rerun_exhausted"
+        )
+        self.assertIsNone(
+            drain_prs.candidate_block_reason(pr, state, ignore_exhausted=True)
+        )
+        state["prs"]["42"]["retry_after_attempt"] = 11
+        self.assertEqual(
+            drain_prs.candidate_block_reason(pr, state, ignore_exhausted=True),
+            "cooling_down",
+        )
+
+    def test_only_behind_or_conflicting_lifts_the_polling_skip(self):
+        ctx = drain_prs.RepoContext(
+            Path("/fake-repo"), "acme/widgets", "widgets", "master"
+        )
+        cases = (
+            ({"mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE"}, True),
+            ({"mergeStateStatus": "DIRTY", "mergeable": "CONFLICTING"}, True),
+            ({"mergeStateStatus": "CLEAN", "mergeable": "CONFLICTING"}, True),
+            ({"mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}, False),
+            ({"mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE"}, False),
+        )
+        for fresh, expected in cases:
+            with self.subTest(fresh=fresh):
+                with mock.patch.object(drain_prs, "get_pr", return_value=fresh):
+                    self.assertEqual(
+                        drain_prs.spent_head_owes_base_decision(ctx, 42), expected
+                    )
+
+    def test_an_unreadable_merge_state_leaves_the_head_skipped(self):
+        ctx = drain_prs.RepoContext(
+            Path("/fake-repo"), "acme/widgets", "widgets", "master"
+        )
+        with mock.patch.object(
+            drain_prs, "get_pr", side_effect=drain_prs.DrainError("gh failed")
+        ):
+            self.assertFalse(drain_prs.spent_head_owes_base_decision(ctx, 42))
+
+
 class MigrateGatedRerunRecordTests(unittest.TestCase):
     def _state(self, records):
         return {
