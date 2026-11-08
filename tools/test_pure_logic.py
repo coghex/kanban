@@ -3363,6 +3363,11 @@ class GatedRerunStandingTests(unittest.TestCase):
                 drain_prs.GATED_STANDING_IN_FLIGHT,
             ),
             (
+                "required check missing from the rollup",
+                {**self._pr(), "statusCheckRollup": []},
+                drain_prs.GATED_STANDING_IN_FLIGHT,
+            ),
+            (
                 "result names no attempt",
                 self._pr(job=None),
                 drain_prs.GATED_STANDING_IN_FLIGHT,

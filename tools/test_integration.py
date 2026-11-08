@@ -7073,29 +7073,111 @@ class GatedProcessPrRerunTests(ProcessPrFixture):
                     ]
                 )
 
+    def _drive_proven_never_accepted(self, ordinary, **fresh_overrides):
+        behind = {
+            "statusCheckRollup": self._rollup(),
+            "mergeStateStatus": "BEHIND",
+            **fresh_overrides,
+        }
+        self.fake.script(
+            "gh",
+            ["run", "view", "9911"],
+            stdout=json.dumps({"jobs": [{"databaseId": 770001}]}),
+        )
+        # The fresh read behind the refused rerun, and its feed.
+        self._script_comment_pages([self._approval()])
+        return self._drive_behind(
+            self._rollup(),
+            gate_records=self._unconfirmed(),
+            ordinary=ordinary,
+            fresh=(behind,),
+        )
+
     def test_an_unconfirmed_request_proven_never_accepted_restores_the_allowance(self):
-        behind = {"statusCheckRollup": self._rollup(), "mergeStateStatus": "BEHIND"}
         for ordinary in (False, True):
             with self.subTest(ordinary=ordinary):
                 self.setUp()
-                self.fake.script(
-                    "gh",
-                    ["run", "view", "9911"],
-                    stdout=json.dumps({"jobs": [{"databaseId": 770001}]}),
-                )
-                # The fresh read behind the refused rerun, and its feed.
-                self._script_comment_pages([self._approval()])
+                report, update = self._drive_proven_never_accepted(ordinary)
+
+                # Nothing is updated on the earlier snapshot: the allowance is
+                # back and the head is decided again from a fresh read.
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(report["reason"], "checks_pending")
+                self.assertIn("allowance is restored", report["message"])
+                self.assertNotIn("ci_gate_reruns", self.drive_state)
+
+                # The next pass has no record, so the ordinary flow updates it.
+                self.setUp()
                 report, update = self._drive_behind(
-                    self._rollup(),
-                    gate_records=self._unconfirmed(),
-                    ordinary=ordinary,
-                    fresh=(behind,),
+                    self._rollup(), ordinary=ordinary
+                )
+                self.assertEqual(update.call_count, 1)
+
+    def test_a_hold_seen_while_settling_an_unconfirmed_request_blocks_the_update(self):
+        held = self._base_pr_json()["labels"] + [{"name": drain_prs.HOLD_LABEL}]
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                report, update = self._drive_proven_never_accepted(
+                    ordinary, labels=held
                 )
 
-                # The ordinary flow then updates it; the allowance is back.
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+
+    def test_a_missing_required_check_keeps_the_barrier_of_a_recorded_rerun(self):
+        only_admission = [
+            item
+            for item in self._rollup()
+            if item["name"] != drain_prs.DEFAULT_REQUIRED_CI_CHECK
+        ]
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                report, update = self._drive_behind(
+                    only_admission, gate_records=self._active(), ordinary=ordinary
+                )
+
+                self.assertEqual(update.call_count, 0)
+                self.assertEqual(self._reruns(), [])
+                self.assertEqual(report["reason"], "checks_pending")
+
+    def test_a_baseline_is_captured_so_a_later_finished_attempt_releases_the_barrier(self):
+        for ordinary in (False, True):
+            with self.subTest(ordinary=ordinary):
+                self.setUp()
+                # A record that names no attempt to compare against: the first
+                # observable attempt becomes its baseline, and nothing updates.
+                report, update = self._drive_behind(
+                    self._rollup(),
+                    gate_records=self._active(identity=None),
+                    ordinary=ordinary,
+                )
+                self.assertEqual(update.call_count, 0)
+                records = self.drive_state["ci_gate_reruns"]
+                self.assertEqual(
+                    records["42"][self.head_sha]["attempt_identity"], self.FIRST
+                )
+
+                # The next poll, from the state the first one left: the same
+                # failure is still the barrier.
+                self.setUp()
+                report, update = self._drive_behind(
+                    self._rollup(), gate_records=records, ordinary=ordinary
+                )
+                self.assertEqual(update.call_count, 0)
+                records = self.drive_state["ci_gate_reruns"]
+
+                # A different finished attempt is the rerun's own result.
+                self.setUp()
+                report, update = self._drive_behind(
+                    self._rollup(job="770002"),
+                    gate_records=records,
+                    ordinary=ordinary,
+                )
                 self.assertEqual(update.call_count, 1)
                 self.assertEqual(self._reruns(), [])
-                self.assertNotIn("ci_gate_reruns", self.drive_state)
 
     def test_an_unconfirmed_request_with_unresolved_evidence_authorizes_nothing(self):
         for name, rollup in (

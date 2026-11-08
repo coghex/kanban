@@ -6497,7 +6497,8 @@ def gated_rerun_standing(
     if record.get("active"):
         check = latest_check(pr, check_name)
         check_state = classify_check(check)
-        if check_state == "pending":
+        if check_state in {"pending", "missing"}:
+            # A check the rollup does not show is no finished result either.
             return GATED_STANDING_IN_FLIGHT
         if check_state == "failure":
             recorded = record.get("attempt_identity")
@@ -6567,6 +6568,22 @@ def gated_behind_decision(
         return True
 
     if standing == GATED_STANDING_IN_FLIGHT:
+        if build_state == "failure":
+            # The existing barrier keeps its bookkeeping: a record that names
+            # no attempt to compare against takes the first observable one as
+            # its baseline here, so a later, different finished attempt can
+            # release it. It requests nothing while the rerun is in flight.
+            rerun_failed_ci(
+                ctx,
+                pr,
+                state=state,
+                check_name=check_name,
+                dry_run=dry_run,
+                gate=CiGate(
+                    admission_check=gates.ci_admission_check,
+                    default_branch=ctx.default_branch,
+                ),
+            )
         log(
             f"PR #{number}: behind {ctx.default_branch} with an automatic rerun "
             "in flight; not updating the branch underneath it"
@@ -6601,9 +6618,26 @@ def gated_behind_decision(
             int(entry.get("ci_rerun_attempts") or 0) >= GATED_RERUN_LIMIT
             and not entry.get("ci_rerun_active")
         ):
-            # The request was proven never accepted and its allowance is back:
-            # the ordinary flow below treats the head as it would a fresh one.
-            return None
+            # The request was proven never accepted and its allowance is back.
+            # The settlement read the pull request afresh and may have refused
+            # for a condition this pass's snapshot never saw (a hold, a
+            # withdrawn approval), so nothing is updated on the strength of
+            # the earlier snapshot: the head is decided again, from a fresh
+            # read, on the next pass, as any head without a record is.
+            log(
+                f"PR #{number}: the rerun request left unconfirmed was never "
+                "accepted; its allowance is restored and the head is decided "
+                "again next pass"
+            )
+            set_outcome(
+                report,
+                "checks_pending",
+                f"PR #{number} is behind {ctx.default_branch}; the rerun request "
+                f"left unconfirmed for {check_name} was never accepted, so its "
+                "allowance is restored and the head is decided again from a "
+                f"fresh read, polling again in {CI_RERUN_INTERVAL_SECONDS}s.",
+            )
+            return True
         standing = GATED_STANDING_SPENT
     if standing != GATED_STANDING_SPENT:
         return None
