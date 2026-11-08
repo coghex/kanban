@@ -1029,7 +1029,9 @@ A candidate's turn ends in one of three ways.
   incident, as below), has a required check that failed with every automatic
   rerun of that head already spent (in a
   [gated repository](#gated-repositories-ci_admission_check), one that failed as a real
-  failure or whose one rerun is spent or refused), has a required check that has reported
+  failure or whose one rerun is spent or refused, unless a fresh read finds the spent head behind
+  its base or conflicting, in which case it is [decided](#gated-repositories-ci_admission_check)
+  rather than skipped), has a required check that has reported
   nothing for its current head for longer than the ten-minute grace period
   after its check runs completed (recorded as an incident, as [below](#required-checks-that-never-report)),
   has moved to a head no review has cleared, or is still cooling down after a
@@ -1092,7 +1094,9 @@ results.** Each `gh run rerun` this drainer issues advances `ci_rerun_attempts`
 by one, and repeated sightings of the failure that provoked it advance nothing.
 The head is quarantined — the `checks_failed` refusal, and the durable skip on
 every later pass — only once the capped request's own result comes back as a
-distinguishable failure. Exhausting a head therefore takes that many requests
+distinguishable failure. (A gated repository's quarantined head that has fallen
+behind its base is the one exception: it is [updated](#gated-repositories-ci_admission_check),
+not skipped.) Exhausting a head therefore takes that many requests
 that each completed as a failure, rather than that many polls that happened to
 read one stale rollup.
 
@@ -1143,8 +1147,8 @@ read that fails authorizes nothing.
    paths keep owning those. That includes a head that is behind only by a
    [coordination-only advance](#merging-past-a-coordination-only-base-advance): passing CI still
    merges past it, but a gated-out failure cannot be rerun while the head is behind, so such a head
-   is updated first and the new head is judged on its own (unless its rerun is already spent or in
-   flight, in which case it keeps its barrier or refusal).
+   is updated first and the new head is judged on its own. A head whose one rerun is already
+   spent is handled the same way (see below), and one whose rerun is in flight keeps its barrier.
 3. The head has a live approval, and no `CHANGES_REQUESTED` marker vetoes the head. An approval is
    live in one of two ways. Either the newest review marker the drainer accepts names exactly this
    head with verdict `APPROVE` (nothing else is consulted), or the approval is a **carried
@@ -1188,10 +1192,48 @@ attempt or a real failure, the head is left alone, with the `checks_failed` refu
 skip of a spent head, until a new head arrives; a gated repository never makes a second
 gate-driven request for a head, whatever `MAX_CI_RERUN_ATTEMPTS` would allow an ungated one.
 
+**A spent head that has fallen behind its base is updated, not left (issue #859).** The default
+branch moves between a branch update and the admission that follows it (a `docs-push` is enough),
+so a rerun can be gated out again for a reason an update cures. When the head's one rerun is
+spent (its own result is a distinguishable finished attempt, again gated out) and the pull
+request's `mergeStateStatus` is `BEHIND`, the pass's whole action is the ordinary branch update,
+with the same hold, outage-retry and network-failure handling as for any behind head, in the
+polling queue and in `--pr` alike; no rerun is requested for the old head. The log, the report
+and the dry-run line say why: the rerun for this head is spent and the head is behind, so its
+branch is updated and the new head is judged on its own. "Behind" is read from `mergeStateStatus`
+alone, never from admission's refusal text, a job log or a workflow file, and no job names are
+hard-coded. The updated head is a new head with its own fresh once-per-head allowance and every
+rule above applies to it unchanged; the spent head's record is kept as it was. The pieces:
+
+- A head whose rerun is still in flight is never updated underneath it, whether it is behind by
+  an ordinary or a coordination-only advance: a request recorded as made whose result is not yet
+  a distinguishable finished attempt (still running, nothing recorded to compare against, or a
+  result that names no attempt) keeps its barrier and is polled again. A request left unconfirmed
+  by a network failure is settled first, by the rule above: a distinguishable finished result
+  settles it (and a spent one is then updated), proof it was never accepted gives the allowance
+  back (and the head is then updated like any fresh behind head), and evidence that settles
+  nothing authorizes neither an update nor a repeated request.
+- A head behind only by a [coordination-only advance](#merging-past-a-coordination-only-base-advance)
+  is updated for a gated-out failure whose rerun is spent exactly as one with no rerun yet is. A
+  real failure after admission there still gets neither a rerun nor an update, and passing CI still
+  merges past the advance.
+- A spent head that is not behind keeps the `checks_failed` refusal ("already spent ... leaving it
+  for a new head") and the durable skip. One that conflicts keeps the conflict path: an incident,
+  no update, no rerun. The polling queue lifts its durable skip of a spent head only while a fresh
+  read of that pull request shows it behind or conflicting; that read is one `gh pr view` per
+  skipped gated head per pass.
+- A repository without `ci_admission_check` is decided exactly as before.
+- Nothing bounds the updates. If the default branch keeps moving before each admission runs, each
+  update produces a new head that costs at most its one gated rerun, and a further advance makes
+  it behind again, so the same rule updates it again. No cap, counter or cooldown is added: the
+  number of updates follows the default branch's advances and is as unbounded as the existing
+  behind-head path already is for any other behind head.
+
 **A refusal ends the pass with `checks_failed` and says which condition failed**, in distinct
 wording: a real failure after admission; the admission check still queued or in progress; an
 admitted attempt present; the head moved or the pull request no longer eligible; the head behind
-or conflicting; no live approval at this head; the head's one rerun already spent. The
+or conflicting; no live approval at this head; the head's one rerun already spent (while the head
+is behind, that is the update above rather than a refusal). The
 no-live-approval wording says which it is: that no accepted review marker approves the head at all,
 or that the newest marker approves an earlier head and `dismiss-stale-approval` has not confirmed
 the carry (naming whether it failed, is missing or only skipped, or has not settled yet, in which
